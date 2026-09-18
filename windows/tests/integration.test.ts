@@ -48,6 +48,9 @@ test('Windows end-to-end: real core, two exits, HTTPS, launch/guard, rollback, c
     const a=upstream('A',events),b=upstream('B',events);resources.push(a,b);const pa=await listen(a),pb=await listen(b);
     const profileA=await s.addManaged('出口 A',await freePort(),[{name:'A',protocol:'http',server:'127.0.0.1',server_port:pa,selected:true}]);
     const profileB=await s.addManaged('出口 B',await freePort(),[{name:'B',protocol:'http',server:'127.0.0.1',server_port:pb,selected:true}]);
+    await assert.rejects(()=>s.prepareProfile('missing'),/代理不存在/);
+    assert.equal((await s.prepareProfile(profileA.id)).id,profileA.id);
+    assert.ok(await s.core.running(),'setup starts the selected managed proxy before app registration');
     const first=await s.core.start();assert.equal((await s.core.start()).pid,first.pid);
     assert.equal((await proxyRequest(profileA,url)).body,'controlled-origin');assert.equal((await proxyRequest(profileB,url)).body,'controlled-origin');
     assert.ok(events.some(x=>x.startsWith('A ')&&x.includes(String(targetPort))),JSON.stringify(events));assert.ok(events.some(x=>x.startsWith('B ')&&x.includes(String(targetPort))),JSON.stringify(events));

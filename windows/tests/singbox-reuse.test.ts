@@ -47,6 +47,7 @@ test('reuse an independent sing-box service and executable without adopting its 
     await s.settings({testUrl:url,exitUrl:url});
     const found=await s.discoverSingBox();assert.equal(found.available[0].port,port);
     const reused=await s.useSingBox('existing',port);assert.equal(reused.kind,'sing-box');
+    assert.equal((await s.prepareProfile(reused.id)).id,reused.id);
     assert.equal(await exists(s.store.path('config/sing-box.json')),false);
     assert.equal(await s.core.running(),undefined);
     await assert.rejects(()=>s.useSingBox('ordinary-http',originPort),/不是当前可识别/);

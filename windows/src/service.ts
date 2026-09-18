@@ -23,6 +23,18 @@ export class Service {
     }
     return app;
   }
+  async prepareProfile(id: string) {
+    return this.store.lock(async () => {
+      const state = await this.store.read();
+      const profile = state.profiles.find(p => p.id === id);
+      if (!profile) throw new Error('代理不存在');
+      if (profile.kind === 'managed') {
+        await this.core.startUnlocked(state,id);
+        await probe(profile,state.settings.testUrl);
+      } else await verifyListener(this.native,profile,state.settings.testUrl);
+      return profile;
+    });
+  }
   async discoverSingBox() {
     const state = await this.store.read(); const active = await this.core.running();
     const found = await discovery(this.native);

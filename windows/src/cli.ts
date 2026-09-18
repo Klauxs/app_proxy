@@ -5,6 +5,9 @@ import { parse, download } from './subscription.ts';
 import { port, redact } from './store.ts';
 import { shortcut } from './integration.ts';
 import type { NodeSpec, Profile } from './types.ts';
+import { tcp } from './proxy.ts';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const help = `Windows App Proxy 0.2
 不带命令打开中文菜单。所有命令都可加 --home <数据目录>。
@@ -117,29 +120,39 @@ async function dispatch(s: Service, args: string[]) {
     default: throw new Error('未知命令；运行 help 查看用法');
   }
 }
-async function menu(s: Service) {
-  const rl = createInterface({ input:process.stdin, output:process.stdout });
-  const ask = async (prompt:string) => (await rl.question(prompt)).trim();
+export async function menu(s: Service, prompt?: (message:string) => Promise<string>) {
+  const rl = prompt ? undefined : createInterface({ input:process.stdin, output:process.stdout });
+  const ask = async (message:string) => (await (prompt ? prompt(message) : rl!.question(message))).trim();
   const yes = async (prompt:string) => /^(y|yes|是)$/i.test(await ask(prompt + ' [y/N]：'));
   const pick = async <T extends {name:string}>(items:T[], prompt:string): Promise<T> => {
     if (!items.length) throw new Error('暂无记录，请先添加'); items.forEach((x,i)=>console.log(`${i+1}. ${x.name}`));
     const n=Number(await ask(prompt))-1; if (!Number.isInteger(n)||!items[n]) throw new Error('选择无效'); return items[n];
   };
   const binding = async () => {
-    let profiles=(await s.store.read()).profiles;
-    if(!profiles.length) {await reuseExisting();profiles=(await s.store.read()).profiles;}
-    console.log('0. 直连'); profiles.forEach((p,i)=>console.log(`${i+1}. ${p.name} (${p.port}${p.kind==='sing-box'?'，已有服务':''})`));
-    const n=Number(await ask('代理编号：')); if(n===0)return undefined; if(!profiles[n-1])throw new Error('选择无效'); return profiles[n-1].id;
+    const profiles=(await s.store.read()).profiles;
+    if(!profiles.length) {
+      console.log('先准备应用要使用的代理，验证成功后继续添加应用。');
+      return (await createProxy(false,true))?.id;
+    }
+    profiles.forEach((p,i)=>console.log(`${i+1}. ${p.name} (${p.port}${p.kind==='sing-box'?'，已有服务':''})`));
+    console.log('n. 添加新的代理或订阅\n0. 直连（不启用 Guard）\nb. 返回');
+    const answer=await ask(`选择应用要使用的代理${profiles.length===1?'（回车使用 '+profiles[0].name+'）':''}：`);
+    if(answer.toLowerCase()==='b')throw new Error('已取消，返回主菜单');
+    if(answer.toLowerCase()==='n')return (await createProxy(true))?.id;
+    if(answer==='0')return undefined;
+    const n=Number(answer||(profiles.length===1?'1':''));
+    if(!Number.isInteger(n)||!profiles[n-1])throw new Error('请选择列表中的代理，或输入 n 新建');
+    return (await readyProxy(profiles[n-1])).id;
   };
   const reuseExisting = async () => {
     console.log('正在查找并验证已有 sing-box 服务…');
     const found=await s.discoverSingBox();
-    if(!found.available.length){console.log('未发现可复用的 HTTP/mixed 入口。可添加订阅或手动上游；需要程序时会优先查找本机安装，缺失则安装。');return false;}
+    if(!found.available.length){console.log('未发现可复用的代理，接下来配置订阅或手动上游；sing-box 程序会优先使用本机安装，缺失时协助安装。');return undefined;}
     found.available.forEach((p,i)=>console.log(`${i+1}. ${p.host}:${p.port} (${p.version})`));
-    const answer=await ask('复用编号（回车选 1，0 跳过）：');if(answer==='0')return false;
+    const answer=await ask('使用已有代理（回车选 1，0 配置新的代理）：');if(answer==='0')return undefined;
     const chosen=found.available[Number(answer||'1')-1];if(!chosen)throw new Error('选择无效');
     const p=await s.useSingBox(`已有 sing-box ${chosen.port}`,chosen.port,chosen.host);
-    out({id:p.id,name:p.name});return true;
+    out({id:p.id,name:p.name});return p;
   };
   const chooseNodes = async (nodes:NodeSpec[]) => {
     const countries=[...new Set(nodes.map(n=>String(n.country || 'Unknown')))];
@@ -150,6 +163,57 @@ async function menu(s: Service) {
     const names = new Set(selected.map(n=>n.name)); if(names.size!==selected.length)throw new Error('所选节点重名，请修正订阅');
     return nodes.map(n=>({...n,selected:names.has(n.name)}));
   };
+  const readyProxy = async (profile:Profile) => {
+    console.log(`正在启动并验证代理「${profile.name}」…`);
+    const ready=await s.prepareProfile(profile.id);
+    console.log(`代理「${ready.name}」已就绪。`);
+    return ready;
+  };
+  const createProxy = async (skipDiscovery=false,allowDirect=false):Promise<Profile|undefined> => {
+    if(!skipDiscovery) {
+      const existing=await reuseExisting();
+      if(existing){console.log(`代理「${existing.name}」已验证，将直接使用。`);return existing;}
+    }
+    const type=await ask(`配置代理：1订阅（默认） 2手动上游${allowDirect?' d仅直连（不启用 Guard）':''} 0返回：`);
+    if(type==='0')throw new Error('已取消，返回主菜单');
+    if(allowDirect&&type.toLowerCase()==='d')return undefined;
+    if(!['','1','2'].includes(type))throw new Error('请选择订阅或手动上游');
+    const name=(await ask('代理名称（回车使用“我的代理”）：'))||'我的代理';
+    const used=new Set((await s.store.read()).profiles.map(p=>p.port));
+    let suggested=18099;
+    while(suggested<=65535&&(used.has(suggested)||await tcp('127.0.0.1',suggested,150)))suggested++;
+    if(suggested>65535)throw new Error('没有可用的本地监听端口');
+    const listen=port((await ask(`本地监听端口（回车使用 ${suggested}）：`))||suggested);
+    let p:Profile;
+    if(type==='2') {
+      const protocol=await ask('上游协议 http / socks5：');
+      const server=await ask('上游地址：'); const server_port=port(await ask('上游端口：'));
+      const username=await ask('用户名（可空）：'); const password=username?await ask('密码（仅存入受限数据目录，不打印摘要）：'):'';
+      const useTls=protocol==='http'&&await yes('上游 HTTP 代理连接使用 TLS');
+      p=await s.addManaged(name,listen,[manual({name,protocol,server,server_port,username,password,tls:useTls})]);
+    } else {
+      const url=await ask('订阅 URL：'); const r=parse(await download(url));
+      console.log(`解析 ${r.nodes.length} 个节点，不支持 ${r.unsupported.length} 项`);
+      if(r.unsupported.length)out(r.unsupported.map(n=>({protocol:n.protocol,reason:redact(n.reason)})));
+      if(!r.nodes.length)throw new Error('订阅没有可用节点');
+      p=await s.addManaged(name,listen,await chooseNodes(r.nodes),{kind:'subscription',url});
+    }
+    try {return await readyProxy(p);}
+    catch(e:any){throw new Error(`代理配置已保存，但联网验证失败：${e.message}。修正配置后再添加应用`);}
+  };
+  const addApplication = async (profileId?:string) => {
+    const name=await ask('应用名称：'); const exe=(await ask('EXE 路径（可粘贴带引号路径）：')).replace(/^"|"$/g,'');
+    const mode=await ask('启动方式：0普通应用 1Codex 空白分身 2Claude 空白分身（默认 0）：');
+    if (!['','0','1','2'].includes(mode)) throw new Error('启动方式无效');
+    const instance=mode==='1'?'codex':mode==='2'?'claude':undefined;
+    const adapter=instance||await yes('是否确认该应用支持 Chromium/Electron --proxy-server 参数')?'chromium':'environment';
+    const argsText=await ask('附加参数 JSON 数组（空白为 []）：');
+    console.log('Codex/Claude 桌面应用及其分身绑定代理后默认启用 Guard，首次或更新监听时需要 UAC 授权；之后可在 Guard 菜单停用。');
+    const a=await s.addApp({name,exe,adapter,instance,args:argsText?JSON.parse(argsText):[],profileId});
+    if(await yes('创建桌面快捷方式'))out(await shortcut(s.store,s.native,a.id));
+    if(!a.guard && adapter==='chromium' && a.profileId && await yes('启用 Guard（误启动会关闭并代理重启，首次需要 UAC 授权监听）')){await s.guard.enable(a.id,true);a.guard=true;}
+    out({id:a.id,name:a.name,guard:a.guard});
+  };
   try {
     while(true) {
       console.log('\nApp Proxy — Windows\n1. 添加应用\n2. 管理/启动应用\n3. 添加代理或订阅\n4. 管理节点/刷新订阅\n5. sing-box 内核\n6. Guard 防误触\n7. 状态与诊断\n8. DNS/探测设置\n9. 卸载\n0. 退出');
@@ -158,17 +222,7 @@ async function menu(s: Service) {
         if(choice==='0') break;
         switch(choice) {
           case '1': {
-            const name=await ask('应用名称：'); const exe=(await ask('EXE 路径（可粘贴带引号路径）：')).replace(/^"|"$/g,'');
-            const mode=await ask('启动方式：0普通应用 1Codex 空白分身 2Claude 空白分身（默认 0）：');
-            if (!['','0','1','2'].includes(mode)) throw new Error('启动方式无效');
-            const instance=mode==='1'?'codex':mode==='2'?'claude':undefined;
-            const adapter=instance||await yes('是否确认该应用支持 Chromium/Electron --proxy-server 参数')?'chromium':'environment';
-            const argsText=await ask('附加参数 JSON 数组（空白为 []）：');
-            console.log('Codex/Claude 桌面应用及其分身绑定代理后默认启用 Guard，首次或更新监听时需要 UAC 授权；之后可在 Guard 菜单停用。');
-            const a=await s.addApp({name,exe,adapter,instance,args:argsText?JSON.parse(argsText):[],profileId:await binding()});
-            if(await yes('创建桌面快捷方式'))out(await shortcut(s.store,s.native,a.id));
-            if(!a.guard && adapter==='chromium' && a.profileId && await yes('启用 Guard（误启动会关闭并代理重启，首次需要 UAC 授权监听）')){await s.guard.enable(a.id,true);a.guard=true;}
-            out({id:a.id,name:a.name,guard:a.guard}); break;
+            await addApplication(await binding());break;
           }
           case '2': {
             const a=await pick((await s.store.read()).apps,'应用编号：');
@@ -182,25 +236,9 @@ async function menu(s: Service) {
             break;
           }
           case '3': {
-            if(await reuseExisting())break;
-            const type=await ask('1订阅 2手动上游：');
-            const name=await ask('代理名称：');
-            const listen=port(await ask('本地监听端口（如 18099）：'));
-            let p:Profile;
-            if(type==='2') {
-              const protocol=await ask('上游协议 http / socks5：');
-              const server=await ask('上游地址：'); const server_port=port(await ask('上游端口：'));
-              const username=await ask('用户名（可空）：'); const password=username?await ask('密码（仅存入受限数据目录，不打印摘要）：'):'';
-              const useTls=protocol==='http'&&await yes('上游 HTTP 代理连接使用 TLS');
-              p=await s.addManaged(name,listen,[manual({name,protocol,server,server_port,username,password,tls:useTls})]);
-            } else if(type==='1') {
-              const url=await ask('订阅 URL：'); const r=parse(await download(url));
-              console.log(`解析 ${r.nodes.length} 个节点，不支持 ${r.unsupported.length} 项`);
-              if(r.unsupported.length)out(r.unsupported.map(n=>({protocol:n.protocol,reason:redact(n.reason)})));
-              if(!r.nodes.length)throw new Error('订阅没有可用节点');
-              p=await s.addManaged(name,listen,await chooseNodes(r.nodes),{kind:'subscription',url});
-            } else throw new Error('选择无效');
-            out({id:p.id,name:p.name}); if(await yes('现在启动内核并诊断此入口')){await s.core.start();out(await s.doctor(p.id));} break;
+            const p=await createProxy();
+            if(p&&await yes('代理已就绪，现在添加应用并使用此代理'))await addApplication(p.id);
+            break;
           }
           case '4': {
             const p=await pick((await s.store.read()).profiles,'代理编号：');
@@ -256,9 +294,10 @@ async function menu(s: Service) {
         }
       } catch(e:any){console.error('操作未完成：'+redact(String(e.message)));}
     }
-  } finally { rl.close(); }
+  } finally { rl?.close(); }
 }
 
+if(process.argv[1]&&resolve(process.argv[1]).toLowerCase()===fileURLToPath(import.meta.url).toLowerCase()) {
 const args=process.argv.slice(2); let home:string|undefined; let notify=false;
 for(let i=0;i<args.length;){if(args[i]==='--home'){home=need(args[i+1],'home');args.splice(i,2);}else if(args[i]==='--notify'){notify=true;args.splice(i,1);}else i++;}
 if(args[0]==='help'||args[0]==='--help'||args[0]==='-h'){out(help);}else{
@@ -266,4 +305,5 @@ if(args[0]==='help'||args[0]==='--help'||args[0]==='-h'){out(help);}else{
   try{await service.init(); if(args.length)await dispatch(service,args);else if(process.stdin.isTTY)await menu(service);else out(help);}
   catch(e:any){const message=redact(String(e.message));console.error(message);process.exitCode=1;await service.store.log('error',message).catch(()=>{});if(notify)await service.native.call('alert',{message}).catch(()=>{});}
   finally{service.close();}
+}
 }
