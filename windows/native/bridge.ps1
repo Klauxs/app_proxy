@@ -207,7 +207,16 @@ while ($null -ne ($line = [Console]::ReadLine())) {
               $null = $process.Handle
               $actual = Assert-Identity $request.identity
               if ($actual -and -not $process.HasExited) {
-                if ($process.CloseMainWindow()) { $null = $process.WaitForExit(1500) }
+                $graceMs = 1500
+                $immediate = $false
+                if ($request.guardCorrection -eq $true) {
+                  $graceMs = 500
+                  $ageMs = ([DateTime]::UtcNow - [DateTime]::Parse($actual.created).ToUniversalTime()).TotalMilliseconds
+                  $hasProxy = @($actual.args | Where-Object { $_ -match '^--proxy-(server|pac-url)(=|$)' }).Count -gt 0
+                  $helper = @($actual.args | Where-Object { $_ -match '^--(type|crashpad-handler)(=|$)' }).Count -gt 0
+                  $immediate = $ageMs -ge 0 -and $ageMs -le 5000 -and $actual.args.Count -gt 0 -and -not $hasProxy -and -not $helper
+                }
+                if (-not $immediate -and $process.CloseMainWindow()) { $null = $process.WaitForExit($graceMs) }
                 if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(3000) }
               }
             } finally { $process.Dispose() }

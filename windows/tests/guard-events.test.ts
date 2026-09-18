@@ -28,7 +28,7 @@ test('Guard never treats missing arguments as direct launch; a fresh readable pr
     let stopped = false;
     let launched = false;
     s.native.processes = async () => stopped ? [] : [target];
-    s.native.stop = async () => { assert.ok(Date.now() - Date.parse(target.created) < 1200); stopped = true; };
+    s.native.stop = async (_identity, guardCorrection) => { assert.equal(guardCorrection,true); assert.ok(Date.now() - Date.parse(target.created) < 1200); stopped = true; };
     s.apps.launchUnlocked = async () => { launched = true; return {pid:456,running:true,proxy:undefined,evidence:'fixture'}; };
     const name = basename(target.path).toLowerCase();
     assert.ok((await s.guard.tick(new Set([name]))).has(name));

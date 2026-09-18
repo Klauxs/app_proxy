@@ -36,7 +36,7 @@ export class Native {
   }
   async processes(paths: string[] = []): Promise<Identity[]> { const r = await this.call('processes', { paths }); return Array.isArray(r) ? r : r ? [r] : []; }
   async identity(pid: number): Promise<Identity | undefined> { return (await this.call<Identity | null>('identity', { target: pid })) || undefined; }
-  async stop(identity: Identity) { return this.call('stop', { identity }); }
+  async stop(identity: Identity, guardCorrection = false) { return this.call('stop', { identity, guardCorrection }); }
   close() { this.child?.stdin.end(); }
 }
 export function sameIdentity(a: Identity | undefined, b: Identity | undefined) {

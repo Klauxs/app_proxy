@@ -115,7 +115,7 @@ export class Guard {
           const timings: Record<string,number> = { detectedAfterMs: Math.max(0,Date.now() - Date.parse(target.created)) };
           try {
             // Only the exact validated main instance. Never /IM or unverified tree kills.
-            await this.native.stop(target);
+            await this.native.stop(target, true);
             timings.stopMs = Math.round(performance.now() - began);
             const cleanupAt = performance.now();
             let checkedProcesses = await this.native.processes([app.exe]);

@@ -81,6 +81,7 @@ test('Windows end-to-end: real core, two exits, HTTPS, launch/guard, rollback, c
     await assert.rejects(()=>s.apps.launch(app.id),/已经运行/);
     const lnk=await shortcut(s.store,s.native,app.id);assert.ok(await exists(lnk!));await shortcut(s.store,s.native,app.id,true);assert.equal(await exists(lnk!),false);
     await assert.rejects(()=>s.native.stop({...launched,created:'wrong'}),/identity changed/);assert.ok(await s.native.identity(launched.pid));
+    await assert.rejects(()=>s.native.stop({...launched,created:'wrong'},true),/identity changed/);assert.ok(await s.native.identity(launched.pid));
     await s.native.stop(launched);
     // Guard correction happens in a dedicated data directory, never against user applications.
     await s.store.lock(async()=>{const state=await s.store.read();state.apps[0].guard=true;await s.store.save(state);});
