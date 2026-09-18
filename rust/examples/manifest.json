@@ -1,0 +1,69 @@
+{
+  "format": "app-proxy-rust",
+  "schema_version": 1,
+  "store_id": "06d45872-993a-499f-aebd-abff3d06bcc1",
+  "revision": 1,
+  "owner_sid": "S-1-5-21-1000-1000-1000-1001",
+  "applications": [
+    {
+      "id": "5488abfd-5498-443b-8b22-c3a3c1b43721",
+      "name": "Codex",
+      "revision": 1,
+      "locator": {
+        "kind": "msix",
+        "family_name": "OpenAI.Codex_2p2nqsd0c76g0",
+        "app_id": "App"
+      },
+      "template_ref": "builtin.codex@1"
+    }
+  ],
+  "instances": [
+    {
+      "id": "49177e28-b8bd-4a16-a5bc-62178c68f073",
+      "application_id": "5488abfd-5498-443b-8b22-c3a3c1b43721",
+      "name": "Codex 原版",
+      "revision": 1,
+      "data": { "kind": "original" },
+      "args": [],
+      "env": { "set": {}, "unset": [] },
+      "cwd": { "kind": "application" },
+      "network": { "kind": "profile", "profile_id": "e3144c4f-8173-4392-8f77-6a26738995bb" },
+      "guard": { "desired": "enabled", "policy": "stop_unproxied" }
+    },
+    {
+      "id": "f3f39044-a91f-4d45-9dac-dc2e0d63e37f",
+      "application_id": "5488abfd-5498-443b-8b22-c3a3c1b43721",
+      "name": "Codex 空白实例",
+      "revision": 1,
+      "data": {
+        "kind": "isolated",
+        "location": {
+          "kind": "store",
+          "relative_path": "instances/f3f39044-a91f-4d45-9dac-dc2e0d63e37f"
+        }
+      },
+      "args": [],
+      "env": { "set": {}, "unset": [] },
+      "cwd": { "kind": "application" },
+      "network": { "kind": "direct" },
+      "guard": { "desired": "disabled", "policy": "stop_unproxied" }
+    }
+  ],
+  "profiles": [
+    {
+      "id": "e3144c4f-8173-4392-8f77-6a26738995bb",
+      "name": "已有本地 sing-box",
+      "revision": 1,
+      "kind": "existing_singbox",
+      "endpoint": { "host": "127.0.0.1", "port": 18099 },
+      "verification_policy": "singbox_http_loopback"
+    }
+  ],
+  "settings": {
+    "test_url": "https://www.gstatic.com/generate_204",
+    "exit_url": "https://api.ipify.org",
+    "health_policy": { "expected_statuses": [200, 204], "follow_redirects": false },
+    "download_network": { "kind": "direct" }
+  },
+  "integrations": { "shortcuts": [], "guard_login_task": null }
+}
