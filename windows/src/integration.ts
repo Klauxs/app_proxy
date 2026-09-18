@@ -23,7 +23,8 @@ export async function shortcut(store: Store, native: Native, id: string, remove 
       if (item) { await native.call('shortcut-remove', { path: item.path, ...spec }); state.shortcuts = state.shortcuts.filter(s => s.appId !== id); }
     } else {
       const desktop = await native.call<string>('desktop');
-      let name = app.name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0,100).replace(/[. ]+$/g, '') || '应用';
+      const displayName = app.instance ? app.name.replace(/\s+分身$/, '') : app.name;
+      let name = displayName.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0,100).replace(/[. ]+$/g, '') || '应用';
       if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = '_' + name;
       const path = join(item ? dirname(item.path) : desktop, name + (app.instance ? ' - ' + id.slice(0,8) : '') + '.lnk');
       const renamed = !!item && item.path.toLowerCase() !== path.toLowerCase();

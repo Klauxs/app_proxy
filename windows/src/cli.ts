@@ -101,7 +101,7 @@ async function dispatch(s: Service, args: string[]) {
             if(rest.slice(2).some(a=>a!=='--clone'))throw new Error('可选参数仅支持 --clone');
             const target=await s.apps.desktop(rest[0]);const binding=need(rest[1],'profileId|direct');
             const clone=rest.includes('--clone');
-            data={...target,name:target.name+(clone?' 分身':''),instance:clone?rest[0]:undefined,profileId:binding==='direct'?undefined:binding};
+            data={...target,instance:clone?rest[0]:undefined,profileId:binding==='direct'?undefined:binding};
           }else data=await json(need(rest[0],'app.json'));
           const a=await s.addApp(data);out({id:a.id,name:a.name,guard:a.guard});break;
         }
@@ -222,7 +222,7 @@ export async function menu(s: Service, prompt?: (message:string) => Promise<stri
       console.log(`已找到 ${target.name} 桌面版，将自动跟随安装更新。`);
       const mode=await ask('使用方式：0 原版（默认）  1 空白分身：');
       if(!['','0','1'].includes(mode))throw new Error('使用方式无效');
-      data={...target,name:target.name+(mode==='1'?' 分身':''),instance:mode==='1'?kind:undefined};
+      data={...target,instance:mode==='1'?kind:undefined};
     }
     const profileId=boundProfileId??await binding();
     if(!data) {
