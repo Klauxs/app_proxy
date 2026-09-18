@@ -103,16 +103,21 @@ export class Applications {
     if (app.adapter === 'chromium' && app.args.some(a => a === '--' || /^--(?:proxy-server|proxy-pac-url|no-proxy-server|proxy-bypass-list)(?:=|$)/.test(a))) throw new Error('Chromium 参数含代理冲突或 -- 分隔符；请通过代理绑定设置');
   }
   async launch(id: string) { return this.store.lock(async () => this.launchUnlocked((await this.store.read()), id)); }
-  async launchUnlocked(state: State, id: string) {
+  async launchUnlocked(state: State, id: string, timings?: Record<string, number>) {
+    let stageAt = performance.now();
+    const mark = (stage: string) => { const now = performance.now(); if (timings) timings[stage] = Math.round(now - stageAt); stageAt = now; };
     const app = state.apps.find(a => a.id === id); if (!app) throw new Error('应用不存在');
     if (await this.resolvePackage(app)) await this.store.save(state);
+    mark('resolveMs');
     this.checkArgs(app);
     const live = appProcesses(this.store, app, await this.native.processes([app.exe]));
     if (live.length) throw new Error('目标应用或辅助进程已经运行；请先关闭，不能向旧进程重新注入代理。Guard 会独立纠正已启用保护的误启动');
+    mark('processCheckMs');
     const profile = state.profiles.find(p => p.id === app.profileId);
     if (app.profileId && !profile) throw new Error('代理绑定无效');
     if (profile?.kind === 'managed') { await this.core.startUnlocked(state, profile.id); await probe(profile, state.settings.testUrl); }
     else if (profile) await verifyListener(this.native,profile,state.settings.testUrl);
+    mark('proxyReadyMs');
     const proxy = profile ? proxyUrl(profile) : undefined;
     const args = [...app.args];
     const env = childEnvironment(proxy);
@@ -133,9 +138,11 @@ export class Applications {
       await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', () => reject(new Error('应用启动失败，请检查路径和权限'))); }); child.unref();
       pid = child.pid!;
     }
+    mark('spawnMs');
     const identity = await this.native.identity(pid);
     if (identity && (!identity.owned || appProcesses(this.store,app,[identity]).length !== 1)) throw new Error('启动回执与目标实例身份不匹配，未登记为成功');
     if (identity) { const r = await this.store.runtime(); r.launches[id] = { identity, proxy, at: Date.now() }; await this.store.runtimeSave(r); }
+    mark('receiptMs');
     await this.store.log('launch', `${id} pid=${pid} ${identity ? 'process-created' : 'exited-or-forwarded'} mode=${proxy ? 'proxy' : 'direct'}`);
     return { pid, running: !!identity, proxy, evidence: identity ? '进程已创建；目标实际流量需要另外验证' : '进程已退出或转交其他进程，未确认目标已使用代理' };
   }

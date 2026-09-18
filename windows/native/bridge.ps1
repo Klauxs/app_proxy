@@ -207,7 +207,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
               $null = $process.Handle
               $actual = Assert-Identity $request.identity
               if ($actual -and -not $process.HasExited) {
-                $null = $process.CloseMainWindow(); $null = $process.WaitForExit(1500)
+                if ($process.CloseMainWindow()) { $null = $process.WaitForExit(1500) }
                 if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(3000) }
               }
             } finally { $process.Dispose() }

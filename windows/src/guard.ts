@@ -111,15 +111,21 @@ export class Guard {
           const history = (this.attempts.get(app.id) || []).filter(t => Date.now() - t < 60000);
           if (history.length >= 3 || (history.length && Date.now() - history.at(-1)! < 5000)) continue;
           history.push(Date.now()); this.attempts.set(app.id, history);
+          const began = performance.now();
+          const timings: Record<string,number> = { detectedAfterMs: Math.max(0,Date.now() - Date.parse(target.created)) };
           try {
             // Only the exact validated main instance. Never /IM or unverified tree kills.
             await this.native.stop(target);
+            timings.stopMs = Math.round(performance.now() - began);
+            const cleanupAt = performance.now();
             await sleep(300);
             const remaining = appProcesses(this.store, app, await this.native.processes([app.exe]));
             if (remaining.length) throw new Error('仍有辅助进程或其他实例，请手动关闭后重试');
-            await this.apps.launchUnlocked(s, app.id);
+            timings.cleanupMs = Math.round(performance.now() - cleanupAt);
+            await this.apps.launchUnlocked(s, app.id, timings);
             await this.store.log('guard-corrected', `${app.id} replaced=${target.pid}`);
           } catch (e: any) { await this.store.log('guard-blocked', `${app.id}: ${e.message}`); }
+          finally { timings.correctionMs = Math.round(performance.now() - began); await this.store.log('guard-timing', `${app.id} pid=${target.pid} ${JSON.stringify(timings)}`); }
           break;
         }
       }
