@@ -1,0 +1,10 @@
+# Local artifacts and potentially private runtime data
+node_modules/
+.test-data/
+.tools/
+release/
+windows/runtime/
+*.log
+.env
+.env.*
+lark-doc-auth.png

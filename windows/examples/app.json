@@ -1,0 +1,8 @@
+{
+  "name": "示例应用",
+  "exe": "C:\\Path To App\\App.exe",
+  "cwd": "C:\\Path To App",
+  "args": [],
+  "adapter": "chromium",
+  "profileId": "替换为已登记的代理ID"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "本地上游",
+  "protocol": "http",
+  "server": "127.0.0.1",
+  "server_port": 7890,
+  "username": "",
+  "password": ""
+}
