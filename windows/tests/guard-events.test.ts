@@ -39,6 +39,44 @@ test('Guard never treats missing arguments as direct launch; a fresh readable pr
   } finally { s.close(); }
 });
 
+test('Guard waits only for trailing helpers and never relaunches over surviving processes', async t => {
+  for (const scenario of ['empty','helper-exits','helper-stays','new-main']) await t.test(scenario, async () => {
+    const s = await fixture();
+    try {
+      const target: Identity = {pid:123,parent:0,path:process.execPath,args:[process.execPath],created:new Date().toISOString(),session:1,owned:true};
+      const helper = {...target,pid:124,parent:123,args:[process.execPath,'--type=utility']};
+      const newMain = {...target,pid:125};
+      let stopped = false, launched = false, cleanupChecks = 0;
+      s.native.stop = async id => { assert.equal(id.pid,target.pid); stopped = true; };
+      s.native.processes = async () => {
+        if (!stopped) return [target];
+        cleanupChecks++;
+        if (scenario === 'helper-stays' || (scenario === 'helper-exits' && cleanupChecks === 1)) return [helper];
+        return scenario === 'new-main' ? [newMain] : [];
+      };
+      s.apps.launchUnlocked = async (state,id,_timings,preflight) => {
+        assert.equal(preflight?.app,state.apps.find(a=>a.id===id));
+        assert.deepEqual(preflight?.processes,[]);
+        launched = true; return {pid:456,running:true,proxy:undefined,evidence:'fixture'};
+      };
+      await s.guard.tick();
+      assert.equal(launched,scenario === 'empty' || scenario === 'helper-exits');
+      assert.equal(cleanupChecks,scenario === 'helper-stays' ? 4 : scenario === 'helper-exits' ? 2 : 1);
+    } finally { s.close(); }
+  });
+});
+
+test('reused launch preflight rejects a different app or a surviving target', async () => {
+  const s = await fixture();
+  try {
+    const state = await s.store.read(), app = state.apps[0];
+    s.apps.resolvePackage = async () => { throw new Error('unexpected second package lookup'); };
+    await assert.rejects(()=>s.apps.launchUnlocked(state,app.id,undefined,{app:{...app},processes:[]}),/不匹配/);
+    const target: Identity = {pid:123,parent:0,path:app.exe,args:[app.exe],created:new Date().toISOString(),session:1,owned:true};
+    await assert.rejects(()=>s.apps.launchUnlocked(state,app.id,undefined,{app,processes:[target]}),/已经运行/);
+  } finally { s.close(); }
+});
+
 test('Guard events wake immediately, coalesce, retry missing data finitely and do not overlap scans', {timeout:15000}, async () => {
   const s = await fixture();
   const abort = new AbortController();

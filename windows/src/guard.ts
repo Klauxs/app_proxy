@@ -118,11 +118,18 @@ export class Guard {
             await this.native.stop(target);
             timings.stopMs = Math.round(performance.now() - began);
             const cleanupAt = performance.now();
-            await sleep(300);
-            const remaining = appProcesses(this.store, app, await this.native.processes([app.exe]));
+            let checkedProcesses = await this.native.processes([app.exe]);
+            let remaining = appProcesses(this.store, app, checkedProcesses);
+            // Most early launches have already exited. Wait only for trailing helpers,
+            // and never stop or launch over a newly started main instance.
+            for (let attempt = 0; remaining.length && remaining.every(isHelper) && attempt < 3; attempt++) {
+              await sleep(100);
+              checkedProcesses = await this.native.processes([app.exe]);
+              remaining = appProcesses(this.store, app, checkedProcesses);
+            }
             if (remaining.length) throw new Error('仍有辅助进程或其他实例，请手动关闭后重试');
             timings.cleanupMs = Math.round(performance.now() - cleanupAt);
-            await this.apps.launchUnlocked(s, app.id, timings);
+            await this.apps.launchUnlocked(s, app.id, timings, { app, processes: checkedProcesses });
             await this.store.log('guard-corrected', `${app.id} replaced=${target.pid}`);
           } catch (e: any) { await this.store.log('guard-blocked', `${app.id}: ${e.message}`); }
           finally { timings.correctionMs = Math.round(performance.now() - began); await this.store.log('guard-timing', `${app.id} pid=${target.pid} ${JSON.stringify(timings)}`); }

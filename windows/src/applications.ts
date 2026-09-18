@@ -103,14 +103,16 @@ export class Applications {
     if (app.adapter === 'chromium' && app.args.some(a => a === '--' || /^--(?:proxy-server|proxy-pac-url|no-proxy-server|proxy-bypass-list)(?:=|$)/.test(a))) throw new Error('Chromium 参数含代理冲突或 -- 分隔符；请通过代理绑定设置');
   }
   async launch(id: string) { return this.store.lock(async () => this.launchUnlocked((await this.store.read()), id)); }
-  async launchUnlocked(state: State, id: string, timings?: Record<string, number>) {
+  async launchUnlocked(state: State, id: string, timings?: Record<string, number>, preflight?: { app: App; processes: Identity[] }) {
     let stageAt = performance.now();
     const mark = (stage: string) => { const now = performance.now(); if (timings) timings[stage] = Math.round(now - stageAt); stageAt = now; };
     const app = state.apps.find(a => a.id === id); if (!app) throw new Error('应用不存在');
-    if (await this.resolvePackage(app)) await this.store.save(state);
+    // Guard supplies its just-completed checks for this exact object under the same store lock.
+    if (preflight && preflight.app !== app) throw new Error('启动检查与目标应用不匹配');
+    if (!preflight && await this.resolvePackage(app)) await this.store.save(state);
     mark('resolveMs');
     this.checkArgs(app);
-    const live = appProcesses(this.store, app, await this.native.processes([app.exe]));
+    const live = appProcesses(this.store, app, preflight ? preflight.processes : await this.native.processes([app.exe]));
     if (live.length) throw new Error('目标应用或辅助进程已经运行；请先关闭，不能向旧进程重新注入代理。Guard 会独立纠正已启用保护的误启动');
     mark('processCheckMs');
     const profile = state.profiles.find(p => p.id === app.profileId);
