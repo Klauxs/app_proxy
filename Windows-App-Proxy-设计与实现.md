@@ -248,7 +248,7 @@ MSIX 识别和启动是通用逻辑，没有硬编码 Codex 或 Claude 包名。
 
 实现入口：[guard.ts](D:/app_proxy/windows/src/guard.ts)。
 
-Guard 是用户显式启用的后台 Node 进程，配有当前用户登录任务。启动时扫描已有目标；通过独立 PowerShell/C# 辅助进程监听 `Win32_ProcessStartTrace`，避免通知被同步原生桥阻塞。收到已登记 EXE 的启动通知后合并检查请求，查询并核验真实路径、参数和身份，所有纠正串行执行。事件本身的 PID/名称不作为终止进程的凭据。[微软启动事件说明](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/krnlprov/win32-processstarttrace)
+Guard 是用户显式启用的后台 Node 进程，配有当前用户登录任务。启动时扫描已有目标；通过独立 PowerShell/C# 辅助进程直接消费 `Microsoft-Windows-Kernel-Process` 的 ETW ProcessStart 事件（关键字 `0x10`、事件 ID 1），避免通知被同步原生桥阻塞。TDH 按 `ProcessID`、`SessionID`、`ImageName` 字段名解析，不依赖版本相关的 payload 偏移。收到已登记 EXE 的启动通知后合并检查请求，查询并核验真实路径、参数和身份，所有纠正串行执行。事件本身的 PID/名称不作为终止进程的凭据。[微软实时消费说明](https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_logfilew)
 
 事件模式每 30 秒完整扫描补漏，配置每 2 秒读取以响应新增或停用保护。监听统一走管理员辅助进程，普通权限监听路径已删除。启用保护或前台启动 Guard 时先完成授权；取消 UAC 不修改原应用保护配置。已有后台若失去授权、监听失败或中断，则临时退回约每 2 秒扫描，每 30 秒重试连接，日志记录实际模式，后台不会弹 UAC。
 
@@ -256,9 +256,9 @@ Guard 是用户显式启用的后台 Node 进程，配有当前用户登录任�
 
 监听端通过按用户 SID、配置命名空间、会话区分的本地命名管道发送进程通知；管道 ACL 限制当前用户和管理员，并拒绝网络身份。客户端数据不被解析为命令，管理员端不读取应用配置、不启动或终止目标应用。Guard 收到通知后仍自行核验真实进程。连接关闭后监听退出，Guard 下次连接可按需重启，无需再次授权。撤销授权或全部卸载会经 UAC 删除对应任务与固定脚本；监听代码更新也必须显式授权。后台重连不会触发 UAC。
 
-真实提权测试验证普通进程可以调用已授权任务、收到通知，且不能写入管理员脚本；任务的普通用户 ACE 仅有读/执行权限。进一步对 8 个真实进程分别记录 OS 创建时间、WMI `TIME_CREATED`、C# 回调时间、Node 接收时间：启动请求至创建 2–4 ms；创建至 WMI 生成通知 1301–1996 ms（中位数 1653 ms）；WMI 生成至回调约 0–0.5 ms；回调至客户端约 0–3 ms。不同 API 的时钟精度差使个别末段出现约 -1 ms 的读数，按近零理解，不影响秒级瓶颈结论。
+ETW 创建按用户 SID 和配置命名空间隔离的固定名称会话，配有确定的归属 GUID；不操作其他软件的追踪会话。使用 16KB 缓冲、4–16 个缓冲区及禁用按 CPU 分配缓冲的模式，仅实时消费，不保存 ETL。Windows 自带刷新定时器最小 1 秒，所以监听线程每约 100ms 调用 `ControlTrace(FLUSH)` 投递已生成的事件；这不扫描进程列表。错误、解码失败或事件丢失触发扫描降级。监听退出关闭 consumer 并停止自己的 session；强制结束后的残留会话由下次启动或升级/撤销授权按名称及 GUID 回收。[刷新定时器](https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_properties)、[ControlTrace](https://learn.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-controltracew)
 
-错开启动的多个进程共享几乎相同的 WMI 通知时间，说明上游呈批量交付。测试没有运行 Guard 主循环，排除了其 2 秒故障扫描、包解析、身份查询与关闭/重启流程；瓶颈位于进程创建到 WMI 事件生成之间，尚未继续拆分 WMI 提供程序内部收集/缓冲。提权只解决访问控制，当前 WMI 路径仍有秒级延迟；降低到百毫秒级需要另外验证事件源，不能只调整 Guard 等待。本次未执行重启电脑验收。
+真实提权测试验证普通进程可以调用已授权任务、收到通知，且不能写入管理员脚本；任务的普通用户 ACE 仅有读/执行权限。ETW 两轮各 8 个进程的请求启动至通知分别为 12–117ms、17–132ms，旧 WMI 基线为 1304–1999ms；32 个短进程全部收到。10 秒采样的监听进程 CPU 时间约 47ms（约单核 0.47%，不是整个系统开销）。已验证断开重连、强制结束后的残留会话恢复，以及撤销任务后没有 ETW 残留。采样未运行 Guard 纠正循环，不代表应用重启完成时间或延迟上限；未执行重启电脑验收。证据及历史 WMI 分析见 `windows/TEST-RESULTS.md`。
 
 扫描期间不持有配置锁：先读取配置快照、查询包和进程，再短暂持锁比较当前配置是否仍与快照相同；若用户在扫描期间修改了绑定或关闭保护，就丢弃本轮结果。真正纠正仍在锁内，并重新验证进程身份。已有完整配置的 Store 初始化也不再无条件获取写锁，减少桌面启动等待。
 

@@ -1,6 +1,6 @@
 // Opt-in interactive test: node tests/elevated-events-live.ts (one Windows UAC prompt).
 import * as fs from 'node:fs/promises';
-import {resolve,join} from 'node:path';
+import {resolve,join,basename} from 'node:path';
 import {randomBytes} from 'node:crypto';
 import {spawn,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -16,13 +16,14 @@ const admin=resolve('tests/elevated-events-admin.ps1');
 const quote=(value:string)=>"'"+value.replaceAll("'","''")+"'";
 const argumentsText=`-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${admin}" -Key ${key} -Fixture "${fixture}"`;
 const command=`$ErrorActionPreference='Stop'; $p=Start-Process -FilePath ${quote(ps)} -ArgumentList ${quote(argumentsText)} -Verb RunAs -WindowStyle Hidden -PassThru; $p.WaitForExit(); exit $p.ExitCode`;
-const consent=promisify(execFile)(ps,['-NoProfile','-NonInteractive','-Command',command],{windowsHide:true,timeout:150000}).then(()=>undefined,error=>error);
+const consent=promisify(execFile)(ps,['-NoProfile','-NonInteractive','-Command',command],{windowsHide:true,timeout:240000}).then(()=>undefined,error=>error);
 const native=new Native();let watcher:ProcessWatcher|undefined;let child:ReturnType<typeof spawn>|undefined;
 const received=new Map<number,ProcessStart & {receivedAt:number}>();
 const children:ReturnType<typeof spawn>[]=[];
 const timings:object[]=[];
 async function timing(pid:number,began:number) {
   const event=received.get(pid)!;
+  assert.equal(event.name.toLowerCase(),basename(process.execPath).toLowerCase());
   const identity=await native.identity(pid);assert.ok(identity?.owned);
   const created=Date.parse(identity.created);
   assert.equal(typeof event.callbackAt,'number');assert.equal(typeof event.eventAt,'number');
@@ -43,7 +44,7 @@ try{
   let writable=false;try{const handle=await fs.open(details.script,'r+');await handle.close();writable=true;}catch(error:any){assert.ok(['EPERM','EACCES'].includes(error.code));}
   assert.equal(writable,false,'ordinary user must not rewrite the elevated payload');
   let ready=false;let failure='';let seen=false;let latency=0;let began=0;
-  watcher=watchGuardEvents(native,key,event=>{received.set(event.pid,{...event,receivedAt:Date.now()});if(event.pid===child?.pid){seen=true;latency=Date.now()-began;}},(state,reason)=>{if(state){ready=true;assert.equal(reason,'elevated-process-start');}else failure=reason!;});
+  watcher=watchGuardEvents(native,key,event=>{received.set(event.pid,{...event,receivedAt:Date.now()});if(event.pid===child?.pid){seen=true;latency=Date.now()-began;}},(state,reason)=>{if(state){ready=true;assert.equal(reason,'elevated-etw-process-start');}else failure=reason!;});
   await until(async()=>ready||!!failure);assert.ok(ready,failure);
   began=Date.now();child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});
   await new Promise<void>((resolve,reject)=>{child!.once('spawn',resolve);child!.once('error',reject);});
@@ -66,11 +67,29 @@ try{
   }
   await until(async()=>children.every(item=>received.has(item.pid!)));
   for(const item of children) await timing(item.pid!,starts.get(item.pid!)!);
-  const evidence={realElevatedEvents:true,notificationMs:[firstLatency,latency],timings,unelevatedClient:true,protectedPayload:true,taskReadExecuteOnly:true,restartWithoutUac:true,fixture,key};
+  const burst:number[]=[];
+  await Promise.all(Array.from({length:32},async()=>{
+    const item=spawn(process.execPath,['-e','setTimeout(()=>{},50)'],{stdio:'ignore',windowsHide:true});children.push(item);
+    await new Promise<void>((resolve,reject)=>{item.once('spawn',resolve);item.once('error',reject);});burst.push(item.pid!);
+    await new Promise<void>(resolve=>item.once('exit',()=>resolve()));
+  }));
+  await until(async()=>burst.every(pid=>received.has(pid)));
+  for(const pid of burst)assert.equal(received.get(pid)!.name.toLowerCase(),basename(process.execPath).toLowerCase());
+  await fs.writeFile(join(fixture,'measure'),'measure');await until(async()=>exists(join(fixture,'metrics.json')));
+  const idle=JSON.parse((await fs.readFile(join(fixture,'metrics.json'),'utf8')).replace(/^\uFEFF/,''));
+  await fs.writeFile(join(fixture,'crash'),'crash');await until(async()=>exists(join(fixture,'crashed')));
+  await until(async()=>!!failure);watcher.close();await until(async()=>!(await native.call('events-status',{key})).running);
+  ready=false;seen=false;failure='';child.kill();
+  watcher=watchGuardEvents(native,key,event=>{received.set(event.pid,{...event,receivedAt:Date.now()});if(event.pid===child?.pid)seen=true;},(state,reason)=>{if(state)ready=true;else failure=reason!;});
+  await until(async()=>ready||!!failure);assert.ok(ready,failure);
+  child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});
+  await until(async()=>seen||!!failure);assert.ok(seen,failure);
+  assert.equal(failure,'');
+  const evidence={realElevatedEvents:true,source:'etw',flushMs:100,notificationMs:[firstLatency,latency],timings,burstReceived:burst.length,idle,orphanRecovery:true,unelevatedClient:true,protectedPayload:true,taskReadExecuteOnly:true,restartWithoutUac:true,fixture,key};
   await fs.writeFile(join(fixture,'evidence.json'),JSON.stringify(evidence,null,2));console.log(JSON.stringify(evidence));
 }finally{
-  child?.kill();for(const item of children)item.kill();watcher?.close();await fs.writeFile(join(fixture,'done'),'done');
+  child?.kill();for(const item of children)if(item.exitCode===null)item.kill();watcher?.close();await fs.writeFile(join(fixture,'done'),'done');
   const error=await consent;
-  try{if(error)throw error;const cleanup=JSON.parse((await fs.readFile(join(fixture,'cleanup.json'),'utf8')).replace(/^\uFEFF/,''));assert.equal(cleanup.error,null);assert.equal(cleanup.removeExit,0);assert.equal((await native.call('events-status',{key})).installed,false);console.log('Unique elevated test task removed.');}
+  try{if(error)throw error;const cleanup=JSON.parse((await fs.readFile(join(fixture,'cleanup.json'),'utf8')).replace(/^\uFEFF/,''));assert.equal(cleanup.error,null);assert.equal(cleanup.removeExit,0);assert.equal(cleanup.traceRemoved,true);assert.equal((await native.call('events-status',{key})).installed,false);console.log('Unique elevated test task and ETW session removed.');}
   finally{native.close();}
 }

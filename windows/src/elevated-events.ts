@@ -39,7 +39,8 @@ export function watchGuardEvents(native: Native, key: string, onStart: (event: P
         const line = buffer.slice(0,end); buffer = buffer.slice(end+1);
         let item: any;
         try { item = JSON.parse(line); } catch { fail('invalid-listener-message'); return; }
-        if (item.type === 'ready' && item.elevated === true) { clearTimeout(timer); onState(true, 'elevated-process-start'); }
+        if (item.type === 'ready' && item.elevated === true && item.source === 'etw') { clearTimeout(timer); onState(true, 'elevated-etw-process-start'); }
+        else if (item.type === 'error' && typeof item.reason === 'string' && /^etw-[a-zA-Z0-9-]{1,100}$/.test(item.reason)) { fail(item.reason); return; }
         else if (item.type === 'start' && Number.isSafeInteger(item.pid) && item.pid > 0 && typeof item.name === 'string' && item.name.length <= 260) onStart({pid:item.pid,name:item.name,
           ...(Number.isFinite(item.eventAt) ? {eventAt:item.eventAt} : {}), ...(Number.isFinite(item.callbackAt) ? {callbackAt:item.callbackAt} : {})});
         else { fail('elevated-listener-unavailable'); return; }

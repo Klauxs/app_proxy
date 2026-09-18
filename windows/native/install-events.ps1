@@ -19,6 +19,10 @@ try {
   $scheduler = New-Object -ComObject Schedule.Service
   $scheduler.Connect(); $folder = $scheduler.GetFolder('\')
   $old = Get-EventsTask $spec
+  if ($old) { $old.Stop(0) }
+  # Task termination skips finally blocks. Remove only this user's/store's owned ETW session.
+  & $spec.ps -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'elevated-events.ps1') -Key $Key -StopTrace
+  if ($LASTEXITCODE -ne 0) { throw 'Unable to clean up the owned ETW session' }
   if ($Action -eq 'Remove') {
     if ($old) { $old.Stop(0); $folder.DeleteTask($spec.name, 0) }
     if (Test-Path -LiteralPath $spec.script) { Remove-Item -LiteralPath $spec.script -Force }
