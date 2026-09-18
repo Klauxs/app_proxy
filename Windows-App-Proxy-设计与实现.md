@@ -8,6 +8,8 @@
 
 首次交互参考 mac 版的“先代理、后应用”：选择添加应用后先选已有配置，或发现已有 sing-box；都没有时直接引导填写订阅/手动上游，给出默认名称和空闲端口。`Service.prepareProfile` 在配置锁内启动并验证所选的自建入口，或只验证已有服务。验证成功才填写、登记应用，并直接绑定该入口；代理创建失败或验证失败不继续登记应用。保存成功但联网失败的代理配置保留供修改。独立“添加代理或订阅”完成后也能继续添加应用。只有一个已保存入口时回车选择它，直连须明确选择。
 
+Codex/Claude 内置入口在准备代理前先让用户选择应用和原版/分身，并只读查找安装。原版不再询问名称、EXE、适配类型和附加参数，自动采用 Chromium 适配；验证代理后才登记并启用 Guard。“其他应用”保留手动配置。内置发现按 PackageFamilyName + 主 AppId 查当前用户登记，再从 manifest 读取 EXE：Codex 使用 `OpenAI.Codex_2p2nqsd0c76g0!App`，Claude 使用 `Claude_pzs8sxrjxfjjc!Claude`。这是稳定应用身份，版本目录和程序文件名不写死；实机 Codex 主程序为 ChatGPT.exe。没有安装或登记歧义时返回明确错误，不从 PATH 猜测同名 CLI，不选择 SSH 辅助入口。
+
 这个工具做两件事：**启动应用时告诉它使用哪个本地代理端口；复用已有 sing-box 服务，或使用已有程序启动工具自己的配置。找不到程序时再协助安装。**
 
 例如，给 Codex 分身绑定“美国出口”后：
@@ -250,7 +252,7 @@ MSIX 识别和启动是通用逻辑，没有硬编码 Codex 或 Claude 包名。
 
 实现入口：[guard.ts](D:/app_proxy/windows/src/guard.ts)。
 
-菜单和 CLI 新增应用统一经 `Service.addApp`：确认 Chromium 适配的 Codex.exe / Claude.exe（按 EXE 名而非显示名判断）和显式 Codex/Claude 分身，绑定代理后默认启用 Guard，调用既有授权和启动流程。环境变量适配的 CLI、直连及其他应用不自动开启；JSON 可用 `guard:false` 覆盖，菜单也可停用。取消授权时保留应用登记并明确提示保护未完成，不自动重试 UAC，不批量迁移已有应用。
+菜单和 CLI 新增应用统一经 `Service.addApp`：确认 Chromium 适配的 Codex / Claude 主包入口、Codex.exe / Claude.exe，以及显式 Codex/Claude 分身，绑定代理后默认启用 Guard，调用既有授权和启动流程。不凭显示名识别；环境变量适配的 CLI、直连及其他应用不自动开启。JSON 可用 `guard:false` 覆盖，菜单也可停用。取消授权时保留应用登记并明确提示保护未完成，不自动重试 UAC，不批量迁移已有应用。
 
 Guard 是用户显式启用的后台 Node 进程，配有当前用户登录任务。启动时扫描已有目标；通过独立 PowerShell/C# 辅助进程直接消费 `Microsoft-Windows-Kernel-Process` 的 ETW ProcessStart 事件（关键字 `0x10`、事件 ID 1），避免通知被同步原生桥阻塞。TDH 按 `ProcessID`、`SessionID`、`ImageName` 字段名解析，不依赖版本相关的 payload 偏移。收到已登记 EXE 的启动通知后合并检查请求，查询并核验真实路径、参数和身份，所有纠正串行执行。事件本身的 PID/名称不作为终止进程的凭据。[微软实时消费说明](https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_logfilew)
 

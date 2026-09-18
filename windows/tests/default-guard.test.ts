@@ -3,6 +3,14 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {Service} from '../src/service.ts';
+import {defaultGuard} from '../src/applications.ts';
+
+test('Codex main package identity enables Guard even when the executable is ChatGPT.exe',()=>{
+  const app={exe:'C:\\WindowsApps\\OpenAI.Codex_2\\app\\ChatGPT.exe',adapter:'chromium' as const,profileId:'p'};
+  assert.equal(defaultGuard({...app,package:{familyName:'OpenAI.Codex_2p2nqsd0c76g0',appId:'App'}}),true);
+  assert.equal(defaultGuard({...app,package:{familyName:'OpenAI.ChatGPT_fixture',appId:'App'}}),false);
+  assert.equal(defaultGuard({...app,package:{familyName:'Claude_pzs8sxrjxfjjc',appId:'SshAskpass'}}),false);
+});
 
 async function fixture() {
   const root=await fs.mkdtemp(resolve('.test-data/default-guard-'));

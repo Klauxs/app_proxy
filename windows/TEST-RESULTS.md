@@ -2,7 +2,15 @@
 
 日期：2026-09-18（Asia/Shanghai）
 
-## 先代理、后应用的连续引导（最新）
+## Codex / Claude 内置添加入口（最新）
+
+- `npm run check` 通过；完整 `npm test` 54 项通过，0 失败/跳过，约 147 秒。
+- 新增回归覆盖两种应用 × 原版/分身的简化提问、没有安装时不创建代理、不读取 PATH 同名 CLI、更新后使用最新登记，以及 Codex 实际 EXE 为 ChatGPT.exe 时仍按主包身份默认启用 Guard。
+- 实机只读发现：Codex 包 `OpenAI.Codex_2p2nqsd0c76g0`、主 AppId `App`，当前实际 EXE 为 `app/ChatGPT.exe`；Claude 包 `Claude_pzs8sxrjxfjjc`、主 AppId `Claude`，实际 EXE 为 `app/Claude.exe`。Claude 的 `SshAskpass` / `SshProxy` 辅助入口不参与选择。
+- 隔离目录 `.test-data/preset-cli-iM53PT` 执行四种 CLI 添加组合：`app add codex|claude direct`，以及附加 `--clone`。四条登记的包身份、Chromium 适配和分身类型均正确。显式 direct 均保持 Guard 关闭；没有启动或结束用户应用，没有修改用户现有登记或触发 UAC。
+- 菜单仍在代理准备和验证成功后才保存应用并自动启用 Guard；“其他应用”保留手动 EXE 和适配参数入口。用户实际代理和当前 Codex/Claude 会话未用于破坏性重启测试。
+
+## 先代理、后应用的连续引导
 
 - `npm run check` 通过；完整 `npm test` 50 项通过，0 失败/跳过，约 148 秒。
 - 新增 7 项菜单流程测试：无配置时创建手动代理并继续、发现可复用服务直接绑定、单一配置回车选择、联网失败/取消不登记应用、显式直连、独立新增代理后继续添加、订阅下载选节点后继续。其中订阅使用本机受控 HTTP 服务，配置/授权调用由测试替身记录顺序，没有请求用户订阅。

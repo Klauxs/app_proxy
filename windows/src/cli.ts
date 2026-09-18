@@ -26,6 +26,7 @@ const help = `Windows App Proxy 0.2
   proxy edit <id> <patch.json>    修改 name/port
   proxy remove <id>              删除未被引用的代理
   app add <app.json>             登记应用；Codex/Claude 桌面应用绑定代理后默认启用 Guard，可用 guard:false 关闭
+  app add codex|claude <profileId|direct> [--clone]  自动查找桌面版，默认使用原版
   app bind <id> <profileId|direct>
   app edit <id> <patch.json>      修改 name/cwd/args
   app remove <id>                删除登记与快捷方式，保留应用数据
@@ -94,7 +95,16 @@ async function dispatch(s: Service, args: string[]) {
       } break;
     case 'app':
       switch (sub) {
-        case 'add': { const a = await s.addApp(await json(need(rest[0],'app.json'))); out({id:a.id,name:a.name,guard:a.guard}); break; }
+        case 'add': {
+          let data:Parameters<Service['addApp']>[0];
+          if(rest[0]==='codex'||rest[0]==='claude') {
+            if(rest.slice(2).some(a=>a!=='--clone'))throw new Error('可选参数仅支持 --clone');
+            const target=await s.apps.desktop(rest[0]);const binding=need(rest[1],'profileId|direct');
+            const clone=rest.includes('--clone');
+            data={...target,name:target.name+(clone?' 分身':''),instance:clone?rest[0]:undefined,profileId:binding==='direct'?undefined:binding};
+          }else data=await json(need(rest[0],'app.json'));
+          const a=await s.addApp(data);out({id:a.id,name:a.name,guard:a.guard});break;
+        }
         case 'bind': await s.apps.edit(need(rest[0],'id'),{profileId:need(rest[1],'profileId') === 'direct' ? undefined : rest[1]}); out('绑定已更新，下次启动生效'); break;
         case 'edit': { const p = await json(need(rest[1],'patch.json')); await s.apps.edit(need(rest[0],'id'),{...(p.name ? {name:p.name}:{}), ...(p.cwd?{cwd:p.cwd}:{}), ...(p.args?{args:p.args}:{})}); out('应用已更新'); break; }
         case 'remove': await s.removeApp(need(rest[0],'id')); out('登记已删除，应用数据保留'); break;
@@ -201,17 +211,33 @@ export async function menu(s: Service, prompt?: (message:string) => Promise<stri
     try {return await readyProxy(p);}
     catch(e:any){throw new Error(`代理配置已保存，但联网验证失败：${e.message}。修正配置后再添加应用`);}
   };
-  const addApplication = async (profileId?:string) => {
-    const name=await ask('应用名称：'); const exe=(await ask('EXE 路径（可粘贴带引号路径）：')).replace(/^"|"$/g,'');
-    const mode=await ask('启动方式：0普通应用 1Codex 空白分身 2Claude 空白分身（默认 0）：');
-    if (!['','0','1','2'].includes(mode)) throw new Error('启动方式无效');
-    const instance=mode==='1'?'codex':mode==='2'?'claude':undefined;
-    const adapter=instance||await yes('是否确认该应用支持 Chromium/Electron --proxy-server 参数')?'chromium':'environment';
-    const argsText=await ask('附加参数 JSON 数组（空白为 []）：');
+  const addApplication = async (boundProfileId?:string) => {
+    const choice=await ask('选择应用：1 Codex  2 Claude  3 其他应用（手动指定）  0返回：');
+    if(choice==='0')throw new Error('已取消，返回主菜单');
+    if(!['1','2','3'].includes(choice))throw new Error('请选择 Codex、Claude 或其他应用');
+    let data:Parameters<Service['addApp']>[0]|undefined;
+    if(choice!=='3') {
+      const kind=choice==='1'?'codex':'claude';
+      const target=await s.apps.desktop(kind);
+      console.log(`已找到 ${target.name} 桌面版，将自动跟随安装更新。`);
+      const mode=await ask('使用方式：0 原版（默认）  1 空白分身：');
+      if(!['','0','1'].includes(mode))throw new Error('使用方式无效');
+      data={...target,name:target.name+(mode==='1'?' 分身':''),instance:mode==='1'?kind:undefined};
+    }
+    const profileId=boundProfileId??await binding();
+    if(!data) {
+      const name=await ask('应用名称：'); const exe=(await ask('EXE 路径（可粘贴带引号路径）：')).replace(/^"|"$/g,'');
+      const mode=await ask('启动方式：0普通应用 1Codex 空白分身 2Claude 空白分身（默认 0）：');
+      if (!['','0','1','2'].includes(mode)) throw new Error('启动方式无效');
+      const instance=mode==='1'?'codex':mode==='2'?'claude':undefined;
+      const adapter=instance||await yes('是否确认该应用支持 Chromium/Electron --proxy-server 参数')?'chromium':'environment';
+      const argsText=await ask('附加参数 JSON 数组（空白为 []）：');
+      data={name,exe,adapter,instance,args:argsText?JSON.parse(argsText):[]};
+    }
     console.log('Codex/Claude 桌面应用及其分身绑定代理后默认启用 Guard，首次或更新监听时需要 UAC 授权；之后可在 Guard 菜单停用。');
-    const a=await s.addApp({name,exe,adapter,instance,args:argsText?JSON.parse(argsText):[],profileId});
+    const a=await s.addApp({...data,profileId});
     if(await yes('创建桌面快捷方式'))out(await shortcut(s.store,s.native,a.id));
-    if(!a.guard && adapter==='chromium' && a.profileId && await yes('启用 Guard（误启动会关闭并代理重启，首次需要 UAC 授权监听）')){await s.guard.enable(a.id,true);a.guard=true;}
+    if(!a.guard && a.adapter==='chromium' && a.profileId && await yes('启用 Guard（误启动会关闭并代理重启，首次需要 UAC 授权监听）')){await s.guard.enable(a.id,true);a.guard=true;}
     out({id:a.id,name:a.name,guard:a.guard});
   };
   try {
@@ -222,7 +248,7 @@ export async function menu(s: Service, prompt?: (message:string) => Promise<stri
         if(choice==='0') break;
         switch(choice) {
           case '1': {
-            await addApplication(await binding());break;
+            await addApplication();break;
           }
           case '2': {
             const a=await pick((await s.store.read()).apps,'应用编号：');

@@ -1,5 +1,12 @@
 # 决策与改动记录
 
+## 2026-09-18：Codex / Claude 内置添加入口
+
+- 添加应用先选 Codex / Claude / 其他应用；内置入口只需选择原版或空白分身，再完成代理配置，自动填充名称、EXE 和 Chromium 适配，不询问附加参数。
+- 通过当前用户的包身份及主 AppId 读取实际 EXE，不固定 WindowsApps 路径或版本。实机 Codex 主入口为 `app/ChatGPT.exe`，Claude 主入口为 `app/Claude.exe`；排除 Claude 的 SSH 辅助入口。
+- 默认 Guard 同时识别 Codex 主包身份，修复仅凭 Codex.exe 文件名漏掉实际桌面主程序的问题；普通 ChatGPT 不因此默认启用 Guard。
+- CLI 支持 `app add codex|claude <profileId|direct> [--clone]`，保留 JSON 高级入口。
+
 ## 2026-09-18：先准备代理，再添加应用
 
 - 添加应用先选择/发现代理，无可用入口时内联创建订阅或手动上游；名称、空闲监听端口有默认值，成功后直接绑定，不要求用户退出重来或重新选择新代理。

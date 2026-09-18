@@ -12,6 +12,17 @@ import {Service} from '../src/service.ts';
 import {applicationRoot} from '../src/msix-storage.ts';
 import {instancePaths} from '../src/applications.ts';
 
+test('desktop presets use current package registration, reject missing installs and never search CLI paths',async()=>{
+  const s=new Service(resolve('.test-data/preset-resolution'));
+  let exe='D:\\WindowsApps\\Codex_1\\app\\Codex.exe';
+  s.native.call=(async(op:string,data:any)=>{assert.equal(op,'package-resolve');assert.deepEqual(data,{desktop:'codex'});return {exe,fullTrust:true};}) as Native['call'];
+  assert.deepEqual(await s.apps.desktop('codex'),{name:'Codex',exe,adapter:'chromium',args:[]});
+  exe='D:\\WindowsApps\\Codex_2\\app\\Codex.exe';assert.equal((await s.apps.desktop('codex')).exe,exe);
+  s.native.call=(async()=>null) as Native['call'];
+  await assert.rejects(s.apps.desktop('claude'),/未找到当前用户安装的 Claude 桌面版/);
+  await assert.rejects(s.apps.desktop('other' as any),/仅支持/);
+});
+
 test('MSIX discovery is independent of Codex and refreshes registered package paths', async () => {
   const service = new Service(resolve('.test-data/msix-resolution'));
   const originalExe = 'C:\\Program Files\\WindowsApps\\Example.Editor_1.0_x64__fixture\\app\\Editor.exe';

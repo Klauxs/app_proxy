@@ -10,10 +10,12 @@ import { taskSpec } from './integration.ts';
 import { launchPackage } from './msix.ts';
 import { applicationRoot, prepareApplicationRoot } from './msix-storage.ts';
 import { verifyListener } from './singbox.ts';
-export function defaultGuard(app: Pick<App,'exe'|'adapter'|'profileId'|'instance'>) {
+export function defaultGuard(app: Pick<App,'exe'|'adapter'|'profileId'|'instance'|'package'>) {
   // Match the executable, not its editable display name. Environment-only CLI tools stay opt-in.
+  const packagedDesktop = (app.package?.familyName === 'OpenAI.Codex_2p2nqsd0c76g0' && app.package.appId === 'App') ||
+    (app.package?.familyName === 'Claude_pzs8sxrjxfjjc' && app.package.appId === 'Claude');
   return app.adapter === 'chromium' && !!app.profileId &&
-    (!!app.instance || /^(codex|claude)\.exe$/i.test(win32.basename(app.exe)));
+    (!!app.instance || packagedDesktop || /^(codex|claude)\.exe$/i.test(win32.basename(app.exe)));
 }
 export function childEnvironment(proxy?: string) {
   const env: NodeJS.ProcessEnv = {};
@@ -68,6 +70,13 @@ export function expectedProxy(id: Identity, proxy: string) {
 export class Applications {
   readonly store: Store; readonly native: Native; readonly core: Core;
   constructor(store: Store, native: Native, core: Core) { this.store = store; this.native = native; this.core = core; }
+  async desktop(kind: 'codex'|'claude') {
+    if (!['codex','claude'].includes(kind)) throw new Error('仅支持 Codex 或 Claude 桌面应用');
+    const name=kind==='codex'?'Codex':'Claude';
+    const registration=await this.native.call<PackageRegistration|null>('package-resolve',{desktop:kind});
+    if (!registration?.fullTrust || !registration.exe) throw new Error(`未找到当前用户安装的 ${name} 桌面版；请先安装，或选择“其他应用”手动指定 EXE`);
+    return {name,exe:registration.exe,adapter:'chromium' as const,args:[] as string[]};
+  }
   async add(data: { name: string; exe: string; cwd?: string; args?: string[]; adapter?: App['adapter']; profileId?: string; instance?: App['instance'] }) {
     const exe = await fs.realpath(resolve(data.exe)); if (!exe.toLowerCase().endsWith('.exe')) throw new Error('请选择实际 EXE，暂不支持 .cmd');
     const cwd = await fs.realpath(resolve(data.cwd || dirname(exe))); if (!(await fs.stat(cwd)).isDirectory()) throw new Error('工作目录无效');

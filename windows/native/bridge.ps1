@@ -151,14 +151,28 @@ while ($null -ne ($line = [Console]::ReadLine())) {
       }
       'package-resolve' {
         $result = $null
-        $packages = if ($request.familyName) { @(Get-RegisteredPackage $request.familyName) } else { @(Get-AppxPackage | Where-Object { $_.InstallLocation }) }
+        $desktopFamily = $null
+        $desktopAppId = $null
+        if ($request.desktop) {
+          $desktopFamily = switch ($request.desktop) {
+            'codex' { 'OpenAI.Codex_2p2nqsd0c76g0' }
+            'claude' { 'Claude_pzs8sxrjxfjjc' }
+            default { throw 'Unknown desktop application' }
+          }
+          $desktopAppId = if ($request.desktop -eq 'codex') { 'App' } else { 'Claude' }
+        }
+        $packages = if ($desktopFamily) { @(Get-RegisteredPackage $desktopFamily) } elseif ($request.familyName) { @(Get-RegisteredPackage $request.familyName) } else { @(Get-AppxPackage | Where-Object { $_.InstallLocation }) }
         foreach ($package in $packages) {
-          if (-not $request.familyName -and -not ([string]$request.exe).StartsWith($package.InstallLocation.TrimEnd('\')+'\', [StringComparison]::OrdinalIgnoreCase)) { continue }
+          if (-not $desktopFamily -and -not $request.familyName -and -not ([string]$request.exe).StartsWith($package.InstallLocation.TrimEnd('\')+'\', [StringComparison]::OrdinalIgnoreCase)) { continue }
           $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
           foreach ($application in $manifest.Package.Applications.Application) {
             if (-not $application.Executable) { continue }
             $exe = [IO.Path]::GetFullPath((Join-Path $package.InstallLocation ([string]$application.Executable)))
-            if (($request.familyName -and $application.Id -eq $request.appId) -or (-not $request.familyName -and $exe -ieq $request.exe)) {
+            # Package identity + main AppId, not an assumed filename (Codex can use ChatGPT.exe).
+            $desktopMatch = $desktopFamily -and $application.Id -eq $desktopAppId -and $application.EntryPoint -eq 'Windows.FullTrustApplication'
+            if ($desktopMatch -or ($request.familyName -and $application.Id -eq $request.appId) -or (-not $request.familyName -and -not $desktopFamily -and $exe -ieq $request.exe)) {
+              if ($desktopMatch -and $result) { throw 'Multiple matching desktop registrations; select the executable manually' }
+              if ($desktopMatch -and -not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Registered desktop executable is missing' }
               $virtualization = $manifest.Package.Properties.SelectSingleNode("*[local-name()='FileSystemWriteVirtualization' and namespace-uri()='http://schemas.microsoft.com/appx/manifest/desktop/windows10/6']")
               $result = @{ familyName=$package.PackageFamilyName; appId=[string]$application.Id; exe=$exe; aumid=$package.PackageFamilyName+'!'+$application.Id; fullTrust=($application.EntryPoint -eq 'Windows.FullTrustApplication'); isolatedStorage=($null -eq $virtualization -or $virtualization.InnerText -ne 'disabled') }
             }
