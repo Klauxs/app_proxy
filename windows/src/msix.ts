@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { atomic, exists, sleep, uid, Store } from './store.ts';
 import { Native } from './native.ts';
-import { quote } from './integration.ts';
+import { hiddenPath, quote } from './integration.ts';
 import type { App } from './types.ts';
 import { prepareApplicationRoot } from './msix-storage.ts';
 
@@ -32,7 +32,7 @@ export async function launchPackage(store: Store, native: Native, app: App, args
   await atomic(pendingPath, {requestPath,expiresAt});
   let completed = false;
   try {
-    await native.call('package-launch', {...app.package,node:process.execPath,arguments:[childScript,requestPath].map(quote).join(' ')});
+    await native.call('package-launch', {...app.package,command:join(process.env.SystemRoot || 'C:\\Windows','System32/wscript.exe'),arguments:[hiddenPath,process.execPath,childScript,requestPath].map(quote).join(' ')});
     while (Date.now() < expiresAt + 2000) {
       if (await exists(resultPath)) {
         await store.assertSafe(resultPath);

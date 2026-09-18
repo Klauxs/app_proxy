@@ -2,6 +2,11 @@
 
 日期：2026-09-18（Asia/Shanghai）
 
+## 隐藏 MSIX 辅助进程（最新）
+
+- `npm run check` 和 6 项 MSIX 回归通过。
+- 本机 Codex、Claude 的实际 `Invoke-CommandInDesktopPackage` 入口均通过 `wscript.exe`、`hidden.vbs` 启动 Node 辅助进程，成功返回 `LAUNCH_EXPIRED` 回执。使用隔离过期请求验证链路，没有启动或关闭用户应用；未进行完整目标应用启动的肉眼闪窗验收。
+
 ## 快捷方式命名（最新）
 
 - 最终命名：原版 `Claude.lnk` / `Codex.lnk`；分身 `Claude - <8位ID>.lnk` / `Codex - <8位ID>.lnk`，不再自动添加“分身”文字。此调整后类型检查及 9 项菜单流程回归通过。

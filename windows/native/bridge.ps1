@@ -185,7 +185,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         $manifest = Get-AppxPackageManifest -Package $package[0].PackageFullName
         $application = @($manifest.Package.Applications.Application | Where-Object { $_.Id -eq $request.appId -and $_.EntryPoint -eq 'Windows.FullTrustApplication' })
         if ($application.Count -ne 1) { throw 'Only registered full-trust desktop applications are supported' }
-        Invoke-CommandInDesktopPackage -PackageFamilyName $request.familyName -AppId $request.appId -Command $request.node -Args $request.arguments -PreventBreakaway -ErrorAction Stop | Out-Null
+        Invoke-CommandInDesktopPackage -PackageFamilyName $request.familyName -AppId $request.appId -Command $request.command -Args $request.arguments -PreventBreakaway -ErrorAction Stop | Out-Null
         $result = $true
       }
       'processes' {
