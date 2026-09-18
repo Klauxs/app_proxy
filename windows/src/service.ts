@@ -1,7 +1,7 @@
 import { Store, uid, port } from './store.ts';
 import { Native } from './native.ts';
 import { Core } from './core.ts';
-import { Applications } from './applications.ts';
+import { Applications, defaultGuard } from './applications.ts';
 import { Guard } from './guard.ts';
 import { shortcut, launchSpec, taskSpec } from './integration.ts';
 import { proxyUrl, probe, proxyRequest } from './proxy.ts';
@@ -13,6 +13,16 @@ export class Service {
   constructor(home?: string) { this.store = new Store(home); this.core = new Core(this.store, this.native); this.apps = new Applications(this.store, this.native, this.core); this.guard = new Guard(this.store, this.native, this.apps, this.core); }
   async init() { await this.store.init(this.native); return this; }
   close() { this.native.close(); }
+  async addApp(data: Parameters<Applications['add']>[0] & {guard?: boolean}) {
+    if (data.guard !== undefined && typeof data.guard !== 'boolean') throw new Error('guard 必须为 true 或 false');
+    const app = await this.apps.add(data);
+    if (data.guard ?? defaultGuard(app)) {
+      try { await this.guard.enable(app.id,true); }
+      catch (error: any) { throw new Error(`应用已添加（${app.id}），但 Guard 设置或启动未完成：${error.message}。可在“6 Guard”中查看状态并重新启用`); }
+      app.guard = true;
+    }
+    return app;
+  }
   async discoverSingBox() {
     const state = await this.store.read(); const active = await this.core.running();
     const found = await discovery(this.native);

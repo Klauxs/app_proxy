@@ -22,7 +22,7 @@ const help = `Windows App Proxy 0.2
   proxy select <id> <1,2,3>       修改所选节点
   proxy edit <id> <patch.json>    修改 name/port
   proxy remove <id>              删除未被引用的代理
-  app add <app.json>             登记应用，自动识别 MSIX；instance:"codex"|"claude" 创建分身
+  app add <app.json>             登记应用；Codex/Claude 桌面应用绑定代理后默认启用 Guard，可用 guard:false 关闭
   app bind <id> <profileId|direct>
   app edit <id> <patch.json>      修改 name/cwd/args
   app remove <id>                删除登记与快捷方式，保留应用数据
@@ -91,7 +91,7 @@ async function dispatch(s: Service, args: string[]) {
       } break;
     case 'app':
       switch (sub) {
-        case 'add': { const a = await s.apps.add(await json(need(rest[0],'app.json'))); out({id:a.id,name:a.name}); break; }
+        case 'add': { const a = await s.addApp(await json(need(rest[0],'app.json'))); out({id:a.id,name:a.name,guard:a.guard}); break; }
         case 'bind': await s.apps.edit(need(rest[0],'id'),{profileId:need(rest[1],'profileId') === 'direct' ? undefined : rest[1]}); out('绑定已更新，下次启动生效'); break;
         case 'edit': { const p = await json(need(rest[1],'patch.json')); await s.apps.edit(need(rest[0],'id'),{...(p.name ? {name:p.name}:{}), ...(p.cwd?{cwd:p.cwd}:{}), ...(p.args?{args:p.args}:{})}); out('应用已更新'); break; }
         case 'remove': await s.removeApp(need(rest[0],'id')); out('登记已删除，应用数据保留'); break;
@@ -164,10 +164,11 @@ async function menu(s: Service) {
             const instance=mode==='1'?'codex':mode==='2'?'claude':undefined;
             const adapter=instance||await yes('是否确认该应用支持 Chromium/Electron --proxy-server 参数')?'chromium':'environment';
             const argsText=await ask('附加参数 JSON 数组（空白为 []）：');
-            const a=await s.apps.add({name,exe,adapter,instance,args:argsText?JSON.parse(argsText):[],profileId:await binding()});
+            console.log('Codex/Claude 桌面应用及其分身绑定代理后默认启用 Guard，首次或更新监听时需要 UAC 授权；之后可在 Guard 菜单停用。');
+            const a=await s.addApp({name,exe,adapter,instance,args:argsText?JSON.parse(argsText):[],profileId:await binding()});
             if(await yes('创建桌面快捷方式'))out(await shortcut(s.store,s.native,a.id));
-            if(adapter==='chromium' && a.profileId && await yes(instance?'启用 Guard（仅保护此分身，首次需要 UAC 授权监听）':'启用 Guard（误启动会关闭并代理重启，首次需要 UAC 授权监听）'))await s.guard.enable(a.id,true);
-            out({id:a.id,name:a.name}); break;
+            if(!a.guard && adapter==='chromium' && a.profileId && await yes('启用 Guard（误启动会关闭并代理重启，首次需要 UAC 授权监听）')){await s.guard.enable(a.id,true);a.guard=true;}
+            out({id:a.id,name:a.name,guard:a.guard}); break;
           }
           case '2': {
             const a=await pick((await s.store.read()).apps,'应用编号：');

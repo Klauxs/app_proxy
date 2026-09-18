@@ -2,7 +2,13 @@
 
 日期：2026-09-18（Asia/Shanghai）
 
-## ETW 通知验证（最新）
+## Codex / Claude 默认 Guard
+
+- `npm run check` 通过。新增 `default-guard.test.ts` 三项通过：原版与分身的默认保护持久化、直连/环境变量/其他 EXE/显式关闭不触发授权、取消 UAC 保留登记且保护关闭并报错。
+- `guard-events.test.ts` 四项回归通过，包括现有授权取消行为和扫描降级。此改动未重新执行整套端到端测试；上轮 ETW 的完整及实机验证见下节。
+- 自动测试通过模拟授权和后台启动来避免操作真实用户应用；没有自动开启已有应用的 Guard。
+
+## ETW 通知验证
 
 - 监听源改为 Microsoft-Windows-Kernel-Process / ProcessStart，100ms 主动刷新；原 UAC 任务、受保护脚本和只传通知的管道继续复用。不新增驱动、第三方库或系统审计配置。
 - `npm run check` 通过；完整 `npm test` 39 项通过，0 失败/跳过，约 147 秒。随后新增 ETW 丢失事件错误传递用例，相关文件 6 项全部通过，当前共 40 项用例；没有把静态检查当成实机验证。

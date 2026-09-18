@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { dirname, resolve, join } from 'node:path';
+import { dirname, resolve, join, win32 } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Store, sleep, uid } from './store.ts';
 import { Native, sameIdentity } from './native.ts';
@@ -10,6 +10,11 @@ import { taskSpec } from './integration.ts';
 import { launchPackage } from './msix.ts';
 import { applicationRoot, prepareApplicationRoot } from './msix-storage.ts';
 import { verifyListener } from './singbox.ts';
+export function defaultGuard(app: Pick<App,'exe'|'adapter'|'profileId'|'instance'>) {
+  // Match the executable, not its editable display name. Environment-only CLI tools stay opt-in.
+  return app.adapter === 'chromium' && !!app.profileId &&
+    (!!app.instance || /^(codex|claude)\.exe$/i.test(win32.basename(app.exe)));
+}
 export function childEnvironment(proxy?: string) {
   const env: NodeJS.ProcessEnv = {};
   const seen = new Set<string>();

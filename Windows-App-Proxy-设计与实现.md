@@ -248,6 +248,8 @@ MSIX 识别和启动是通用逻辑，没有硬编码 Codex 或 Claude 包名。
 
 实现入口：[guard.ts](D:/app_proxy/windows/src/guard.ts)。
 
+菜单和 CLI 新增应用统一经 `Service.addApp`：确认 Chromium 适配的 Codex.exe / Claude.exe（按 EXE 名而非显示名判断）和显式 Codex/Claude 分身，绑定代理后默认启用 Guard，调用既有授权和启动流程。环境变量适配的 CLI、直连及其他应用不自动开启；JSON 可用 `guard:false` 覆盖，菜单也可停用。取消授权时保留应用登记并明确提示保护未完成，不自动重试 UAC，不批量迁移已有应用。
+
 Guard 是用户显式启用的后台 Node 进程，配有当前用户登录任务。启动时扫描已有目标；通过独立 PowerShell/C# 辅助进程直接消费 `Microsoft-Windows-Kernel-Process` 的 ETW ProcessStart 事件（关键字 `0x10`、事件 ID 1），避免通知被同步原生桥阻塞。TDH 按 `ProcessID`、`SessionID`、`ImageName` 字段名解析，不依赖版本相关的 payload 偏移。收到已登记 EXE 的启动通知后合并检查请求，查询并核验真实路径、参数和身份，所有纠正串行执行。事件本身的 PID/名称不作为终止进程的凭据。[微软实时消费说明](https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_logfilew)
 
 事件模式每 30 秒完整扫描补漏，配置每 2 秒读取以响应新增或停用保护。监听统一走管理员辅助进程，普通权限监听路径已删除。启用保护或前台启动 Guard 时先完成授权；取消 UAC 不修改原应用保护配置。已有后台若失去授权、监听失败或中断，则临时退回约每 2 秒扫描，每 30 秒重试连接，日志记录实际模式，后台不会弹 UAC。
