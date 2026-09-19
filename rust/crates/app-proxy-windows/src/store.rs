@@ -89,12 +89,15 @@ pub struct Store {
     root: PathBuf,
     owner: Owner,
     _directories: Vec<OwnedHandle>,
-    _lock: File,
+    _lock: std::sync::Arc<File>,
 }
 
 impl Store {
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+    pub(crate) fn owner_lease(&self) -> std::sync::Arc<File> {
+        self._lock.clone()
     }
     pub fn create(root: &Path) -> Result<Self> {
         identity::assert_ordinary_user()?;
@@ -181,7 +184,7 @@ impl Store {
             root: root.to_owned(),
             owner,
             _directories: directories,
-            _lock: lock,
+            _lock: std::sync::Arc::new(lock),
         };
         store.load()?;
         store.recover_config_requests()?;

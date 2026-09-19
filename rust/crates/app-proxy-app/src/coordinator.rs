@@ -10,13 +10,16 @@ use app_proxy_windows::config_transaction::{ConfigOutcome, ConfigRequestStatus};
 use app_proxy_windows::{Error, Result, identity, ipc, process, store};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 2;
+const PROTOCOL_MINOR: u32 = 3;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -108,6 +111,8 @@ struct Shared {
     identity: Status,
     configuration: Arc<Configuration>,
     core: CoreControl,
+    jobs: AtomicUsize,
+    job_finished: tokio::sync::Notify,
 }
 
 impl Shared {
@@ -118,10 +123,13 @@ impl Shared {
             identity,
             configuration,
             core,
+            jobs: AtomicUsize::new(0),
+            job_finished: tokio::sync::Notify::new(),
         }
     }
     fn idle_allowed(&self) -> Result<bool> {
-        Ok(self.core.idle_allowed()?
+        Ok(self.jobs.load(Ordering::SeqCst) == 0
+            && self.core.idle_allowed()?
             && self
                 .configuration
                 .snapshot()?
@@ -233,7 +241,7 @@ pub async fn serve(root: PathBuf) -> Result<()> {
         identity::file_identity(&cli)?,
         identity::file_identity(&host)?,
     ])?;
-    let mut listener = ipc::Listener::bind(manifest.store_id, policy)?;
+    let listener = ipc::Listener::bind(manifest.store_id, policy)?;
     let snapshot = Status {
         store_id: manifest.store_id,
         revision: manifest.revision,
@@ -246,15 +254,23 @@ pub async fn serve(root: PathBuf) -> Result<()> {
         phase: "bootstrap".into(),
     };
     let shared = Arc::new(Shared::new(root, owned, snapshot));
+    serve_connections(listener, shared, IDLE_TIMEOUT).await
+}
+
+async fn serve_connections(
+    mut listener: ipc::Listener,
+    shared: Arc<Shared>,
+    idle_timeout: Duration,
+) -> Result<()> {
     let mut idle_allowed = shared.idle_allowed()?;
     let mut clients = tokio::task::JoinSet::new();
-    let mut idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+    let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
     loop {
         tokio::select! {
             accepted = listener.accept(), if clients.len() < MAX_CLIENTS => {
                 match accepted {
                     Ok(connection) => {
-                        idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+                        idle_deadline = tokio::time::Instant::now() + idle_timeout;
                         let shared = shared.clone();
                         clients.spawn(async move { handle(connection, shared).await });
                     }
@@ -265,12 +281,18 @@ pub async fn serve(root: PathBuf) -> Result<()> {
             _ = clients.join_next(), if !clients.is_empty() => {
                 if clients.is_empty() {
                     let shared = shared.clone();
-                    // All accepted work is done. Read once here so a delayed
+                    // All short connections are done. Read once so a delayed
                     // status response cannot overwrite a newer guard decision.
                     idle_allowed = tokio::task::spawn_blocking(move || shared.idle_allowed()).await
                         .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))??;
-                    idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+                    idle_deadline = tokio::time::Instant::now() + idle_timeout;
                 }
+            },
+            _ = shared.job_finished.notified() => {
+                let owner = shared.clone();
+                idle_allowed = tokio::task::spawn_blocking(move || owner.idle_allowed()).await
+                    .map_err(|_| Error::Invalid("CORE_CONTROL_WORKER_FAILED"))??;
+                idle_deadline = tokio::time::Instant::now() + idle_timeout;
             },
             _ = tokio::time::sleep_until(idle_deadline), if idle_allowed && clients.is_empty() => break,
         }
@@ -340,13 +362,16 @@ async fn handle(
                 result: reply,
             })
             .await;
-        // A lost ACK cannot cancel durable admission. Keep the handler registered
-        // until completion, but run synchronous Windows/store work off the reactor.
+        // Long work has its own lifetime, not an IPC slot: queries and cancellation
+        // must remain available while all admitted installers are waiting.
         if let Some(job) = execute {
+            shared.jobs.fetch_add(1, Ordering::SeqCst);
+            let completed = JobCompletion(shared.clone());
             let runtime = tokio::runtime::Handle::current();
-            tokio::task::spawn_blocking(move || runtime.block_on(shared.core.execute(job)))
-                .await
-                .map_err(|_| Error::Invalid("CORE_CONTROL_WORKER_FAILED"))??;
+            tokio::task::spawn_blocking(move || {
+                let _completed = completed;
+                let _ = runtime.block_on(shared.core.execute(job));
+            });
         }
         return sent;
     }
@@ -364,6 +389,14 @@ async fn handle(
             }),
         })
         .await
+}
+
+struct JobCompletion(Arc<Shared>);
+impl Drop for JobCompletion {
+    fn drop(&mut self) {
+        self.0.jobs.fetch_sub(1, Ordering::SeqCst);
+        self.0.job_finished.notify_one();
+    }
 }
 
 async fn query(store_id: Uuid, policy: &ipc::PeerPolicy, wait: Duration) -> Result<Status> {
@@ -648,6 +681,99 @@ mod tests {
         ipc::PeerPolicy::current(vec![identity::current().unwrap().image_file]).unwrap()
     }
 
+    async fn wait_core_result(shared: &Shared, id: Uuid) -> CoreRequestStatus {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(status) = shared.core.request_status(id).unwrap()
+                    && !matches!(status, CoreRequestStatus::Pending { .. })
+                {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn long_installs_do_not_starve_status_cancellation_or_owner_idle_exit() {
+        use app_proxy_core::core_control::CoreOutcome;
+        let (_temp, shared) = snapshot();
+        shared
+            .core
+            .hold_installer(Arc::new(tokio::sync::Notify::new()));
+        let id = shared.identity.store_id;
+        let listener = ipc::Listener::bind(id, policy()).unwrap();
+        let owner = shared.clone();
+        let server = tokio::spawn(serve_connections(
+            listener,
+            owner,
+            Duration::from_millis(100),
+        ));
+        let mut installs = Vec::new();
+        for _ in 0..MAX_CLIENTS {
+            let request_id = Uuid::new_v4();
+            installs.push(request_id);
+            let reply = rpc(
+                id,
+                &policy(),
+                Duration::from_secs(1),
+                Request {
+                    protocol_major: PROTOCOL_MAJOR,
+                    request_id,
+                    operation: Operation::ControlCore {
+                        action: CoreAction::Install {},
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                reply,
+                Reply::CoreRequestStatus {
+                    status: Some(CoreRequestStatus::Pending { .. })
+                }
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(shared.jobs.load(Ordering::SeqCst), MAX_CLIENTS);
+        assert!(!server.is_finished());
+        query(id, &policy(), Duration::from_secs(1)).await.unwrap();
+        for request_id in &installs {
+            rpc(
+                id,
+                &policy(),
+                Duration::from_secs(1),
+                Request {
+                    protocol_major: PROTOCOL_MAJOR,
+                    request_id: Uuid::new_v4(),
+                    operation: Operation::ControlCore {
+                        action: CoreAction::CancelInstall {
+                            request_id: *request_id,
+                        },
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                wait_core_result(&shared, *request_id).await,
+                CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Cancelled {},
+                    ..
+                }
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(shared.jobs.load(Ordering::SeqCst), 0);
+        assert!(shared.idle_allowed().unwrap());
+    }
+
     fn add_request(path: PathBuf) -> Request {
         use app_proxy_core::model::*;
         Request {
@@ -703,6 +829,9 @@ mod tests {
             .unwrap();
         drop(client);
         let (mut listener, owner) = server.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), shared.job_finished.notified())
+            .await
+            .unwrap();
         let server = tokio::spawn(async move {
             for _ in 0..3 {
                 handle(listener.accept().await.unwrap(), owner.clone())
@@ -818,12 +947,15 @@ mod tests {
                 response.unwrap(),
                 Reply::CoreRequestStatus {
                     status: Some(
-                        CoreRequestStatus::Pending {} | CoreRequestStatus::Complete { .. }
+                        CoreRequestStatus::Pending { .. } | CoreRequestStatus::Complete { .. }
                     )
                 }
             ));
         }
         server.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), shared.job_finished.notified())
+            .await
+            .unwrap();
         assert!(matches!(
             shared.core.request_status(request_id).unwrap(),
             Some(CoreRequestStatus::Complete {

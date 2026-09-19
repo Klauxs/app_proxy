@@ -1,6 +1,6 @@
 **App Proxy Rust 版设计**
 
-状态：基础平台、配置/存储、认证管道、协调进程、启动模板、实例数据/配置编辑、安装解析及共享 sing-box 初始生命周期已实现。2026-09-20 已接入 core 启动/停止/状态/请求查询 CLI。仍缺少一键安装、代理编辑菜单、应用实例启动与 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
+状态：基础平台、配置/存储、认证管道、协调进程、启动模板、实例数据/配置编辑、安装解析及共享 sing-box 初始生命周期已实现。2026-09-20 已接入 core 控制、一键安装、进度查询与取消。仍缺少代理编辑菜单、应用实例启动与 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
 
 **构建与验证**
 
@@ -36,18 +36,24 @@ cargo fmt --all -- --check
 
 创建默认原版，必须选择 `--direct` 或 `--proxy <已登记代理ID>`；普通 EXE 使用 `--exe <绝对路径> --adapter codex|claude|chromium|environment`，只有已支持的 Codex/Claude 模板允许分身。应用位置和分身存储自动解析，不复制登录数据。移除只删除登记，保留数据；已有系统集成时先要求清理。每次写入前会输出请求编号，响应中断后查询原编号，不自动重新创建。首次登记应用和创建实例是两个请求，实例创建失败可能保留应用记录。列表为摘要，显示名最多 256 字符，不含参数、环境值和代理凭据；不是完整配置导出。代理创建、启动及 Guard 授权仍待后续实现。
 
-`discover sing-box` 自动探测 store 内完整版本目录、绝对 PATH、Scoop 和 WinGet Links 中的程序，执行 version 并输出位置/版本/来源，不创建 store，不接入外部服务。具体代理配置仍须执行 check；此命令不代表代理可用，也还没有接入安装提示。探测子进程每次限时 3 秒、总异步等待预算 20 秒；同步文件系统访问（例如网络盘）仍受 Windows I/O 超时约束。只接受稳定版本，Scoop 的转发 shim 不作为内核执行。
+`discover sing-box` 自动探测 store 内完整版本目录、绝对 PATH、Scoop 和 WinGet Links 中的程序，执行 version 并输出位置/版本/来源，不创建 store，不接入外部服务。具体代理配置仍须执行 check；此只读命令不代表代理可用。探测子进程每次限时 3 秒、总异步等待预算 20 秒；同步文件系统访问（例如网络盘）仍受 Windows I/O 超时约束。只接受稳定版本，Scoop 的转发 shim 不作为内核执行。
 
-共享内核的开发入口（需要已有代理配置和可用 sing-box 程序）：
+共享内核的开发入口（需要已有代理配置）：
 
 ```powershell
 .\target\debug\app-proxy.exe core start <代理ID> [其他代理ID] --required <本次检查的代理ID>
 .\target\debug\app-proxy.exe core status --json
 .\target\debug\app-proxy.exe core stop
 .\target\debug\app-proxy.exe core request <请求ID> --json
+.\target\debug\app-proxy.exe core install
+.\target\debug\app-proxy.exe core cancel <安装请求ID>
 ```
 
-`start` 默认检查第一个代理，使用保存的 HTTPS 健康目标与允许状态码；只创建本工具拥有的进程，支持共享入口。运行配置需要改变时返回需确认，尚未实现切换。`stop` 停止自有共享内核，保留应用。启动/停止先持久化请求再执行，客户端断开仍继续；终态保留 7 天，未决记录保留到后续维修处理。同编号只返回历史结果，不能将历史 Ready 当成当前健康。`status` 核验进程和端口归属，不执行网络请求。协调进程在保存有活动内核或未决请求时不空闲退出；未知启动结果不自动重放。该入口尚未包含应用启动许可、持续故障通知及安装提示。
+`start` 默认检查第一个代理，使用保存的 HTTPS 健康目标与允许状态码；只创建本工具拥有的进程，支持共享入口。运行配置需要改变时返回需确认，尚未实现切换。`stop` 停止自有共享内核，保留应用。写请求先持久化再执行，客户端断开仍继续；终态保留 7 天，未决记录保留到后续维修处理。同编号只返回历史结果，不能将历史 Ready 当成当前健康。`status` 核验进程和端口归属，不执行网络请求。协调进程在有后台任务、活动内核或未决请求时不空闲退出；后台任务不占短连接槽位，查询与取消保持可用。未知启动结果不自动重放。应用启动许可、重配置切换和持续故障通知仍待实现。
+
+交互终端中，`core start` 确认缺少程序后提供“安装并继续 / 返回”，失败提供“重试 / 返回”。选择安装才开始从固定[官方 1.14.1 发布](https://github.com/SagerNet/sing-box/releases/tag/v1.14.1)下载，校验 zip、EXE、DLL 和 LICENSE，version/check 通过后发布到 `<store>/bin/sing-box/1.14.1/`；无路径选择。下载明确直连，总时限 600 秒、连接 10 秒、读取停滞 20 秒，展示阶段与下载字节；并发请求共享一次尝试。JSON/重定向输入不会自动下载，可显式执行 `core install`。
+
+安装等待时 Ctrl+C 会提交取消请求；也可用 `core cancel <安装请求ID>`，最终状态以原请求查询为准。取消当前请求不撤销其他已授权安装，发布已经完成时可能返回 Installed，但退出的原流程不会继续启动。单独安装成功不启动 core 或应用。当前固定版本已验证 HTTP/SOCKS5 及安装链路，其他订阅协议及完整发行验收仍待实现。
 
 `probe package claude` 仅在已安装 Claude 的包身份下启动本产品测试 helper，验证回执和独立临时目录读写，不启动 Claude 界面或修改其登录数据。`probe process --debug-detach` 验证调试创建和脱离，**不代表真实 IFEO 注册或 Electron 子进程兼容性已经通过**。
 

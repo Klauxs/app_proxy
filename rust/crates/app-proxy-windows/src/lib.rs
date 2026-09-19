@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod package;
 pub mod process;
 pub mod singbox_binary;
+pub mod singbox_install;
 mod storage_security;
 pub mod store;
 

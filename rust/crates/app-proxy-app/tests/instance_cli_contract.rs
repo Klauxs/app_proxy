@@ -113,6 +113,48 @@ fn core_cli_interrupted_request_stays_unknown_across_restart_without_execution()
     );
     owner.stop();
 }
+
+#[test]
+#[ignore = "downloads the pinned official sing-box archive; isolated temporary store only"]
+fn core_install_cli_downloads_directly_and_never_starts_proxy_or_application() {
+    let (_temp, root, _) = setup();
+    // The first CLI creates the host, so the downloader inherits this poisoned
+    // environment too. Poisoning only a later client would prove nothing.
+    let output = Command::new(env!("CARGO_BIN_EXE_app-proxy"))
+        .arg("--home")
+        .arg(&root)
+        .args(["core", "install", "--json"])
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9")
+        .env("NO_PROXY", "")
+        .output()
+        .unwrap();
+    let mut owner = Owner::capture(&root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(installed["result"]["outcome"]["outcome"], "installed");
+    assert_eq!(
+        installed["result"]["outcome"]["version"],
+        app_proxy_windows::singbox_install::VERSION
+    );
+    assert_eq!(
+        ok(&root, &["core", "status", "--json"])["observed"],
+        "stopped"
+    );
+    let request = installed["request_id"].as_str().unwrap();
+    owner.stop();
+    let queried = ok(&root, &["core", "request", request, "--json"]);
+    owner = Owner::capture(&root);
+    assert_eq!(installed, queried);
+    let reused = ok(&root, &["core", "install", "--json"]);
+    assert_eq!(reused["result"]["outcome"]["outcome"], "installed");
+    owner.stop();
+}
 fn create(root: &Path, exe: &Path, extra: &[&str]) -> Value {
     let mut args = vec![
         "instance",

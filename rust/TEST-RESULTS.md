@@ -137,3 +137,17 @@ coordinator 新增 core 接纳、结果查询与进程/端口观察；CLI 为 `c
 新增 11 项测试通过：规范化/required 引用、持久化去重/跨 namespace 编号冲突、时钟回拨、7 天终态清理与未决保留、取消/重开、结果替换失败、真实管道并发与丢 ACK；两个实际 CLI→host 测试验证 stop 历史结果跨重启、未知 profile 不启动、旧 Pending 保持未知。此次真实 CLI 没有启动 sing-box；成功网络转发/生命周期证据沿用上一批独立显式集成，不能据此声称应用启动已完成。
 
 状态查询对已记录身份重新查验进程及监听端口，不能因 runtime.json 写有 Running 就宣称网络正常。协调进程有活动内核或未决请求时不空闲退出。全量 workspace 117 项通过、7 项顶层 ignored（类别同前）；clippy/fmt 和独立复审通过。未知结果核对、重配置/回滚、安装提示、启动许可和持续通知仍待实现。
+
+**sing-box 一键安装、进度与取消（2026-09-20）**
+
+固定[官方 1.14.1 发布](https://github.com/SagerNet/sing-box/releases/tag/v1.14.1)，下载 zip 32,841,719 字节及摘要同前；EXE、libcronet.dll、LICENSE 各自校验大小与 SHA256。LICENSE 摘要为 `bb3805862b583aee73ad6f7805ec634747a37257a637a3069857843f05ea589c`。zip 8.6.0 只启用 deflate；解包严格匹配三个成员，不使用 archive 提供的路径直接写盘，拒绝路径别名、穿越、链接、额外文件及内容不符。依据 [zip 官方 API](https://docs.rs/zip/8.6.0/zip/)。
+
+受保护 `.staging-UUID` 内完成写入、文件 pin、version/check 与来源回执后才发布完整版本目录。未知已有目录不覆盖，完整安装核验后复用；取消仅清理本暂存的固定文件。CoreInstallation 保有 store owner 的共享句柄及目录 pin，让解包、hash、probe 脱离配置互斥锁，又不会在 Store 对象释放后丢失独占归属。3 项平台默认测试及官方 ZIP 隔离集成经独立 reviewer 显式运行通过。
+
+下载使用显式直连、HTTPS、可信发布域重定向白名单与精确包长，连接 10 秒、停滞读取 20 秒、总计 600 秒。2 项下载/合并单测覆盖 HTTP 错误、长度不足/超额/chunked、错误脱敏、并发共享失败及后续显式重试。初始 120 秒总时限的两次真实下载超时；curl 对照 25 秒仅下载约 3 MB，随后放宽总时限。修正测试中“只污染 CLI、未污染已运行 host”的覆盖缺口后，首次 install CLI 在无效 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 与空 NO_PROXY 下创建实际下载 host，真实官方下载安装成功，用时 407.18 秒。随后验证仅安装未启动 core/app、回执跨 host 重启及二次复用。该网络测试先于后续取消/调度增量；后续代码以以下取消/管道测试及全量回归验证。
+
+交互 `core start` 仅在确定缺少程序时提示“安装并继续 / 返回”，失败可“重试 / 返回”；JSON/非终端不隐式下载。`core install` 是显式安装请求。Pending 返回阶段与字节数，下载中状态查询实测约 0.2 秒。Ctrl+C 提交持久化取消请求；另提供 `core cancel <原安装请求ID>`。迟到的安装完成不让已中断的原客户端继续启动。
+
+3 项取消/容量测试覆盖预取消无下载、原请求重放、不可取消其他操作、leader 取消后其他授权请求继续、等待者取消不影响 leader、32 个普通后台任务上限下仍可重放和取消。真实 Windows PTY 中下载约 1.6 MiB 后发送 Ctrl+C，原请求 `a4411c32-a211-4227-b18d-e90d37c323f5` 持久化为 Cancelled，隔离验证目录 `.tools/installer-cancel-validation-cba252ea/` 没有 bin 目录，未启动应用或 core。
+
+独立审查发现并修复长安装 handler 占满 16 个连接槽而饿死查询/取消：后台工作使用独立计数与 RAII 完成通知，短连接可继续接受控制；完成后重新计算 idle。1 项真实管道回归在 16 个受控阻塞安装任务下验证状态/取消可达，所有任务完成后 owner 正常空闲退出。最终独立增量复审、全量 workspace 126 项测试、clippy/fmt 通过；9 项顶层 ignored，其中本批官方 ZIP 与网络下载安装已显式执行，其他类别同前。没有把 HTTP/SOCKS5/安装证据当作六协议、完整发行、应用启动或 Guard 验收。

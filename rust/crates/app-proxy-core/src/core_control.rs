@@ -7,9 +7,16 @@ use uuid::Uuid;
 pub enum CoreAction {
     Start { profiles: Vec<Uuid>, required: Uuid },
     Stop {},
+    Install {},
+    CancelInstall { request_id: Uuid },
 }
 impl CoreAction {
     pub fn normalize(&mut self) -> Result<(), ValidationError> {
+        if let Self::CancelInstall { request_id } = self
+            && request_id.is_nil()
+        {
+            return Err(ValidationError("INVALID_REQUEST_ID"));
+        }
         if let Self::Start { profiles, required } = self {
             if profiles.is_empty()
                 || profiles.len() > 1024
@@ -34,6 +41,13 @@ pub enum CoreOutcome {
         process: ProcessIdentity,
     },
     Stopped {},
+    Installed {
+        version: String,
+    },
+    CancelRequested {
+        request_id: Uuid,
+    },
+    Cancelled {},
     Failed {
         code: String,
     },
@@ -45,12 +59,33 @@ pub enum CoreOutcome {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CoreRequestStatus {
-    Pending {},
+    Pending {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progress: Option<InstallProgress>,
+    },
     Indeterminate {},
     Complete {
         outcome: CoreOutcome,
         completed_at: u64,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallProgress {
+    pub phase: InstallPhase,
+    pub downloaded: usize,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallPhase {
+    CheckingExisting,
+    Downloading,
+    Verifying,
+    CheckingBinary,
+    Publishing,
 }
 
 #[cfg(test)]

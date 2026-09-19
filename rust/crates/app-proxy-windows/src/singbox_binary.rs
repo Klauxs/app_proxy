@@ -116,6 +116,12 @@ async fn select(candidates: Vec<(PathBuf, Source)>) -> Option<CoreBinary> {
     None
 }
 
+pub(crate) async fn inspect_managed(path: PathBuf) -> Result<CoreBinary> {
+    select(vec![(path, Source::Managed)])
+        .await
+        .ok_or(Error::Invalid("CORE_INSTALL_PROBE_FAILED"))
+}
+
 fn candidates(root: &Path) -> Result<Vec<(PathBuf, Source)>> {
     let mut found = Vec::new();
     let managed = root.join("bin/sing-box");
@@ -179,7 +185,7 @@ fn candidates(root: &Path) -> Result<Vec<(PathBuf, Source)>> {
     Ok(found)
 }
 
-fn valid_version(value: &str) -> bool {
+pub(crate) fn valid_version(value: &str) -> bool {
     version_parts(value).is_some()
 }
 

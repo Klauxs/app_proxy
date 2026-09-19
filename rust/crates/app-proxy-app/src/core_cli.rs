@@ -4,9 +4,13 @@ use crate::{
     core_manager::CoreObserved,
     instance_cli::{Failure, fail},
 };
-use app_proxy_core::core_control::{CoreAction, CoreOutcome, CoreRequestStatus};
+use app_proxy_core::core_control::{CoreAction, CoreOutcome, CoreRequestStatus, InstallPhase};
 use clap::Subcommand;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    io::{IsTerminal, Write},
+    path::PathBuf,
+    time::Duration,
+};
 use uuid::Uuid;
 
 #[derive(Subcommand)]
@@ -21,6 +25,10 @@ pub enum Command {
     },
     /// 停止本工具拥有的共享代理；不会关闭应用
     Stop,
+    /// 从固定官方发布安装 sing-box，自动管理目录；不启动应用
+    Install,
+    /// 请求取消指定的安装操作，不影响应用；以原请求结果为准
+    Cancel { id: Uuid },
     /// 查看本工具的进程及监听状态，不执行网络健康检查
     Status,
     /// 查询原请求的历史结果，不会重新执行启动或停止
@@ -38,7 +46,7 @@ fn output(id: Uuid, status: &Option<CoreRequestStatus>, json: bool) -> Result<()
         println!(
             "请求 {id}：{}",
             match status {
-                Some(CoreRequestStatus::Pending {}) => "仍在执行。",
+                Some(CoreRequestStatus::Pending { .. }) => "仍在执行。",
                 Some(CoreRequestStatus::Complete {
                     outcome: CoreOutcome::Ready { .. },
                     ..
@@ -47,6 +55,18 @@ fn output(id: Uuid, status: &Option<CoreRequestStatus>, json: bool) -> Result<()
                     outcome: CoreOutcome::Stopped {},
                     ..
                 }) => "该请求已完成停止。",
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Installed { .. },
+                    ..
+                }) => "sing-box 已安装；代理仍需配置与健康检查。",
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Cancelled {},
+                    ..
+                }) => "安装已取消。",
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::CancelRequested { .. },
+                    ..
+                }) => "已发出取消请求；请查询原安装编号确认结果。",
                 Some(CoreRequestStatus::Complete {
                     outcome: CoreOutcome::Failed { .. },
                     ..
@@ -61,9 +81,17 @@ fn output(id: Uuid, status: &Option<CoreRequestStatus>, json: bool) -> Result<()
 fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> {
     match status {
         Some(CoreRequestStatus::Complete {
-            outcome: CoreOutcome::Ready { .. } | CoreOutcome::Stopped {},
+            outcome:
+                CoreOutcome::Ready { .. }
+                | CoreOutcome::Stopped {}
+                | CoreOutcome::Installed { .. }
+                | CoreOutcome::CancelRequested { .. },
             ..
         }) => Ok(()),
+        Some(CoreRequestStatus::Complete {
+            outcome: CoreOutcome::Cancelled {},
+            ..
+        }) => Err(fail(5, "安装已取消；保留代理配置。")),
         Some(CoreRequestStatus::Complete {
             outcome: CoreOutcome::Failed { code },
             ..
@@ -106,6 +134,8 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             return outcome(status);
         }
         Command::Stop => CoreAction::Stop {},
+        Command::Install => CoreAction::Install {},
+        Command::Cancel { id } => CoreAction::CancelInstall { request_id: id },
         Command::Start { profiles, required } => {
             let required = required
                 .or_else(|| profiles.first().copied())
@@ -115,7 +145,86 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
     };
     let mut action = action;
     action.normalize().map_err(|e| fail(2, e.0))?;
+    let (mut id, mut status, interrupted) = submit(root.clone(), action.clone(), json).await;
+    if interrupted {
+        output(id, &status, json)?;
+        return Err(fail(5, "已返回原流程；如安装结果未确认，请查询原编号。"));
+    }
+    if missing_binary(&status)
+        && !json
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
+    {
+        if !choose("未找到可用的 sing-box。", "安装并继续")? {
+            return Err(fail(5, "已返回；保留代理配置。"));
+        }
+        loop {
+            let (install_id, installed, interrupted) =
+                submit(root.clone(), CoreAction::Install {}, false).await;
+            output(install_id, &installed, false)?;
+            if interrupted {
+                return Err(fail(5, "已返回原流程；不会继续启动。"));
+            }
+            match &installed {
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Installed { .. },
+                    ..
+                }) => break,
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Failed { code },
+                    ..
+                }) => {
+                    eprintln!("安装失败：{code}");
+                    if !choose("可以重新下载安装。", "重试")? {
+                        return Err(fail(5, "已返回；保留代理配置。"));
+                    }
+                }
+                _ => return outcome(installed),
+            }
+        }
+        // Only the still-active client resumes a definitively failed start.
+        // Completing installation alone never starts a core or an application.
+        let resumed = submit(root, action, false).await;
+        id = resumed.0;
+        status = resumed.1;
+    }
+    output(id, &status, json)?;
+    outcome(status)
+}
+
+fn missing_binary(status: &Option<CoreRequestStatus>) -> bool {
+    matches!(status, Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == "CORE_BINARY_MISSING")
+}
+
+fn choose(message: &str, primary: &str) -> Result<bool, Failure> {
+    loop {
+        eprint!("{message}\n1. {primary}（默认）  2. 返回\n请选择 [1/2]：");
+        std::io::stderr()
+            .flush()
+            .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
+        let mut input = String::new();
+        if std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|_| fail(10, "PROMPT_READ_FAILED"))?
+            == 0
+        {
+            return Ok(false);
+        }
+        match input.trim() {
+            "" | "1" => return Ok(true),
+            "2" => return Ok(false),
+            _ => eprintln!("请输入 1 或 2。"),
+        }
+    }
+}
+
+async fn submit(
+    root: PathBuf,
+    action: CoreAction,
+    json: bool,
+) -> (Uuid, Option<CoreRequestStatus>, bool) {
     let id = Uuid::new_v4();
+    let installing = matches!(action, CoreAction::Install {});
     // Persist this in the caller's terminal before any request can be accepted.
     eprintln!("请求编号：{id}；结果不明时运行 core request {id} 查询。");
     let initial = coordinator::control_core(root.clone(), id, action).await;
@@ -126,16 +235,54 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             .ok()
             .flatten(),
     };
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    while matches!(status, Some(CoreRequestStatus::Pending {}))
+    let started = tokio::time::Instant::now();
+    let mut deadline = started + Duration::from_secs(if installing { 720 } else { 90 });
+    let mut progress_at = started;
+    let interrupt = tokio::signal::ctrl_c();
+    tokio::pin!(interrupt);
+    let mut interrupted = false;
+    let mut signal_available = true;
+    while matches!(status, Some(CoreRequestStatus::Pending { .. }))
         && tokio::time::Instant::now() < deadline
     {
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::select! {
+            signal = &mut interrupt, if installing && signal_available => {
+                signal_available = false;
+                if signal.is_ok() {
+                    interrupted = true;
+                    let cancel_id = Uuid::new_v4();
+                    eprintln!("正在请求取消安装；取消请求编号 {cancel_id}。");
+                    let _ = coordinator::control_core(root.clone(), cancel_id, CoreAction::CancelInstall { request_id: id }).await;
+                    deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+        if installing && !json && tokio::time::Instant::now() >= progress_at {
+            if let Some(CoreRequestStatus::Pending {
+                progress: Some(progress),
+            }) = &status
+            {
+                let phase = match progress.phase {
+                    InstallPhase::CheckingExisting => "检查已有安装",
+                    InstallPhase::Downloading => "下载",
+                    InstallPhase::Verifying => "校验安装包",
+                    InstallPhase::CheckingBinary => "验证程序",
+                    InstallPhase::Publishing => "提交安装",
+                };
+                eprintln!(
+                    "sing-box：{phase}；已下载 {:.1}/{:.1} MiB，等待 {} 秒…",
+                    progress.downloaded as f64 / 1048576.0,
+                    progress.total as f64 / 1048576.0,
+                    started.elapsed().as_secs()
+                );
+            }
+            progress_at = tokio::time::Instant::now() + Duration::from_secs(5);
+        }
         status = coordinator::core_request_status(root.clone(), id)
             .await
             .ok()
             .flatten();
     }
-    output(id, &status, json)?;
-    outcome(status)
+    (id, status, interrupted)
 }

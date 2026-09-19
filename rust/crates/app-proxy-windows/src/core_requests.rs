@@ -241,6 +241,12 @@ fn now() -> Result<u64> {
 }
 fn validate_outcome(outcome: &CoreOutcome, owner: &str) -> Result<()> {
     match outcome {
+        CoreOutcome::CancelRequested { request_id } if request_id.is_nil() => {
+            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
+        }
+        CoreOutcome::Installed { version } if !crate::singbox_binary::valid_version(version) => {
+            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
+        }
         CoreOutcome::Ready {
             generation,
             process,
