@@ -26,7 +26,7 @@ Rust 负责配置、验证和生命周期；sing-box 继续实现协议。产品
 
 全部 profile 都属于 managed，不提供“绑定已有 sing-box 端口”选项。本地入口只绑定回环地址，IPv6 输出用标准括号形式。检查端口监听者时必须对应自有 ManagedCore 的已确认身份；端口可用不等于内核归属成立。端口被其他服务占用时提示换端口，不能认领或停止占用者。
 
-手动来源使用 `source: {kind: "manual", nodes: [...]}`，节点含 id、name、protocol 及协议字段，profile 的 selected_node_id 引用唯一节点。订阅来源使用 `source: {kind: "subscription", url_secret_id, revision, nodes: [...]}`；节点连接字段另存受保护秘密文档，manifest 保留显示元数据和引用。两类 profile 使用同一共享内核配置编译、生命周期和本地 HTTP 入口。旧手动更新操作不能覆盖订阅来源，订阅刷新/选节点的变更入口另行接入。示例配置中的 HTTP 上游仅为远端占位地址，需用户替换；不以手动上游入口变相提供已有本机 sing-box 服务复用。
+手动来源使用 `source: {kind: "manual", nodes: [...]}`，节点含 id、name、protocol 及协议字段，profile 的 selected_node_id 引用唯一节点。订阅来源使用 `source: {kind: "subscription", url_secret_id, revision, nodes: [...]}`；节点连接字段另存受保护秘密文档，manifest 保留显示元数据和引用。两类 profile 使用同一共享内核配置编译、生命周期和本地 HTTP 入口。旧手动更新操作不能覆盖订阅来源；订阅刷新/选节点已有配置动作和共享内核重配置入口，下载协调与 CLI 流程继续接入。示例配置中的 HTTP 上游仅为远端占位地址，需用户替换；不以手动上游入口变相提供已有本机 sing-box 服务复用。
 
 **3. 代理证据分层**
 
@@ -100,9 +100,13 @@ URI/Base64 适配与 typed Node 现已实现：六协议、标准/URL-safe Base6
 
 文本读取 `[Proxy]`、`[server_local]` 或无节名节点列表，支持命名节点和 Quantumult X 协议前缀、位置参数和键值参数、带引号的逗号/等号/反斜杠。其他节忽略，仅支持整行注释；客户端的全部扩展并未覆盖。未知连接选项、证书约束、SS 插件、自定义传输头和不等价组合会报告不可选，不能静默删除。`client-fingerprint` 才映射 uTLS，证书 `fingerprint` 当前不支持；`udp: false` 保留 TCP 限制（AnyTLS 无等价字段则拒绝）。
 
-Clash `network: http` 与 URI 显式 http 分开处理：无 TLS 时明确保留默认 GET 或 `http-opts.method`，有 TLS 时拒绝，避免把 TCP 伪装转成 HTTP/2。真实 sing-box 1.14.1 本地收包夹具已验证 GET/POST 方法，另有 YAML/文本六协议共 12 个配置通过 check；这些不是完整协议握手或真实订阅服务验收。秘密分存和共享编译已接入，六订阅 profile 加一个手动 profile 的完整配置也通过真实 check；导入/刷新提交和 CLI 写入口仍待续。
+Clash `network: http` 与 URI 显式 http 分开处理：无 TLS 时明确保留默认 GET 或 `http-opts.method`，有 TLS 时拒绝，避免把 TCP 伪装转成 HTTP/2。真实 sing-box 1.14.1 本地收包夹具已验证 GET/POST 方法，另有 YAML/文本六协议共 12 个配置通过 check；这些不是完整协议握手或真实订阅服务验收。秘密分存和共享编译已接入，六订阅 profile 加一个手动 profile 的完整配置也通过真实 check；下载协调和 CLI 写入口仍待续。
 
 刷新先锁外下载/解析，再对 source revision 做 compare-and-swap。按节点名保留选中项；重名拒绝；报告新增和删除；若刷新清空选择则保留旧配置。source 已变化就丢弃旧响应，不能写回覆盖。导入成功不等于节点实网可用，需生成配置 check 和对应探测。
+
+导入/刷新 staging 和 Refresh/Select 配置动作现已实现。刷新同时核对下载前的来源 revision 和 URL secret ID，保留已有名字对应的节点 ID，禁止将其挪给另一个名字。提交前才取得全局 revision，因此下载期间改显示名称或其他 profile 不会必然使结果失效；staging 后的全局变更仍拒绝陈旧提交。刷新保留当前选择（包括下载期间用户新选的节点），若该名字消失则旧来源、选择和配置全部保留。刷新递增 source revision，单纯选节点只递增 profile revision。
+
+活动 generation 完整配置字节不变时可纯提交（例如仅未选节点更新，或选择连接参数相同的另一名字）；字节变化仍要求具体重启预览。PrepareSubscription 复用已有候选 check、影响范围、ApplyUpdate 确认、旧配置恢复及持久回执，不新建第二套重启流程。订阅计划由 before/after 重建引用动作并重放 registry，整份 after 必须一致，防止混入其他编辑；运行状态不明时仍保留已有禁止自动重启的边界。实际本地 Shadowsocks 上游已验证选择切换、失败刷新回滚两路及成功刷新保留选择；其他协议与真实订阅服务仍需后续验收。
 
 **7. 可复用的测试经验**
 

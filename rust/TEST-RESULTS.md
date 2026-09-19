@@ -2,6 +2,18 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：订阅 staging、刷新/选择事务与共享 core 恢复**
+
+新增 Store 导入/刷新 staging API，将调用方已解析的节点转换为不可变秘密及只含引用的 ConfigRequest；不提交 manifest 或启动进程。来源 revision/URL 引用来自下载前，当前全局 revision 在 staging 时读取；registry 提交再次核验。按名字保留 ID/当前选择，所选名字消失、重名、来源陈旧或提交期间全局变化都拒绝覆盖；不变节点复用秘密。Refresh/Select 如不改变整个活动 generation 的编译字节可纯提交，连接变化仍需 PrepareSubscription 预览和已有 ApplyUpdate 明确确认。
+
+6 项新增默认回归及独立复跑通过：导入零 manifest 变更/稳定秘密数量/成功重放/更换 URL 或密码拒绝；无关改名后刷新、节点顺序/身份/秘密复用、下载期间新选择、增删报告及精确请求重放；陈旧 source/URL、所选消失和重复节点零修改，staging 后陈旧提交拒绝；活动 generation 的未选节点更新/等价节点选择零重启及选中连接变化要求确认；Refresh/Select 精确 plan、无关字段篡改拒绝、reopen 和准备/执行回执恢复；IPC minor 12 双向拒绝发生在配置/core 接纳之前。journal 测试使用合成的当前进程身份，但不调用进程操作 API。
+
+独立审查复现已提交导入后更换秘密内容仍被旧回执接受的问题：相同请求/name 会派生相同 ID，故仅比较引用请求摘要不够。终态 stage 重放现在只读比较全部 incoming 秘密内容，缺失或不同拒绝，不创建或修改秘密；URL 和密码两种回归均覆盖。
+
+真实 sing-box 1.14.1 测试单独显式运行，并经独立复跑通过：两个受控 Shadowsocks 上游映射至回环 HTTP 夹具，订阅与手动 profile 共用实际 core。prepare 保持原 PID/manifest/流量；确认 Select 后旧 core 退出、订阅流量切换，手动路由保持；有效格式但选中上游不可用的 Refresh 回滚两条原路由且不改 manifest；成功 Refresh 保留选中 ID 并递增 source revision。只操作自身 core/peer Child，结束后显式停止；无真实订阅、用户凭据、用户应用或提权操作。这证明本地 Shadowsocks 链路与重配置，不代表六协议全网验收。
+
+全量 workspace **349 项通过、0 失败、32 项顶层 ignored**，日志 `.tools/subscription-edits-final-tests.log`；新增真实切换测试属于 ignored 中另行显式通过的一项。workspace clippy -D warnings、fmt/diff 通过，独立最终复审无剩余阻塞。提交主题 `feat(rust): stage subscription edits and reuse shared core recovery`。下载协调服务、CLI 导入/刷新/选择和完整菜单仍待实现。
+
 **2026-09-20：订阅节点秘密分存与共享内核编译接入**
 
 manifest 新增 Subscription 来源（URL secret ID、独立 revision、SavedNode 列表）。节点只公开显示元数据和引用，完整 typed Node 通过私有 serde adapter 编码为版本化秘密文档，包含密码、UUID 与可能携带 token 的传输路径；保留现有 ACL 保护的不可变秘密文件，不宣称加密存储。Store 提交/读取验证全部引用、URL、节点类型和显示元数据绑定；未知字段、损坏或不匹配拒绝且保留原文件。共享编译器只读取选中节点并生成既有固定路由；旧手动更新拒绝覆盖订阅来源。

@@ -139,6 +139,22 @@ impl CoreControl {
                 })
                 .await
                 .map(|impact| CoreOutcome::Prepared { impact }),
+            CoreAction::PrepareSubscription {
+                expected_revision,
+                profile_id,
+                edit,
+            } => self
+                .manager
+                .prepare_update(&app_proxy_core::registry::ConfigRequest {
+                    request_id: job.id,
+                    expected_revision,
+                    action: app_proxy_core::registry::ConfigAction::EditSubscriptionProfile {
+                        profile_id,
+                        edit,
+                    },
+                })
+                .await
+                .map(|impact| CoreOutcome::Prepared { impact }),
             CoreAction::ApplyUpdate { plan_id } | CoreAction::RecoverUpdate { plan_id } => {
                 let settings = self.configuration.snapshot()?.settings;
                 let probe = |endpoint| {

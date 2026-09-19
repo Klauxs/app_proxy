@@ -19,6 +19,11 @@ pub enum CoreAction {
         profile_id: Uuid,
         node: crate::registry::ManualProxyInput,
     },
+    PrepareSubscription {
+        expected_revision: u64,
+        profile_id: Uuid,
+        edit: crate::registry::SubscriptionEdit,
+    },
     PrepareExpand {
         expected_revision: u64,
         profiles: Vec<Uuid>,
@@ -33,7 +38,7 @@ pub enum CoreAction {
 }
 impl CoreAction {
     pub fn normalize(&mut self) -> Result<(), ValidationError> {
-        if matches!(self, Self::PrepareUpdate { expected_revision, profile_id, .. } if *expected_revision == 0 || profile_id.is_nil())
+        if matches!(self, Self::PrepareUpdate { expected_revision, profile_id, .. } | Self::PrepareSubscription { expected_revision, profile_id, .. } if *expected_revision == 0 || profile_id.is_nil())
             || matches!(
                 self,
                 Self::PrepareExpand {

@@ -643,3 +643,99 @@ async fn subscription_catalog_requires_minor_eleven_in_both_directions() {
     drop(connection);
     server.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn subscription_edits_require_minor_twelve_before_either_admission() {
+    for core in [false, true] {
+        let fixture = Fixture::new();
+        let operation = || {
+            let edit = app_proxy_core::registry::SubscriptionEdit::Select {
+                expected_source_revision: 1,
+                node_id: Uuid::new_v4(),
+            };
+            if core {
+                Operation::ControlCore {
+                    action: CoreAction::PrepareSubscription {
+                        expected_revision: 1,
+                        profile_id: Uuid::new_v4(),
+                        edit,
+                    },
+                }
+            } else {
+                Operation::Configure {
+                    expected_revision: 1,
+                    action: ConfigAction::EditSubscriptionProfile {
+                        profile_id: Uuid::new_v4(),
+                        edit,
+                    },
+                }
+            }
+        };
+        let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+        let identity = fixture.shared.identity.clone();
+        let old_server = tokio::spawn(async move {
+            let mut connection = listener.accept().await.unwrap();
+            connection.receive::<Hello>().await.unwrap();
+            let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
+            greeting.protocol_minor = 11;
+            connection
+                .send(&Welcome::Ready { hello: greeting })
+                .await
+                .unwrap();
+            assert!(connection.receive::<Request>().await.is_err());
+        });
+        assert!(matches!(
+            fixture.rpc(Uuid::new_v4(), operation()).await,
+            Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+        ));
+        old_server.await.unwrap();
+        let server = fixture.server();
+        let policy = policy();
+        let mut connection = ipc::connect(
+            fixture.shared.identity.store_id,
+            &policy,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
+        greeting.protocol_minor = 11;
+        connection.send(&greeting).await.unwrap();
+        connection.receive::<Welcome>().await.unwrap();
+        let request_id = Uuid::new_v4();
+        connection
+            .send(&Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id,
+                operation: operation(),
+            })
+            .await
+            .unwrap();
+        let response: Response = connection.receive().await.unwrap();
+        assert!(
+            matches!(response.result, Reply::Error { code } if code == "SUBSCRIPTION_PROTOCOL_UPDATE_REQUIRED")
+        );
+        assert!(
+            fixture
+                .shared
+                .configuration
+                .lock()
+                .unwrap()
+                .config_request_status(request_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            fixture
+                .shared
+                .configuration
+                .lock()
+                .unwrap()
+                .core_request_status(request_id)
+                .unwrap()
+                .is_none()
+        );
+        drop(connection);
+        server.await.unwrap().unwrap();
+    }
+}

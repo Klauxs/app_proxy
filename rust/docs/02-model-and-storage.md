@@ -96,7 +96,9 @@ manifest 是单个权威配置快照。第一次创建只接受空目录或正�
 
 订阅来源现有 `kind: "subscription"`、`url_secret_id`、独立 `revision` 和节点列表。节点 manifest 只保存 id、name、protocol、server、port、secret_id；URL 整体单独保存，节点完整连接参数（包括 UUID、密码、TLS/传输字段和路径）编码为版本 1 的严格 typed 秘密文档，最大 64 KiB。它不是原始订阅正文或任意 sing-box JSON。每个来源最多 4096 个节点，source revision 必须非零，选中 ID 必须存在；列表名称和 ID 不能重复。
 
-读取与提交 store 时校验 URL 和全部节点秘密，节点文档须与 manifest 的名称、协议、服务器、端口一致，并重新通过协议组合校验；坏引用、未知字段、版本或损坏内容拒绝且不重置原文件。生成内核配置只解析所选节点的秘密，沿用每 profile 的固定入口/出口路由。启动依赖摘要包含所选节点的不可变 secret_id，来源 URL、来源 revision 和其他节点变化不使其误判为连接变化；既有手动代理摘要字节格式保留。来源导入、刷新事务和秘密延迟清理的生产入口仍待接入。
+读取与提交 store 时校验 URL 和全部节点秘密，节点文档须与 manifest 的名称、协议、服务器、端口一致，并重新通过协议组合校验；坏引用、未知字段、版本或损坏内容拒绝且不重置原文件。生成内核配置只解析所选节点的秘密，沿用每 profile 的固定入口/出口路由。启动依赖摘要包含所选节点的不可变 secret_id，来源 URL、来源 revision 和其他节点变化不使其误判为连接变化；既有手动代理摘要字节格式保留。
+
+来源导入/刷新 staging API 现可生成只含引用的 ConfigRequest 和新增/删除/不支持节点摘要。解析由调用方先在锁外完成，staging 不提交 manifest、不启动应用或内核；来源 revision 与 URL 引用来自下载前快照，staging 使用当前全局 revision，提交时再执行 CAS。节点名和请求 ID 派生有域区分的 SHA256/UUIDv8，稳定重试不会重复创建秘密；终态重放也只读核验同一 ID 的秘密内容，换 URL/密码重用请求 ID 会拒绝。未变化节点直接复用旧秘密，新增秘密先写后引用，失败残留不擅自清理。下载协调服务、CLI 写入口及秘密延迟清理仍待接入。
 
 MSIX LocalState 可能在 store 之外。每个 location 都记录自己的归属标记、namespace 和路径约束；不能用一个“必须位于 store 内”的检查错误拒绝合法包目录，也不能允许用户 arbitrary path 绕过归属校验。原版数据不接管、不清理。
 

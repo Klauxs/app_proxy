@@ -30,6 +30,7 @@ pub mod singbox_binary;
 pub mod singbox_install;
 mod storage_security;
 pub mod store;
+pub mod subscription_stage;
 
 use std::io;
 

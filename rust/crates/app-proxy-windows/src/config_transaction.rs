@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const REQUEST_LIMIT: usize = 1024 * 1024;
+pub(crate) const REQUEST_LIMIT: usize = 1024 * 1024;
 const RECORD_LIMIT: usize = 2 * MANIFEST_LIMIT + 16384;
 const RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 
@@ -140,7 +140,8 @@ impl Store {
                 // Ensure the complete snapshot fits and all referenced secrets exist
                 // before a pending record can authorize changing the manifest.
                 store::encode(&target, MANIFEST_LIMIT)?;
-                let rejection = rejection.or(self.profile_edit_rejection(&request.action)?);
+                let rejection =
+                    rejection.or(self.profile_edit_rejection(&request.action, &target)?);
                 if rejection.is_none() {
                     self.stage_proxy_secret(request)?;
                 }
@@ -206,10 +207,15 @@ impl Store {
 
     // Checked inside the same store gate as intent/commit. A candidate being
     // prepared outside this gate must still pass the manager's current check.
-    fn profile_edit_rejection(&self, action: &ConfigAction) -> Result<Option<&'static str>> {
+    fn profile_edit_rejection(
+        &self,
+        action: &ConfigAction,
+        target: &Manifest,
+    ) -> Result<Option<&'static str>> {
         use crate::core_state::CoreState;
         let id = match action {
             ConfigAction::UpdateManualProfile { profile_id, .. }
+            | ConfigAction::EditSubscriptionProfile { profile_id, .. }
             | ConfigAction::RemoveProfile { profile_id } => profile_id,
             _ => return Ok(None),
         };
@@ -220,6 +226,11 @@ impl Store {
             | CoreState::Running { generation, .. } => generation,
         };
         let generation = self.open_core_generation(generation)?;
+        if matches!(action, ConfigAction::EditSubscriptionProfile { .. })
+            && self.core_generation_matches(&generation, target)?
+        {
+            return Ok(None);
+        }
         Ok(generation
             .profiles()
             .iter()

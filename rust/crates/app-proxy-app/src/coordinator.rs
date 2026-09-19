@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 11;
+const PROTOCOL_MINOR: u32 = 12;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -418,6 +418,17 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if subscription_edit_operation(&request.operation) && client_minor < 12 {
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: Reply::Error {
+                    code: "SUBSCRIPTION_PROTOCOL_UPDATE_REQUIRED".into(),
+                },
+            })
+            .await;
+    }
     if matches!(&request.operation, Operation::Catalog { .. }) && client_minor < 11 {
         return connection
             .send(&Response {
@@ -636,6 +647,9 @@ async fn rpc(
     if matches!(&request.operation, Operation::Catalog { .. }) && server.protocol_minor < 11 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
+    if subscription_edit_operation(&request.operation) && server.protocol_minor < 12 {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     let request_id = request.request_id;
     connection.send(&request).await?;
     let response: Response = connection.receive().await?;
@@ -681,6 +695,18 @@ pub async fn configure(root: PathBuf, request: ConfigRequest) -> Result<ConfigOu
         Reply::Configured { outcome } => Ok(outcome),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
+}
+
+fn subscription_edit_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::Configure {
+            action: ConfigAction::EditSubscriptionProfile { .. },
+            ..
+        } | Operation::ControlCore {
+            action: CoreAction::PrepareSubscription { .. }
+        }
+    )
 }
 
 pub async fn request_status(

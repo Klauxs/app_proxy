@@ -32,6 +32,10 @@ pub enum ConfigAction {
         profile_id: Uuid,
         node: ManualProxyInput,
     },
+    EditSubscriptionProfile {
+        profile_id: Uuid,
+        edit: SubscriptionEdit,
+    },
     RenameProfile {
         profile_id: Uuid,
         name: String,
@@ -62,6 +66,95 @@ pub enum ConfigAction {
     RemoveInstance {
         instance_id: Uuid,
     },
+}
+
+/// References only. Downloaded bodies, source URLs and credentials never enter
+/// the durable configuration request or its diagnostic receipt.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SubscriptionEdit {
+    Refresh {
+        expected_source_revision: u64,
+        expected_url_secret_id: Uuid,
+        nodes: Vec<crate::subscription::saved::SavedNode>,
+    },
+    Select {
+        expected_source_revision: u64,
+        node_id: Uuid,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubscriptionChanges {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub unsupported: usize,
+}
+
+fn edit_subscription(
+    profile: &mut ProxyProfile,
+    edit: &SubscriptionEdit,
+) -> Result<(), ValidationError> {
+    let ProxySource::Subscription {
+        revision,
+        url_secret_id,
+        nodes,
+    } = &mut profile.source
+    else {
+        return Err(ValidationError("SUBSCRIPTION_PROFILE_REQUIRED"));
+    };
+    let expected = match edit {
+        SubscriptionEdit::Refresh {
+            expected_source_revision,
+            ..
+        }
+        | SubscriptionEdit::Select {
+            expected_source_revision,
+            ..
+        } => *expected_source_revision,
+    };
+    if *revision != expected {
+        return Err(ValidationError("STALE_SUBSCRIPTION_SOURCE"));
+    }
+    match edit {
+        SubscriptionEdit::Refresh {
+            expected_url_secret_id,
+            nodes: next,
+            ..
+        } => {
+            if url_secret_id != expected_url_secret_id {
+                return Err(ValidationError("STALE_SUBSCRIPTION_SOURCE"));
+            }
+            let selected = nodes
+                .iter()
+                .find(|n| n.id == profile.selected_node_id)
+                .ok_or(ValidationError("SELECTED_NODE_NOT_FOUND"))?;
+            if !next.iter().any(|n| n.name == selected.name) {
+                return Err(ValidationError("SUBSCRIPTION_SELECTED_NODE_REMOVED"));
+            }
+            // Existing identities stay attached to the same names. This prevents
+            // a refresh from silently reassigning an active node's identity.
+            for node in next {
+                if nodes
+                    .iter()
+                    .any(|old| (old.id == node.id) != (old.name == node.name))
+                {
+                    return Err(ValidationError("SUBSCRIPTION_NODE_ID_CHANGED"));
+                }
+            }
+            *revision = next_revision(*revision)?;
+            *nodes = next.clone();
+        }
+        SubscriptionEdit::Select { node_id, .. } => {
+            if !nodes.iter().any(|node| node.id == *node_id) {
+                return Err(ValidationError("SELECTED_NODE_NOT_FOUND"));
+            }
+            profile.selected_node_id = *node_id;
+        }
+    }
+    profile.revision = next_revision(profile.revision)?;
+    Ok(())
 }
 
 /// Transient request input. Passwords are stored separately from the manifest
@@ -226,6 +319,10 @@ pub fn apply(
             let node = node.node(target.selected_node_id, request.request_id)?;
             target.revision = next_revision(target.revision)?;
             target.source = ProxySource::Manual { nodes: vec![node] };
+            *profile_id
+        }
+        ConfigAction::EditSubscriptionProfile { profile_id, edit } => {
+            edit_subscription(profile_mut(&mut manifest, *profile_id)?, edit)?;
             *profile_id
         }
         ConfigAction::RenameProfile { profile_id, name } => {

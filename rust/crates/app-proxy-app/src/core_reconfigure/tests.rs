@@ -110,6 +110,255 @@ impl Drop for Cleanup {
 }
 
 #[tokio::test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX; owned cores and loopback synthetic Shadowsocks peers only"]
+async fn real_subscription_selection_and_refresh_use_shared_core_confirmation_and_rollback() {
+    use app_proxy_core::subscription;
+    use app_proxy_windows::subscription_stage::ImportRequest;
+    use std::{process::Stdio, time::Duration};
+    let binary = PathBuf::from(std::env::var_os("APP_PROXY_TEST_SING_BOX").unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let mut store = Store::create(&root).unwrap();
+    let installed = root.join("bin/sing-box/1.14.1");
+    fs::create_dir_all(&installed).unwrap();
+    for name in ["sing-box.exe", "libcronet.dll"] {
+        fs::copy(binary.parent().unwrap().join(name), installed.join(name)).unwrap();
+    }
+    let first = upstream("first").await;
+    let second = upstream("second").await;
+    let reserves: Vec<_> = (0..4)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let ports: Vec<_> = reserves
+        .iter()
+        .map(|s| s.local_addr().unwrap().port())
+        .collect();
+    let config = serde_json::json!({ "log": {"disabled": true},
+        "inbounds": [
+            {"type":"shadowsocks", "tag":"first", "listen":"127.0.0.1", "listen_port":ports[0], "method":"aes-128-gcm", "password":"fixture"},
+            {"type":"shadowsocks", "tag":"second", "listen":"127.0.0.1", "listen_port":ports[1], "method":"aes-128-gcm", "password":"fixture"}
+        ],
+        "outbounds": [
+            {"type":"http", "tag":"first", "server":"127.0.0.1", "server_port":first.port},
+            {"type":"http", "tag":"second", "server":"127.0.0.1", "server_port":second.port}
+        ],
+        "route": {"rules":[
+            {"inbound":["first"], "action":"route", "outbound":"first"},
+            {"inbound":["second"], "action":"route", "outbound":"second"},
+            {"action":"reject"}
+        ]}
+    });
+    let peer_config = temp.path().join("synthetic-peer.json");
+    fs::write(&peer_config, serde_json::to_vec(&config).unwrap()).unwrap();
+    drop(reserves);
+    let mut peer = tokio::process::Command::new(&binary)
+        .args(["run", "-c"])
+        .arg(peer_config)
+        .creation_flags(0x08000000)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for port in &ports[..2] {
+            loop {
+                assert!(peer.try_wait().unwrap().is_none());
+                if tokio::net::TcpStream::connect(("127.0.0.1", *port))
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let parsed = |second_port| {
+        subscription::parse(&format!(
+        "ss://aes-128-gcm:fixture@127.0.0.1:{}#A\nss://aes-128-gcm:fixture@127.0.0.1:{second_port}#B", ports[0]
+    )).unwrap()
+    };
+    let import = ImportRequest {
+        request_id: Uuid::new_v4(),
+        expected_revision: 1,
+        profile_id: Uuid::new_v4(),
+        name: "subscription".into(),
+        endpoint: Endpoint {
+            host: "127.0.0.1".parse().unwrap(),
+            port: ports[2],
+        },
+        url: "https://synthetic.invalid/never-downloaded".into(),
+        selected_name: "A".into(),
+    };
+    let staged = store
+        .stage_subscription_import(&import, &parsed(ports[1]))
+        .unwrap();
+    assert!(matches!(
+        store.apply_config(&staged.request).unwrap(),
+        app_proxy_windows::config_transaction::ConfigOutcome::Applied { .. }
+    ));
+    let manual = Uuid::new_v4();
+    assert!(matches!(
+        store
+            .apply_config(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: 2,
+                action: ConfigAction::CreateManualProfile {
+                    profile_id: manual,
+                    name: "manual".into(),
+                    endpoint: Endpoint {
+                        host: "127.0.0.1".parse().unwrap(),
+                        port: ports[3]
+                    },
+                    node: input(first.port)
+                }
+            })
+            .unwrap(),
+        app_proxy_windows::config_transaction::ConfigOutcome::Applied { .. }
+    ));
+    let configuration = Arc::new(Configuration::new(store));
+    let _cleanup = Cleanup(configuration.clone());
+    let manager = CoreManager::new(root, configuration.clone());
+    let ready = manager
+        .ensure_with(
+            &[import.profile_id, manual],
+            import.profile_id,
+            |endpoint| async {
+                assert_eq!(via(endpoint).await?, "first");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    let before = configuration.snapshot().unwrap();
+    let ProxySource::Subscription { nodes, .. } = &before.profiles[0].source else {
+        panic!()
+    };
+    let second_node = nodes[1].id;
+    let impact = manager
+        .prepare_update(&ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: before.revision,
+            action: ConfigAction::EditSubscriptionProfile {
+                profile_id: import.profile_id,
+                edit: SubscriptionEdit::Select {
+                    expected_source_revision: 1,
+                    node_id: second_node,
+                },
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(impact.affected_profiles.len(), 2);
+    assert_eq!(configuration.snapshot().unwrap().revision, before.revision);
+    assert_eq!(via(import.endpoint.clone()).await.unwrap(), "first");
+    assert!(
+        matches!(manager.state().unwrap(), CoreState::Running { process, .. } if process == ready.process)
+    );
+    let changed_port = ports[2];
+    let result = manager
+        .apply_update(
+            impact.plan_id,
+            admit(&configuration, impact.plan_id),
+            |endpoint| async move {
+                let expected = if endpoint.port == changed_port {
+                    "second"
+                } else {
+                    "first"
+                };
+                assert_eq!(via(endpoint).await?, expected);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, CoreOutcome::Reconfigured { .. }));
+    assert!(CoreProcess::recover(&ready.process).unwrap().is_none());
+    assert_eq!(
+        configuration.snapshot().unwrap().profiles[0].selected_node_id,
+        second_node
+    );
+    let revision = configuration.snapshot().unwrap().revision;
+
+    // Valid syntax, unreachable selected upstream: keep the previous selection,
+    // source revision and both working routes after the failed candidate.
+    let unused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let staged = configuration
+        .lock()
+        .unwrap()
+        .stage_subscription_refresh(
+            Uuid::new_v4(),
+            import.profile_id,
+            1,
+            import.request_id,
+            &parsed(unused.local_addr().unwrap().port()),
+        )
+        .unwrap();
+    let impact = manager.prepare_update(&staged.request).await.unwrap();
+    let result = manager
+        .apply_update(
+            impact.plan_id,
+            admit(&configuration, impact.plan_id),
+            |endpoint| async { via(endpoint).await.map(|_| ()) },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, CoreOutcome::Restored { core_down: false }));
+    assert_eq!(configuration.snapshot().unwrap().revision, revision);
+    assert_eq!(via(import.endpoint.clone()).await.unwrap(), "second");
+    assert_eq!(
+        via(Endpoint {
+            host: "127.0.0.1".parse().unwrap(),
+            port: ports[3]
+        })
+        .await
+        .unwrap(),
+        "first"
+    );
+    drop(unused);
+
+    let staged = configuration
+        .lock()
+        .unwrap()
+        .stage_subscription_refresh(
+            Uuid::new_v4(),
+            import.profile_id,
+            1,
+            import.request_id,
+            &parsed(ports[0]),
+        )
+        .unwrap();
+    let impact = manager.prepare_update(&staged.request).await.unwrap();
+    assert!(matches!(
+        manager
+            .apply_update(
+                impact.plan_id,
+                admit(&configuration, impact.plan_id),
+                |endpoint| async {
+                    assert_eq!(via(endpoint).await?, "first");
+                    Ok(())
+                }
+            )
+            .await
+            .unwrap(),
+        CoreOutcome::Reconfigured { .. }
+    ));
+    let updated = configuration.snapshot().unwrap();
+    assert_eq!(updated.profiles[0].selected_node_id, second_node);
+    assert!(matches!(
+        updated.profiles[0].source,
+        ProxySource::Subscription { revision: 2, .. }
+    ));
+    manager.stop().await.unwrap();
+    peer.start_kill().unwrap();
+    peer.wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn rollback_checks_later_routes_after_slow_failures_with_bounded_concurrency() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let active = AtomicUsize::new(0);

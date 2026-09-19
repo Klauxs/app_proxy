@@ -33,6 +33,8 @@ pub enum UpdatePhase {
 pub enum UpdateChange {
     EditProfile {},
     Expand { profiles: Vec<Uuid> },
+    RefreshSubscription {},
+    SelectSubscriptionNode {},
 }
 
 impl Default for UpdateChange {
@@ -100,8 +102,22 @@ impl Store {
     pub fn prepare_core_update(&mut self, request: &ConfigRequest) -> Result<CoreUpdate> {
         self.ensure_core_update_idle()?;
         self.recover_config_requests()?;
-        let ConfigAction::UpdateManualProfile { profile_id, .. } = &request.action else {
-            return Err(Error::Invalid("INVALID_CORE_UPDATE_ACTION"));
+        let (profile_id, change) = match &request.action {
+            ConfigAction::UpdateManualProfile { profile_id, .. } => {
+                (*profile_id, UpdateChange::EditProfile {})
+            }
+            ConfigAction::EditSubscriptionProfile { profile_id, edit } => (
+                *profile_id,
+                match edit {
+                    registry::SubscriptionEdit::Refresh { .. } => {
+                        UpdateChange::RefreshSubscription {}
+                    }
+                    registry::SubscriptionEdit::Select { .. } => {
+                        UpdateChange::SelectSubscriptionNode {}
+                    }
+                },
+            ),
+            _ => return Err(Error::Invalid("INVALID_CORE_UPDATE_ACTION")),
         };
         let before = self.load()?;
         let previous = self.core_state()?;
@@ -109,7 +125,7 @@ impl Store {
             return Err(Error::Invalid("CORE_UPDATE_REQUIRES_RUNNING"));
         };
         let active = self.open_core_generation(generation)?;
-        if !active.profiles().iter().any(|p| p.id == *profile_id) {
+        if !active.profiles().iter().any(|p| p.id == profile_id) {
             return Err(Error::Invalid("PROFILE_NOT_ACTIVE"));
         }
         if !self.core_generation_is_current(&active)? {
@@ -125,8 +141,8 @@ impl Store {
             schema_version: 2,
             store_id: before.store_id,
             plan_id: request.request_id,
-            profile_id: *profile_id,
-            change: UpdateChange::EditProfile {},
+            profile_id,
+            change,
             before,
             after,
             previous,
@@ -415,6 +431,12 @@ impl Store {
                 profiles: profiles.clone(),
                 required: plan.profile_id,
             }
+        } else if let Some(edit) = subscription_edit(&plan)? {
+            CoreAction::PrepareSubscription {
+                expected_revision: plan.before.revision,
+                profile_id: plan.profile_id,
+                edit,
+            }
         } else {
             let profile = plan
                 .after
@@ -581,6 +603,26 @@ impl Store {
         if !old.profiles().iter().any(|p| p.id == plan.profile_id) {
             return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
         }
+        if let Some(edit) = subscription_edit(plan)? {
+            let before = store::decode(&store::encode(&plan.before, MANIFEST_LIMIT)?)?;
+            let (mut expected, receipt) = registry::apply(
+                before,
+                &ConfigRequest {
+                    request_id: plan.plan_id,
+                    expected_revision: plan.before.revision,
+                    action: ConfigAction::EditSubscriptionProfile {
+                        profile_id: plan.profile_id,
+                        edit,
+                    },
+                },
+            )
+            .map_err(|_| Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
+            expected.revision = receipt.revision;
+            if !same(&expected, &plan.after)? {
+                return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+            }
+            return Ok(());
+        }
         let mut expected: Manifest = store::decode(&store::encode(&plan.before, MANIFEST_LIMIT)?)?;
         let profile = plan
             .after
@@ -629,6 +671,56 @@ impl Store {
 
 fn same(left: &Manifest, right: &Manifest) -> Result<bool> {
     Ok(store::encode(left, MANIFEST_LIMIT)? == store::encode(right, MANIFEST_LIMIT)?)
+}
+
+/// Reconstruct only the reference-valued edit represented by these two snapshots.
+/// Replaying registry::apply then proves no unrelated field was modified.
+fn subscription_edit(plan: &CoreUpdate) -> Result<Option<registry::SubscriptionEdit>> {
+    use app_proxy_core::model::ProxySource;
+    use registry::SubscriptionEdit;
+    if !matches!(
+        plan.change,
+        UpdateChange::RefreshSubscription {} | UpdateChange::SelectSubscriptionNode {}
+    ) {
+        return Ok(None);
+    }
+    let before = plan
+        .before
+        .profiles
+        .iter()
+        .find(|p| p.id == plan.profile_id)
+        .ok_or(Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
+    let after = plan
+        .after
+        .profiles
+        .iter()
+        .find(|p| p.id == plan.profile_id)
+        .ok_or(Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
+    let ProxySource::Subscription {
+        revision,
+        url_secret_id,
+        ..
+    } = &before.source
+    else {
+        return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+    };
+    Ok(Some(match plan.change {
+        UpdateChange::RefreshSubscription {} => {
+            let ProxySource::Subscription { nodes, .. } = &after.source else {
+                return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+            };
+            SubscriptionEdit::Refresh {
+                expected_source_revision: *revision,
+                expected_url_secret_id: *url_secret_id,
+                nodes: nodes.clone(),
+            }
+        }
+        UpdateChange::SelectSubscriptionNode {} => SubscriptionEdit::Select {
+            expected_source_revision: *revision,
+            node_id: after.selected_node_id,
+        },
+        _ => unreachable!(),
+    }))
 }
 
 #[cfg(test)]
