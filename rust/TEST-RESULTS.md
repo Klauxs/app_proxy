@@ -350,3 +350,15 @@ TDH 读取命名 ProcessID/ImageName 属性，不把事件头 PID 或固定 payl
 6 项新增默认测试覆盖真实 Windows 内存安全描述符的正反例、真实普通 owner 对象拒绝且保留内容、源文件锁与身份/hash、严格记录绑定、大小上限和普通调用无机器目录写入、真实 issuer 夹具退出后的失效。审查方独立复跑全部 6 项通过。安全描述符正例在内存中验证；没有以提权令牌在 Program Files 创建 generation，因此不能把这些测试称为真实提权部署/权限继承或激活验证。前台授权、任务、后台 listener、自动 Guard 和 IFEO 仍待接入。
 
 最终全量 workspace 248 项通过、24 项顶层 ignored；来源绑定修正后重新全量运行通过，clippy -D warnings、fmt/diff 通过。提交前工作目录未进行 UAC、Program Files 写入、任务或 IFEO 注册。
+
+**Guard 按需监听任务平台层（2026-09-20）**
+
+新增原生 Task Scheduler COM 模块，操作本用户/store 的固定名字，action 仅来自已核验且持有的受保护 deployment；固定 event-listen/store/generation，禁止路径中的环境变量、任务参数替换和引号。提权注册使用 CREATE 和 DONT_ADD_PRINCIPAL_ACE，不覆盖已有任务；已有精确配置可以复用。任务管理员 owner，protected DACL 限系统/管理员维护、当前用户只读和执行；普通侧不能变更提权 action。
+
+回读校验固定路径/参数/cwd、marker/URI、SID/交互登录/最高权限、principal/action context、唯一 Exec、无 trigger、V2 兼容和按需运行条件。真实 COM 测试发现 UserId getter 将 SID 变为用户名，已通过 Windows 账户查询还原 SID 后比较。V2 限制还防止持久维护配置绕过无 trigger 判断；回归在内存定义加入 maintenance period/deadline，确认 trigger 仍为零而校验拒绝。
+
+run 只供已核对普通 coordinator 使用，显式当前 session>0，空替换参数；scheduler instance GUID 不能代替事件管道认证或 Guard active。remove_idle 要求提权、精确任务和无运行实例，删除后核对缺失；上层仍须先静止普通 run 请求，系统没有查询/删除的原子事务。没有强制停止 API，删除注册也不删除 helper。失败回读不会盲删未验证任务，注册结果未知必须交由后续集成事务核对。
+
+4 项新增默认测试通过：固定名字/参数/路径限制、真实 Windows 安全描述符正负、本机 Task Scheduler 服务的未注册 COM definition 往返/缺失名字只读查询、主账户/权限/action/自动 trigger/maintenance/并行及超时条件变更拒绝。独立复审通过并复跑全部 4 项。全量 workspace 252 项通过、24 项 ignored；之后收紧替换语法、context/兼容级别和 maintenance 回归，全部 4 项再次通过，clippy -D warnings、fmt/diff 通过。
+
+本批没有在系统创建、运行或删除任何任务，也未触发 UAC。真实任务 ACL 持久化、普通侧 RunEx、提权 token/session 和 helper 激活仍未验证；前台授权、event-listen host、登录任务及自动 Guard 尚未接入，不能称监听已经生效。

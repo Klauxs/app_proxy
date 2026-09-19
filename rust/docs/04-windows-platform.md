@@ -90,6 +90,10 @@ request 消费采用独占 claim 文件/系统锁，helper 全程持有，确保
 
 coordinator 登录任务在 Guard desired enabled 且授权已完成时安装，以普通权限启动 serve；事件任务按需启动提权 listener，无需第二个独立登录触发器。任务验证涵盖 owner SID、RunLevel、action 路径、参数和协议版本，不仅看名称。
 
+事件任务平台使用固定 SID 摘要/store 名称，只创建缺失任务；已有精确匹配的注册复用，任何不同配置报冲突，不自动覆盖。action 从已持有的受保护 deployment 派生，只有固定 event-listen 与 store/generation UUID；路径拒绝环境或任务参数替换语法。普通用户仅有读取和运行权限，管理员与系统可维护，注册时禁止自动添加 principal 的写权限。回读同时核对任务 ACL、归属标记、真实账户 SID、V2 兼容级别、principal/action context、唯一 action、无触发器和运行条件。UserId getter 可能返回账户名，必须解析为 SID 比较。
+
+普通 coordinator 只能以当前正数 session 请求 RunEx，不提供替换参数；返回的 scheduler instance GUID 不证明 helper 已运行，仍需认证事件管道。删除前必须先由集成事务停止本工具的普通 run 请求，再核对同一任务无运行实例；查询与删除不构成 Windows 提供的原子锁。此模块不强制终止实例、不自动删除 helper，也不将注册成功报告为保护 active。
+
 **8. 分发与升级**
 
 首版继续支持固定目录便携安装，不宣称移动目录后已有入口自动修复。release 包包括 CLI、host 和版本化 MSIX 桥接，不携带 sing-box。运行时一键安装的内核独立记录来源、版本和许可证。新版本替换整个发行目录中的应用文件需先停止 coordinator/listener 或采用 side-by-side 安装；不在运行中覆盖同名 EXE。

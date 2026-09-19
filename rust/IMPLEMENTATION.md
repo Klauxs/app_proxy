@@ -32,6 +32,7 @@
 | 原生 ETW 进程事件平台层 | 已实现，独立 review 通过；实际 kernel provider 采集待授权验证 | 固定 provider/事件、TDH 命名属性、1024 项有界提示队列、丢失统计、会话归属及退出；默认 4 项及真实空会话控制测试通过，当前权限启用 provider 返回 Win32 5；未接入提权部署或事件管道 |
 | 单向事件管道平台层 | 已实现，独立 review 通过；真实提权两端集成待续 | 独立名称及只读 logon ACL、双向用户/session/logon/映像/权限核对、严格消息和断线补扫；每批 128 条，队列送完才报告结束；5 项管道及 5 项 ETW 默认测试通过，部署与自动 Guard 尚未连接 |
 | Guard 受保护 helper generation | 平台代码与独立 review 完成；真实提权部署待验收 | 自动 Program Files 目录、UAC 前源文件/父目录 pin 与独立身份/hash、同用户普通 issuer、管理员 owner/只读用户 ACL、不可变复制/回读；6 项默认测试通过；前台 UAC、任务与激活未接入 |
+| Guard 按需监听任务平台层 | 已实现，独立 review 通过；真实注册运行待验收 | 固定任务名/保护目录 host/UUID 参数，管理员 owner、用户只读运行；完整定义与 ACL 核验、只创建不覆盖冲突、当前 session RunEx、空闲核对删除；4 项内存 COM/只读服务测试通过，前台授权与 host 监听入口未接入 |
 | Guard 纠正执行服务 | 已实现，独立 review 通过；自动触发待接入 | 精确误启动主进程、持久一次性停止许可、全局限流、辅助残留等待及停止后代理失败禁止直连；9 项新增回归通过，不自动监听或注册 IFEO |
 | Guard 只读扫描 | 已实现，独立 review 通过；监听接入待续 | 登记实例归属、历史会话绑定保留、未决/歧义保守处理，目录不创建；扫描结束复核 revision/未决请求，超时解析线程不累积 |
 | Guard CLI / 授权状态边界 | 已实现，独立 review 通过；组件安装待续 | status/enable/disable、desired/实际/组件分离；只登记分身 IFEO 不适用，保存后未授权返回 requires_action/5，已有 IFEO 不静默停用；查询不会激活保护 |
@@ -101,3 +102,5 @@
 - 单向事件管道平台层：独立审查通过，提交主题 feat(rust): authenticate one-way privileged event streams。提权发送/普通只读、独立名称和 logon ACL、完整对端身份/权限、严格有界消息及重连/丢失补扫；事件每批 128 条且全部队列送完才报告结束。5 项管道与新增 1 项队列结束回归通过，审查方复跑相关 10 项通过。全量 242 项通过、24 项 ignored，clippy/fmt/diff 通过。真实管道使用普通 token 私有夹具，真实提权两端、部署与自动 Guard 尚未验收。
 
 - Guard 受保护 helper generation：独立审查与来源绑定修复复审通过，提交主题 feat(rust): stage verified administrator-owned guard helpers。固定自动目录、UAC 前 host/父目录 pin 和独立 fileID/size/hash、同用户普通 issuer 校验、管理员 owner/Users RX ACL、独占代际文件和回读；失败不激活或清除未知对象。6 项默认回归、全量 248 项通过，24 项 ignored，clippy/fmt/diff 通过。没有真实提权目录写入；前台必须保留 InstallerSource 并按固定 UAC 参数传递期望，任务/监听激活仍待接入与实测。
+
+- Guard 按需监听任务平台层：独立审查与增量复审通过，提交主题 feat(rust): validate and manage fixed guard listener tasks。固定 task/action 与 UUID 参数、管理员 owner/用户读运行 ACL、SID 解析、V2/context/触发和生命周期核验、当前 session RunEx 与空闲删除回读；不覆盖未知任务、不强制停机。4 项默认新增测试通过，全量 252 项通过、24 项 ignored；后续 task 收紧和 maintenance 变异回归定向再通过，clippy/fmt/diff 通过。本机仅建立内存 COM definitions 和只读查询，没有注册/运行/删除任务或 UAC；event-listen/前台授权/登录任务仍待接入。
