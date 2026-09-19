@@ -5,13 +5,34 @@ use uuid::Uuid;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CoreAction {
-    Start { profiles: Vec<Uuid>, required: Uuid },
+    Start {
+        profiles: Vec<Uuid>,
+        required: Uuid,
+    },
     Stop {},
     Install {},
-    CancelInstall { request_id: Uuid },
+    CancelInstall {
+        request_id: Uuid,
+    },
+    PrepareUpdate {
+        expected_revision: u64,
+        profile_id: Uuid,
+        node: crate::registry::ManualProxyInput,
+    },
+    ApplyUpdate {
+        plan_id: Uuid,
+    },
+    RecoverUpdate {
+        plan_id: Uuid,
+    },
 }
 impl CoreAction {
     pub fn normalize(&mut self) -> Result<(), ValidationError> {
+        if matches!(self, Self::PrepareUpdate { expected_revision, profile_id, .. } if *expected_revision == 0 || profile_id.is_nil())
+            || matches!(self, Self::ApplyUpdate { plan_id } | Self::RecoverUpdate { plan_id } if plan_id.is_nil())
+        {
+            return Err(ValidationError("INVALID_CORE_REQUEST"));
+        }
         if let Self::CancelInstall { request_id } = self
             && request_id.is_nil()
         {
@@ -36,6 +57,17 @@ impl CoreAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CoreOutcome {
+    Prepared {
+        impact: UpdateImpact,
+    },
+    Reconfigured {
+        generation: Uuid,
+        process: ProcessIdentity,
+        revision: u64,
+    },
+    Restored {
+        core_down: bool,
+    },
     Ready {
         generation: Uuid,
         process: ProcessIdentity,
@@ -54,6 +86,18 @@ pub enum CoreOutcome {
     Indeterminate {
         code: String,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateImpact {
+    pub plan_id: Uuid,
+    pub manifest_revision: u64,
+    pub previous_generation: Uuid,
+    pub changed_profile: Uuid,
+    pub affected_profiles: Vec<Uuid>,
+    /// Configured bindings, not evidence that these applications are running.
+    pub bound_instances: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

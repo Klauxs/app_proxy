@@ -110,6 +110,40 @@ impl CoreControl {
 
     pub async fn execute(&self, mut job: CoreJob) -> Result<()> {
         let result = match job.action.clone() {
+            CoreAction::PrepareUpdate {
+                expected_revision,
+                profile_id,
+                node,
+            } => self
+                .manager
+                .prepare_update(&app_proxy_core::registry::ConfigRequest {
+                    request_id: job.id,
+                    expected_revision,
+                    action: app_proxy_core::registry::ConfigAction::UpdateManualProfile {
+                        profile_id,
+                        node,
+                    },
+                })
+                .await
+                .map(|impact| CoreOutcome::Prepared { impact }),
+            CoreAction::ApplyUpdate { plan_id } | CoreAction::RecoverUpdate { plan_id } => {
+                let settings = self.configuration.snapshot()?.settings;
+                let probe = |endpoint| {
+                    let target = settings.test_url.clone();
+                    let statuses = settings.health_policy.expected_statuses.clone();
+                    async move {
+                        crate::proxy_health::check(&endpoint, &target, &statuses)
+                            .await
+                            .map(|_| ())
+                            .map_err(|_| Error::Invalid("CORE_PROXY_HEALTH_FAILED"))
+                    }
+                };
+                if matches!(job.action, CoreAction::ApplyUpdate { .. }) {
+                    self.manager.apply_update(plan_id, job.id, probe).await
+                } else {
+                    self.manager.recover_update(plan_id, probe).await
+                }
+            }
             CoreAction::Start { profiles, required } => {
                 let settings = self.configuration.snapshot()?.settings;
                 self.manager
@@ -156,6 +190,27 @@ impl CoreControl {
             },
         };
         let mut store = self.configuration.lock()?;
+        if let CoreAction::RecoverUpdate { plan_id } = job.action
+            && matches!(
+                outcome,
+                CoreOutcome::Prepared { .. }
+                    | CoreOutcome::Reconfigured { .. }
+                    | CoreOutcome::Restored { .. }
+            )
+        {
+            store.resolve_core_update_request(plan_id, Some(job.id))?;
+        }
+        let outcome = if matches!(job.action, CoreAction::ApplyUpdate { .. })
+            && store
+                .core_update()?
+                .is_some_and(|plan| plan.active() && plan.execution_request == Some(job.id))
+        {
+            CoreOutcome::Indeterminate {
+                code: "CORE_UPDATE_RECOVERY_REQUIRED".into(),
+            }
+        } else {
+            outcome
+        };
         let finished = store.finish_core_request(job.id, self.epoch, outcome);
         drop(store); // Release the store gate before CoreJob removes its active token.
         finished
@@ -166,7 +221,8 @@ impl CoreControl {
         Ok(matches!(
             store.core_state()?,
             CoreState::Stopped {} | CoreState::Down { .. }
-        ) && !store.has_unresolved_core_requests()?)
+        ) && !store.has_unresolved_core_requests()?
+            && store.ensure_core_update_idle().is_ok())
     }
 
     pub fn snapshot(&self) -> Result<crate::core_manager::CoreSnapshot> {
@@ -219,6 +275,229 @@ impl Drop for CoreJob {
 mod tests {
     use super::*;
     use app_proxy_windows::store::Store;
+
+    #[tokio::test]
+    async fn update_recovery_resolves_related_uncertainty_preserves_busy_failures_and_handles_expired_receipts()
+     {
+        use app_proxy_core::{model::*, registry::*};
+        use std::{fs, os::windows::fs::OpenOptionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let mut store = Store::create(&root).unwrap();
+        let profile = Uuid::new_v4();
+        let node = ManualProxyInput {
+            protocol: ManualProtocol::Http,
+            host: "proxy.example".into(),
+            port: 8080,
+            credentials: None,
+        };
+        store
+            .apply_config(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: 1,
+                action: ConfigAction::CreateManualProfile {
+                    profile_id: profile,
+                    name: "fixture".into(),
+                    endpoint: Endpoint {
+                        host: "127.0.0.1".parse().unwrap(),
+                        port: 29010,
+                    },
+                    node: node.clone(),
+                },
+            })
+            .unwrap();
+        let generation = store.prepare_core_generation(&[profile]).unwrap().id();
+        let starting = CoreState::Starting { generation };
+        store
+            .transition_core_state(&CoreState::Stopped {}, starting.clone())
+            .unwrap();
+        store
+            .transition_core_state(
+                &starting,
+                CoreState::Running {
+                    generation,
+                    process: app_proxy_windows::identity::current().unwrap(),
+                },
+            )
+            .unwrap();
+        let mut next = node;
+        next.port = 8081;
+        let prepare_id = Uuid::new_v4();
+        store
+            .begin_core_request(
+                prepare_id,
+                Uuid::new_v4(),
+                &CoreAction::PrepareUpdate {
+                    expected_revision: 2,
+                    profile_id: profile,
+                    node: next.clone(),
+                },
+            )
+            .unwrap();
+        let draft = store
+            .prepare_core_update(&ConfigRequest {
+                request_id: prepare_id,
+                expected_revision: 2,
+                action: ConfigAction::UpdateManualProfile {
+                    profile_id: profile,
+                    node: next,
+                },
+            })
+            .unwrap();
+        let plan_id = store.publish_core_update(draft).unwrap().plan_id;
+        let configuration = Arc::new(Configuration::new(store));
+        let control = CoreControl::new(root.clone(), configuration.clone(), Uuid::new_v4());
+        // The plan is durable but its prepare receipt was interrupted.
+        let recover_prepare = Uuid::new_v4();
+        let (_, job) = control
+            .accept(recover_prepare, &CoreAction::RecoverUpdate { plan_id })
+            .unwrap();
+        control.execute(job.unwrap()).await.unwrap();
+        for id in [prepare_id, recover_prepare] {
+            assert!(matches!(
+                control.request_status(id).unwrap(),
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Prepared { .. },
+                    ..
+                })
+            ));
+        }
+        assert_eq!(
+            control.snapshot().unwrap().update.unwrap().impact.plan_id,
+            plan_id
+        );
+        let original = Uuid::new_v4();
+        let (_, job) = control
+            .accept(original, &CoreAction::ApplyUpdate { plan_id })
+            .unwrap();
+        {
+            let mut store = configuration.lock().unwrap();
+            let plan = store.start_core_update(plan_id, original).unwrap();
+            let down = CoreState::Down { generation };
+            store
+                .transition_core_update(plan_id, &plan.previous, down.clone())
+                .unwrap();
+            let starting = CoreState::Starting {
+                generation: plan.candidate,
+            };
+            store
+                .transition_core_update(plan_id, &down, starting.clone())
+                .unwrap();
+            store
+                .transition_core_update(
+                    plan_id,
+                    &starting,
+                    CoreState::Running {
+                        generation: plan.candidate,
+                        process: app_proxy_windows::identity::current().unwrap(),
+                    },
+                )
+                .unwrap();
+        }
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(root.join("manifest.json"))
+            .unwrap();
+        assert!(
+            configuration
+                .lock()
+                .unwrap()
+                .commit_core_update(plan_id)
+                .is_err()
+        );
+        drop(job); // Simulated owner task interruption; no actual process operations.
+        let mut refused = Vec::new();
+        for action in [
+            CoreAction::Stop {},
+            CoreAction::Start {
+                profiles: vec![profile],
+                required: profile,
+            },
+            CoreAction::ApplyUpdate { plan_id },
+        ] {
+            let id = Uuid::new_v4();
+            let (_, job) = control.accept(id, &action).unwrap();
+            control.execute(job.unwrap()).await.unwrap();
+            assert!(matches!(
+                control.request_status(id).unwrap(),
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Failed { .. },
+                    ..
+                })
+            ));
+            refused.push(id);
+        }
+        let interrupted_recovery = Uuid::new_v4();
+        let (_, job) = control
+            .accept(interrupted_recovery, &CoreAction::RecoverUpdate { plan_id })
+            .unwrap();
+        control.execute(job.unwrap()).await.unwrap();
+        assert!(matches!(
+            control.request_status(interrupted_recovery).unwrap(),
+            Some(CoreRequestStatus::Complete {
+                outcome: CoreOutcome::Indeterminate { .. },
+                ..
+            })
+        ));
+        drop(held);
+        let recovered = Uuid::new_v4();
+        let (_, job) = control
+            .accept(recovered, &CoreAction::RecoverUpdate { plan_id })
+            .unwrap();
+        control.execute(job.unwrap()).await.unwrap();
+        for id in [original, interrupted_recovery, recovered] {
+            assert!(matches!(
+                control.request_status(id).unwrap(),
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Reconfigured { .. },
+                    ..
+                })
+            ));
+        }
+        for id in refused {
+            assert!(matches!(
+                control.request_status(id).unwrap(),
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Failed { .. },
+                    ..
+                })
+            ));
+        }
+        {
+            let mut store = configuration.lock().unwrap();
+            assert!(!store.has_unresolved_core_requests().unwrap());
+            let running = store.core_state().unwrap();
+            let CoreState::Running { generation, .. } = running else {
+                panic!()
+            };
+            // This is a journal fixture, not a core process to terminate.
+            store
+                .transition_core_state(&running, CoreState::Down { generation })
+                .unwrap();
+        }
+        assert!(control.idle_allowed().unwrap());
+        let receipt_path = root.join(format!("state/core-requests/{original}.json"));
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        receipt["accepted_at"] = 1.into();
+        receipt["phase"]["completed_at"] = 1.into();
+        fs::write(receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        let id = Uuid::new_v4();
+        let (_, job) = control
+            .accept(id, &CoreAction::RecoverUpdate { plan_id })
+            .unwrap(); // prunes expired original
+        assert!(control.request_status(original).unwrap().is_none());
+        control.execute(job.unwrap()).await.unwrap();
+        assert!(matches!(
+            control.request_status(id).unwrap(),
+            Some(CoreRequestStatus::Complete {
+                outcome: CoreOutcome::Reconfigured { .. },
+                ..
+            })
+        ));
+        assert!(control.idle_allowed().unwrap());
+    }
 
     #[tokio::test]
     async fn cancellation_is_durable_does_not_start_download_and_cannot_cancel_other_actions() {

@@ -126,6 +126,7 @@ impl Store {
             };
         }
         let before = manifest_digest(&header)?;
+        self.ensure_core_update_idle()?;
         let current_revision = header.revision;
         let store_id = header.store_id;
         let accepted_at = now()?;
@@ -187,7 +188,7 @@ impl Store {
         self.finish(record)
     }
 
-    fn stage_proxy_secret(&self, request: &ConfigRequest) -> Result<()> {
+    pub(crate) fn stage_proxy_secret(&self, request: &ConfigRequest) -> Result<()> {
         let node = match &request.action {
             ConfigAction::CreateManualProfile { node, .. }
             | ConfigAction::UpdateManualProfile { node, .. } => node,

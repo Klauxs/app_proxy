@@ -203,6 +203,7 @@ impl Store {
 
     /// Consumes caller's snapshot. The saved revision is always assigned here.
     pub fn commit(&mut self, expected_revision: u64, manifest: Manifest) -> Result<u64> {
+        self.ensure_core_update_idle()?;
         self.recover_config_requests()?;
         self.commit_snapshot(expected_revision, manifest)
     }

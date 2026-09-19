@@ -29,13 +29,21 @@ pub enum Command {
     Install,
     /// 请求取消指定的安装操作，不影响应用；以原请求结果为准
     Cancel { id: Uuid },
+    /// 执行已检查的具体变更计划；会重启该计划中的共享代理
+    ApplyUpdate { id: Uuid },
+    /// 核对并恢复中断的重配置；不重放未知的进程创建
+    RecoverUpdate { id: Uuid },
     /// 查看本工具的进程及监听状态，不执行网络健康检查
     Status,
     /// 查询原请求的历史结果，不会重新执行启动或停止
     Request { id: Uuid },
 }
 
-fn output(id: Uuid, status: &Option<CoreRequestStatus>, json: bool) -> Result<(), Failure> {
+pub(crate) fn output(
+    id: Uuid,
+    status: &Option<CoreRequestStatus>,
+    json: bool,
+) -> Result<(), Failure> {
     if json {
         println!(
             "{}",
@@ -46,6 +54,22 @@ fn output(id: Uuid, status: &Option<CoreRequestStatus>, json: bool) -> Result<()
         println!(
             "请求 {id}：{}",
             match status {
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Prepared { .. },
+                    ..
+                }) => "候选配置检查通过，等待确认后切换。",
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Reconfigured { .. },
+                    ..
+                }) => "变更已提交；切换前已通过健康检查，当前状态请使用 core status。",
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Restored { core_down: false },
+                    ..
+                }) => "变更失败，已恢复旧配置及共享代理。",
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Restored { core_down: true },
+                    ..
+                }) => "变更失败，旧配置已保留，但共享代理未恢复。应用保持运行。",
                 Some(CoreRequestStatus::Pending { .. }) => "仍在执行。",
                 Some(CoreRequestStatus::Complete {
                     outcome: CoreOutcome::Ready { .. },
@@ -78,16 +102,29 @@ fn output(id: Uuid, status: &Option<CoreRequestStatus>, json: bool) -> Result<()
     Ok(())
 }
 
-fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> {
+pub(crate) fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> {
     match status {
         Some(CoreRequestStatus::Complete {
             outcome:
                 CoreOutcome::Ready { .. }
+                | CoreOutcome::Prepared { .. }
+                | CoreOutcome::Reconfigured { .. }
                 | CoreOutcome::Stopped {}
                 | CoreOutcome::Installed { .. }
                 | CoreOutcome::CancelRequested { .. },
             ..
         }) => Ok(()),
+        Some(CoreRequestStatus::Complete {
+            outcome: CoreOutcome::Restored { core_down },
+            ..
+        }) => Err(fail(
+            3,
+            if core_down {
+                "变更失败，旧配置已保留但代理未恢复；请检查 core status。"
+            } else {
+                "变更失败，已恢复旧配置和代理。"
+            },
+        )),
         Some(CoreRequestStatus::Complete {
             outcome: CoreOutcome::Cancelled {},
             ..
@@ -123,6 +160,30 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                         CoreObserved::Indeterminate => "共享代理状态无法确认，保留现有进程。",
                     }
                 );
+                if let Some(update) = snapshot.update {
+                    use app_proxy_windows::core_update::UpdatePhase;
+                    let phase = match update.phase {
+                        UpdatePhase::Prepared {} => "候选已检查，尚未切换",
+                        UpdatePhase::Switching {} => "切换中或中断待核对",
+                        UpdatePhase::Committing {} => "配置提交尚待完成",
+                        UpdatePhase::Committed {} => "变更已提交",
+                        UpdatePhase::Restoring {} => "恢复中或中断待核对",
+                        UpdatePhase::Restored { core_down: false } => "旧配置已恢复",
+                        UpdatePhase::Restored { core_down: true } => "旧配置已保留，代理未恢复",
+                    };
+                    println!("最近重配置计划 {}：{phase}。", update.impact.plan_id);
+                    if matches!(
+                        update.phase,
+                        UpdatePhase::Switching {}
+                            | UpdatePhase::Committing {}
+                            | UpdatePhase::Restoring {}
+                    ) {
+                        println!(
+                            "如操作已中断，运行 core recover-update {} 核对。",
+                            update.impact.plan_id
+                        );
+                    }
+                }
             }
             return Ok(());
         }
@@ -136,6 +197,8 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Stop => CoreAction::Stop {},
         Command::Install => CoreAction::Install {},
         Command::Cancel { id } => CoreAction::CancelInstall { request_id: id },
+        Command::ApplyUpdate { id } => CoreAction::ApplyUpdate { plan_id: id },
+        Command::RecoverUpdate { id } => CoreAction::RecoverUpdate { plan_id: id },
         Command::Start { profiles, required } => {
             let required = required
                 .or_else(|| profiles.first().copied())
@@ -218,7 +281,7 @@ fn choose(message: &str, primary: &str) -> Result<bool, Failure> {
     }
 }
 
-async fn submit(
+pub(crate) async fn submit(
     root: PathBuf,
     action: CoreAction,
     json: bool,

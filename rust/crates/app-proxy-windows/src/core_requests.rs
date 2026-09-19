@@ -13,7 +13,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const LIMIT: usize = 64 * 1024;
+const LIMIT: usize = 1024 * 1024;
 const RETENTION: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -98,6 +98,110 @@ impl Store {
             return Err(Error::Invalid("CORE_REQUEST_OWNER_CHANGED"));
         }
         validate_outcome(&outcome, &self.load()?.owner_sid)?;
+        record.phase = CoreRequestPhase::Complete {
+            outcome,
+            completed_at: now()?.max(record.accepted_at),
+        };
+        self.write_core_request(&record)
+    }
+
+    /// Only the matching completed reconfiguration journal may resolve an old
+    /// execution. This replaces uncertainty with evidence, never re-executes.
+    pub(crate) fn verify_core_apply_request(&self, id: Uuid, plan_id: Uuid) -> Result<()> {
+        let record = self
+            .read_core_request(id)?
+            .ok_or(Error::Invalid("CORE_REQUEST_NOT_FOUND"))?;
+        let expected: [u8; 32] =
+            Sha256::digest(store::encode(&CoreAction::ApplyUpdate { plan_id }, LIMIT)?).into();
+        if record.digest != expected || !matches!(record.phase, CoreRequestPhase::Pending { .. }) {
+            return Err(Error::Invalid("CORE_UPDATE_REQUEST_MISMATCH"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_core_update_receipts(
+        &mut self,
+        id: Uuid,
+        plan_id: Uuid,
+        action: &CoreAction,
+        outcome: CoreOutcome,
+        exclude: Option<Uuid>,
+    ) -> Result<()> {
+        let expected: [u8; 32] = Sha256::digest(store::encode(action, LIMIT)?).into();
+        let recovery: [u8; 32] = Sha256::digest(store::encode(
+            &CoreAction::RecoverUpdate { plan_id },
+            LIMIT,
+        )?)
+        .into();
+        // A terminal receipt may have expired. An unresolved receipt never does.
+        let original = self.read_core_request(id)?;
+        if original
+            .as_ref()
+            .is_some_and(|record| record.digest != expected)
+        {
+            return Err(Error::Invalid("CORE_UPDATE_REQUEST_MISMATCH"));
+        }
+        let mut records = Vec::new();
+        for request in self.core_request_ids()? {
+            if Some(request) == exclude || request == id {
+                continue;
+            }
+            let record = self
+                .read_core_request(request)?
+                .ok_or(Error::Invalid("CORE_REQUEST_DISAPPEARED"))?;
+            if record.digest == recovery
+                && matches!(
+                    record.phase,
+                    CoreRequestPhase::Pending { .. }
+                        | CoreRequestPhase::Complete {
+                            outcome: CoreOutcome::Indeterminate { .. },
+                            ..
+                        }
+                )
+            {
+                records.push(record);
+            }
+        }
+        if let Some(record) = original {
+            records.insert(0, record);
+        }
+        for record in records {
+            self.resolve_core_record(record, outcome.clone())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_core_preparation_receipt(
+        &mut self,
+        id: Uuid,
+        action: &CoreAction,
+        outcome: CoreOutcome,
+    ) -> Result<()> {
+        let Some(record) = self.read_core_request(id)? else {
+            return Ok(());
+        };
+        let expected: [u8; 32] = Sha256::digest(store::encode(action, LIMIT)?).into();
+        if record.digest != expected {
+            return Err(Error::Invalid("CORE_UPDATE_REQUEST_MISMATCH"));
+        }
+        self.resolve_core_record(record, outcome)
+    }
+
+    fn resolve_core_record(&mut self, mut record: Record, outcome: CoreOutcome) -> Result<()> {
+        validate_outcome(&outcome, &self.load()?.owner_sid)?;
+        match &record.phase {
+            CoreRequestPhase::Pending { .. }
+            | CoreRequestPhase::Complete {
+                outcome: CoreOutcome::Indeterminate { .. },
+                ..
+            } => {}
+            CoreRequestPhase::Complete { outcome: prior, .. }
+                if store::encode(prior, LIMIT)? == store::encode(&outcome, LIMIT)? =>
+            {
+                return Ok(());
+            }
+            _ => return Err(Error::Invalid("CORE_REQUEST_RESULT_CONFLICT")),
+        }
         record.phase = CoreRequestPhase::Complete {
             outcome,
             completed_at: now()?.max(record.accepted_at),
@@ -241,6 +345,20 @@ fn now() -> Result<u64> {
 }
 fn validate_outcome(outcome: &CoreOutcome, owner: &str) -> Result<()> {
     match outcome {
+        CoreOutcome::Prepared { impact }
+            if impact.plan_id.is_nil()
+                || impact.manifest_revision == 0
+                || impact.previous_generation.is_nil()
+                || impact.changed_profile.is_nil()
+                || impact.affected_profiles.iter().any(Uuid::is_nil)
+                || impact.bound_instances.iter().any(Uuid::is_nil)
+                || !impact.affected_profiles.contains(&impact.changed_profile) =>
+        {
+            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
+        }
+        CoreOutcome::Reconfigured { revision: 0, .. } => {
+            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
+        }
         CoreOutcome::CancelRequested { request_id } if request_id.is_nil() => {
             return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
         }
@@ -250,6 +368,11 @@ fn validate_outcome(outcome: &CoreOutcome, owner: &str) -> Result<()> {
         CoreOutcome::Ready {
             generation,
             process,
+        }
+        | CoreOutcome::Reconfigured {
+            generation,
+            process,
+            ..
         } if generation.is_nil()
             || process.pid == 0
             || process.creation_time == 0

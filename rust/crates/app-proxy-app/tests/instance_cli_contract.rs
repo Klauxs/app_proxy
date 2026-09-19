@@ -265,6 +265,172 @@ fn proxy_cli_assigns_distinct_ports_and_rejects_removal_while_bound() {
 }
 
 #[test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX; CLI confirmation with an isolated real core"]
+fn proxy_cli_previews_exact_impact_rejects_stale_confirmation_and_reports_restore_failure() {
+    use app_proxy_windows::{core_process::CoreProcess, core_state::CoreState, singbox_binary};
+    struct OwnedCore(CoreProcess);
+    impl Drop for OwnedCore {
+        fn drop(&mut self) {
+            let _ = self.0.stop();
+        }
+    }
+    let (_temp, root, _) = setup();
+    let mut store = Store::create(&root).unwrap();
+    let installed = root.join("bin/sing-box/1.14.1");
+    fs::create_dir_all(&installed).unwrap();
+    let binary =
+        PathBuf::from(std::env::var_os("APP_PROXY_TEST_SING_BOX").expect("validation binary"));
+    for name in ["sing-box.exe", "libcronet.dll"] {
+        fs::copy(binary.parent().unwrap().join(name), installed.join(name)).unwrap();
+    }
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint {
+        host: "127.0.0.1".parse().unwrap(),
+        port: socket.local_addr().unwrap().port(),
+    };
+    let profile = Uuid::new_v4();
+    let node = Uuid::new_v4();
+    let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_port = unavailable.local_addr().unwrap().port();
+    drop(unavailable);
+    let mut manifest = store.load().unwrap();
+    manifest.profiles.push(ProxyProfile {
+        id: profile,
+        name: "CLI fixture".into(),
+        revision: 1,
+        kind: ProxyKind::Managed,
+        endpoint: endpoint.clone(),
+        selected_node_id: node,
+        source: ProxySource::Manual {
+            nodes: vec![ManualNode {
+                id: node,
+                name: "fixture".into(),
+                protocol: ManualProtocol::Http,
+                host: "127.0.0.1".into(),
+                port: upstream_port,
+                credentials: None,
+            }],
+        },
+    });
+    manifest.settings.test_url = "https://fixture.invalid/health".into();
+    store.commit(manifest.revision, manifest).unwrap();
+    let generation = store.prepare_core_generation(&[profile]).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let binary = runtime
+        .block_on(singbox_binary::discover(&root))
+        .unwrap()
+        .unwrap();
+    runtime
+        .block_on(binary.check_config(generation.config_path()))
+        .unwrap();
+    let starting = CoreState::Starting {
+        generation: generation.id(),
+    };
+    store
+        .transition_core_state(&CoreState::Stopped {}, starting.clone())
+        .unwrap();
+    drop(socket);
+    let core = OwnedCore(CoreProcess::spawn(&binary, &generation).unwrap());
+    store
+        .transition_core_state(
+            &starting,
+            CoreState::Running {
+                generation: generation.id(),
+                process: core.0.identity().clone(),
+            },
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !core
+        .0
+        .listeners_verified(std::slice::from_ref(&endpoint))
+        .unwrap()
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(store);
+    let mut owner = Owner::capture(&root);
+    let id = profile.to_string();
+    let port = upstream_port.to_string();
+    let args = [
+        "proxy",
+        "update",
+        &id,
+        "--protocol",
+        "socks5",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--no-auth",
+        "--json",
+    ];
+    let preview = cli(&root, &args);
+    assert_eq!(preview.status.code(), Some(5));
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    let impact = &preview["result"]["outcome"]["impact"];
+    assert_eq!(impact["affected_profiles"], serde_json::json!([profile]));
+    assert!(core.0.is_running().unwrap());
+    assert_eq!(
+        ok(&root, &["proxy", "show", &id, "--json"])["profiles"][0]["protocol"],
+        "http"
+    );
+    ok(
+        &root,
+        &["proxy", "rename", &id, "renamed after preview", "--json"],
+    );
+    let rejected = cli(
+        &root,
+        &[
+            "core",
+            "apply-update",
+            impact["plan_id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(rejected.status.code(), Some(3));
+    assert!(core.0.is_running().unwrap());
+    let preview = cli(&root, &args);
+    assert_eq!(preview.status.code(), Some(5));
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    let plan = preview["result"]["outcome"]["impact"]["plan_id"]
+        .as_str()
+        .unwrap();
+    let applied = cli(&root, &["core", "apply-update", plan, "--json"]);
+    assert_eq!(
+        applied.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let applied: Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert_eq!(
+        applied["result"]["outcome"],
+        serde_json::json!({"outcome":"restored","core_down":true})
+    );
+    assert!(!core.0.is_running().unwrap());
+    assert_eq!(ok(&root, &["core", "status", "--json"])["observed"], "down");
+    assert_eq!(
+        ok(&root, &["proxy", "show", &id, "--json"])["profiles"][0]["protocol"],
+        "http"
+    );
+    // A recovery query of a terminal plan is idempotent and cannot respawn it.
+    let recovered = cli(&root, &["core", "recover-update", plan, "--json"]);
+    assert_eq!(recovered.status.code(), Some(3));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&recovered.stdout).unwrap()["result"]["outcome"],
+        applied["result"]["outcome"]
+    );
+    owner.stop();
+    let store = Store::open(&root).unwrap();
+    assert!(!store.has_unresolved_core_requests().unwrap());
+}
+
+#[test]
 fn core_cli_stop_receipt_survives_owner_restart_and_missing_profile_fails_safely() {
     let (_temp, root, _) = setup();
     let initial = ok(&root, &["core", "status", "--json"]);

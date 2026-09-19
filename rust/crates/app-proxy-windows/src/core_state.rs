@@ -83,7 +83,7 @@ impl CoreGeneration {
 }
 
 impl Store {
-    fn core_directories(&self, create: bool) -> Result<Vec<OwnedHandle>> {
+    pub(crate) fn core_directories(&self, create: bool) -> Result<Vec<OwnedHandle>> {
         let sid = self.load()?.owner_sid;
         let mut pins = Vec::new();
         for relative in ["state/core", "state/core/generations"] {
@@ -101,7 +101,16 @@ impl Store {
     /// Creates only a candidate. Active journal and manifest are unchanged.
     pub fn prepare_core_generation(&self, profile_ids: &[Uuid]) -> Result<CoreGeneration> {
         let manifest = self.load()?;
-        let config = singbox::compile(&manifest, profile_ids, |id| {
+        self.prepare_core_generation_for(&manifest, profile_ids)
+    }
+
+    pub(crate) fn prepare_core_generation_for(
+        &self,
+        manifest: &app_proxy_core::model::Manifest,
+        profile_ids: &[Uuid],
+    ) -> Result<CoreGeneration> {
+        self.validate(manifest)?;
+        let config = singbox::compile(manifest, profile_ids, |id| {
             self.read_secret(id)
                 .map_err(|_| app_proxy_core::model::ValidationError("CORE_SECRET_UNAVAILABLE"))
         })
@@ -234,12 +243,19 @@ impl Store {
     /// Compare configuration bytes, so display-name/revision changes do not
     /// invalidate a prepared plan or force a running core to restart.
     pub fn core_generation_is_current(&self, generation: &CoreGeneration) -> Result<bool> {
-        let manifest = self.load()?;
+        self.core_generation_matches(generation, &self.load()?)
+    }
+
+    pub(crate) fn core_generation_matches(
+        &self,
+        generation: &CoreGeneration,
+        manifest: &app_proxy_core::model::Manifest,
+    ) -> Result<bool> {
         if generation.header.store_id != manifest.store_id {
             return Err(Error::Invalid("CORE_GENERATION_STORE_MISMATCH"));
         }
         let ids: Vec<_> = generation.profiles().iter().map(|p| p.id).collect();
-        let compiled = singbox::compile(&manifest, &ids, |id| {
+        let compiled = singbox::compile(manifest, &ids, |id| {
             self.read_secret(id)
                 .map_err(|_| app_proxy_core::model::ValidationError("CORE_SECRET_UNAVAILABLE"))
         })
@@ -275,12 +291,28 @@ impl Store {
     /// recording Running, or confirmed absence/termination before Stopped.
     /// A Starting record without an identity is unresolved, never auto-replayed.
     pub fn transition_core_state(&mut self, expected: &CoreState, next: CoreState) -> Result<()> {
+        self.ensure_core_update_idle()?;
+        self.transition_core_state_inner(expected, next, None)
+    }
+
+    pub(crate) fn transition_core_state_inner(
+        &mut self,
+        expected: &CoreState,
+        next: CoreState,
+        candidate_manifest: Option<&app_proxy_core::model::Manifest>,
+    ) -> Result<()> {
         // An accepted configuration intent precedes any new core start, even
         // when a previous manifest replace failed. Never start an old candidate
         // and let deferred configuration recovery silently change it later.
         if let CoreState::Starting { generation } = &next {
             self.recover_config_requests()?;
-            if !self.core_generation_is_current(&self.open_core_generation(*generation)?)? {
+            let candidate = self.open_core_generation(*generation)?;
+            let current = if let Some(manifest) = candidate_manifest {
+                self.core_generation_matches(&candidate, manifest)?
+            } else {
+                self.core_generation_is_current(&candidate)?
+            };
+            if !current {
                 return Err(Error::Invalid("CORE_CONFIG_CHANGED"));
             }
         }
@@ -290,6 +322,7 @@ impl Store {
         let manifest = self.load()?;
         validate_state(&next, &manifest.owner_sid)?;
         let valid = match (expected, &next) {
+            (CoreState::Down { .. }, CoreState::Down { .. }) => candidate_manifest.is_some(),
             (CoreState::Stopped {} | CoreState::Down { .. }, CoreState::Starting { .. }) => true,
             (CoreState::Starting { generation: a }, CoreState::Running { generation: b, .. }) => {
                 a == b
@@ -329,7 +362,7 @@ impl Store {
     }
 }
 
-fn validate_state(state: &CoreState, owner: &str) -> Result<()> {
+pub(crate) fn validate_state(state: &CoreState, owner: &str) -> Result<()> {
     match state {
         CoreState::Starting { generation }
         | CoreState::Running { generation, .. }

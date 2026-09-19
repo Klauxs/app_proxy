@@ -122,6 +122,18 @@ pub(crate) async fn inspect_managed(path: PathBuf) -> Result<CoreBinary> {
         .ok_or(Error::Invalid("CORE_INSTALL_PROBE_FAILED"))
 }
 
+/// Reconfiguration pins the original image so rollback cannot silently select
+/// another installation/version. This does not attach any external service.
+pub async fn inspect_recorded(process: &app_proxy_core::ProcessIdentity) -> Result<CoreBinary> {
+    let binary = select(vec![(process.image_path.clone(), Source::Managed)])
+        .await
+        .ok_or(Error::Invalid("CORE_ORIGINAL_BINARY_UNAVAILABLE"))?;
+    if *binary.resolved.image() != process.image_file {
+        return Err(Error::Invalid("CORE_ORIGINAL_BINARY_CHANGED"));
+    }
+    Ok(binary)
+}
+
 fn candidates(root: &Path) -> Result<Vec<(PathBuf, Source)>> {
     let mut found = Vec::new();
     let managed = root.join("bin/sing-box");

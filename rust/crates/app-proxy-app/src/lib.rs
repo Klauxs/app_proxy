@@ -7,6 +7,7 @@ pub mod core_cli;
 pub mod core_control;
 mod core_installer;
 pub mod core_manager;
+mod core_reconfigure;
 pub mod instance_cli;
 pub mod probe;
 pub mod proxy_cli;

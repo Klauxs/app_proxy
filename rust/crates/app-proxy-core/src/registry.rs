@@ -66,7 +66,7 @@ pub enum ConfigAction {
 
 /// Transient request input. Passwords are stored separately from the manifest
 /// and durable request records; never derive Debug for these request types.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManualProxyInput {
     pub protocol: ManualProtocol,
@@ -75,7 +75,7 @@ pub struct ManualProxyInput {
     pub credentials: Option<ProxyCredentialInput>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyCredentialInput {
     pub username: String,

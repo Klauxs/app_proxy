@@ -1,0 +1,822 @@
+//! A checked, immutable proposal is distinct from permission to stop a core.
+//! One active switch per store. Interrupted side effects require reconciliation;
+//! opening the store never spawns or terminates a process on its own.
+use crate::{
+    Error, Result,
+    core_state::CoreState,
+    store::{self, Store},
+};
+pub use app_proxy_core::core_control::UpdateImpact;
+use app_proxy_core::{
+    model::{MANIFEST_LIMIT, Manifest, NetworkBinding},
+    registry::{self, ConfigAction, ConfigRequest},
+};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+const LIMIT: usize = 2 * MANIFEST_LIMIT + 16384;
+const PATH: &str = "state/core/update.json";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UpdatePhase {
+    Prepared {},
+    Switching {},
+    Committing {},
+    Committed {},
+    Restoring {},
+    Restored { core_down: bool },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreUpdate {
+    schema_version: u32,
+    store_id: Uuid,
+    pub plan_id: Uuid,
+    pub profile_id: Uuid,
+    pub before: Manifest,
+    pub after: Manifest,
+    pub previous: CoreState,
+    pub candidate: Uuid,
+    pub phase: UpdatePhase,
+    pub execution_request: Option<Uuid>,
+    pub result: Option<app_proxy_core::core_control::CoreOutcome>,
+}
+
+impl CoreUpdate {
+    pub fn old_generation(&self) -> Result<Uuid> {
+        match self.previous {
+            CoreState::Running { generation, .. } => Ok(generation),
+            _ => Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD")),
+        }
+    }
+    pub fn active(&self) -> bool {
+        matches!(
+            self.phase,
+            UpdatePhase::Switching {} | UpdatePhase::Committing {} | UpdatePhase::Restoring {}
+        )
+    }
+}
+
+impl Store {
+    pub fn ensure_core_update_idle(&self) -> Result<()> {
+        if self.core_update()?.is_some_and(|p| p.active()) {
+            return Err(Error::Invalid("CORE_RECONFIGURATION_PENDING"));
+        }
+        Ok(())
+    }
+
+    pub fn core_update(&self) -> Result<Option<CoreUpdate>> {
+        if !self.root().join(PATH).try_exists()? {
+            return Ok(None);
+        }
+        let _pins = self.core_directories(false)?;
+        let header = self.load()?;
+        let record: CoreUpdate = store::decode(&store::read_protected(
+            &self.root().join(PATH),
+            &header.owner_sid,
+            LIMIT,
+        )?)?;
+        self.validate_core_update(&record)?;
+        Ok(Some(record))
+    }
+
+    pub fn prepare_core_update(&mut self, request: &ConfigRequest) -> Result<CoreUpdate> {
+        self.ensure_core_update_idle()?;
+        self.recover_config_requests()?;
+        let ConfigAction::UpdateManualProfile { profile_id, .. } = &request.action else {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_ACTION"));
+        };
+        let before = self.load()?;
+        let previous = self.core_state()?;
+        let CoreState::Running { generation, .. } = previous else {
+            return Err(Error::Invalid("CORE_UPDATE_REQUIRES_RUNNING"));
+        };
+        let active = self.open_core_generation(generation)?;
+        if !active.profiles().iter().any(|p| p.id == *profile_id) {
+            return Err(Error::Invalid("PROFILE_NOT_ACTIVE"));
+        }
+        if !self.core_generation_is_current(&active)? {
+            return Err(Error::Invalid("CORE_CONFIG_CHANGED"));
+        }
+        let (mut after, receipt) =
+            registry::apply(self.load()?, request).map_err(|e| Error::Invalid(e.0))?;
+        after.revision = receipt.revision;
+        self.stage_proxy_secret(request)?;
+        let ids: Vec<_> = active.profiles().iter().map(|p| p.id).collect();
+        let candidate = self.prepare_core_generation_for(&after, &ids)?;
+        Ok(CoreUpdate {
+            schema_version: 1,
+            store_id: before.store_id,
+            plan_id: request.request_id,
+            profile_id: *profile_id,
+            before,
+            after,
+            previous,
+            candidate: candidate.id(),
+            phase: UpdatePhase::Prepared {},
+            execution_request: None,
+            result: None,
+        })
+    }
+
+    /// Caller must check the candidate and the original binary/config first.
+    /// Publication authorizes no stop; apply requires this exact plan ID.
+    pub fn publish_core_update(&mut self, plan: CoreUpdate) -> Result<UpdateImpact> {
+        self.ensure_core_update_idle()?;
+        if let Some(previous) = self.core_update()? {
+            self.resolve_core_update_request(previous.plan_id, None)?;
+        }
+        self.recover_config_requests()?;
+        self.validate_core_update(&plan)?;
+        if plan.phase != (UpdatePhase::Prepared {}) {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE"));
+        }
+        self.check_update_dependencies(&plan)?;
+        let impact = self.core_update_impact(&plan)?;
+        store::encode(&impact, 512 * 1024)?;
+        self.write_core_update(&plan)?;
+        Ok(impact)
+    }
+
+    pub fn core_update_impact(&self, plan: &CoreUpdate) -> Result<UpdateImpact> {
+        let previous_generation = plan.old_generation()?;
+        let active = self.open_core_generation(previous_generation)?;
+        let affected_profiles: Vec<_> = active.profiles().iter().map(|p| p.id).collect();
+        let bound_instances = plan
+            .before
+            .instances
+            .iter()
+            .filter(|i| match i.network {
+                NetworkBinding::Profile { profile_id } => affected_profiles.contains(&profile_id),
+                _ => false,
+            })
+            .map(|i| i.id)
+            .collect();
+        Ok(UpdateImpact {
+            plan_id: plan.plan_id,
+            manifest_revision: plan.before.revision,
+            previous_generation,
+            changed_profile: plan.profile_id,
+            affected_profiles,
+            bound_instances,
+        })
+    }
+
+    pub fn start_core_update(&mut self, id: Uuid, execution_request: Uuid) -> Result<CoreUpdate> {
+        if execution_request.is_nil() {
+            return Err(Error::Invalid("INVALID_REQUEST_ID"));
+        }
+        self.verify_core_apply_request(execution_request, id)?;
+        self.recover_config_requests()?;
+        let mut plan = self.require_core_update(id)?;
+        if plan.phase != (UpdatePhase::Prepared {}) {
+            return Err(Error::Invalid("CORE_UPDATE_ALREADY_APPLIED"));
+        }
+        self.check_update_dependencies(&plan)?;
+        plan.phase = UpdatePhase::Switching {};
+        plan.execution_request = Some(execution_request);
+        self.write_core_update(&plan)?;
+        Ok(plan)
+    }
+
+    pub fn transition_core_update(
+        &mut self,
+        id: Uuid,
+        expected: &CoreState,
+        next: CoreState,
+    ) -> Result<()> {
+        let plan = self.require_core_update(id)?;
+        let (generation, manifest) = match plan.phase {
+            UpdatePhase::Switching {} => (plan.candidate, &plan.after),
+            UpdatePhase::Restoring {} => (plan.old_generation()?, &plan.before),
+            _ => return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE")),
+        };
+        match &next {
+            CoreState::Starting { generation: g } | CoreState::Running { generation: g, .. }
+                if *g != generation =>
+            {
+                return Err(Error::Invalid("CORE_UPDATE_GENERATION_MISMATCH"));
+            }
+            CoreState::Stopped {} => return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE")),
+            _ => {}
+        }
+        self.transition_core_state_inner(expected, next, Some(manifest))
+    }
+
+    /// Health succeeded. Write the commit intent before changing the manifest.
+    /// Repeating after an interrupted manifest/receipt write completes one commit.
+    pub fn commit_core_update(&mut self, id: Uuid) -> Result<u64> {
+        let mut plan = self.require_core_update(id)?;
+        if !matches!(
+            plan.phase,
+            UpdatePhase::Switching {} | UpdatePhase::Committing {}
+        ) {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE"));
+        }
+        if !matches!(self.core_state()?, CoreState::Running { generation, .. } if generation == plan.candidate)
+        {
+            return Err(Error::Invalid("CORE_UPDATE_NOT_RUNNING"));
+        }
+        let current = self.load()?;
+        let before = same(&current, &plan.before)?;
+        let after = same(&current, &plan.after)?;
+        if !before && !after {
+            return Err(Error::Invalid("CORE_UPDATE_CONFIG_CONFLICT"));
+        }
+        if matches!(plan.phase, UpdatePhase::Switching {}) {
+            if !before {
+                return Err(Error::Invalid("CORE_UPDATE_CONFIG_CONFLICT"));
+            }
+            plan.phase = UpdatePhase::Committing {};
+            self.write_core_update(&plan)?;
+        }
+        let revision = plan.after.revision;
+        if before {
+            let mut target: Manifest = store::decode(&store::encode(&plan.after, MANIFEST_LIMIT)?)?;
+            target.revision = plan.before.revision;
+            self.commit_snapshot(plan.before.revision, target)?;
+        }
+        plan.phase = UpdatePhase::Committed {};
+        let CoreState::Running {
+            generation,
+            process,
+        } = self.core_state()?
+        else {
+            return Err(Error::Invalid("CORE_COMMIT_STATE_UNKNOWN"));
+        };
+        plan.result = Some(app_proxy_core::core_control::CoreOutcome::Reconfigured {
+            generation,
+            process,
+            revision,
+        });
+        self.write_core_update(&plan)?;
+        Ok(revision)
+    }
+
+    pub fn begin_core_restore(&mut self, id: Uuid) -> Result<CoreUpdate> {
+        let mut plan = self.require_core_update(id)?;
+        if !matches!(
+            plan.phase,
+            UpdatePhase::Switching {} | UpdatePhase::Restoring {}
+        ) {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE"));
+        }
+        if !same(&self.load()?, &plan.before)? {
+            return Err(Error::Invalid("CORE_UPDATE_CONFIG_CONFLICT"));
+        }
+        plan.phase = UpdatePhase::Restoring {};
+        self.write_core_update(&plan)?;
+        Ok(plan)
+    }
+
+    pub fn finish_core_restore(&mut self, id: Uuid, core_down: bool) -> Result<()> {
+        let mut plan = self.require_core_update(id)?;
+        if plan.phase != (UpdatePhase::Restoring {}) || !same(&self.load()?, &plan.before)? {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE"));
+        }
+        let old = plan.old_generation()?;
+        let matches = match self.core_state()? {
+            CoreState::Running { generation, .. } => !core_down && generation == old,
+            CoreState::Down { generation } => core_down && generation == old,
+            _ => false,
+        };
+        if !matches {
+            return Err(Error::Invalid("CORE_RESTORE_NOT_CONFIRMED"));
+        }
+        plan.phase = UpdatePhase::Restored { core_down };
+        plan.result = Some(app_proxy_core::core_control::CoreOutcome::Restored { core_down });
+        self.write_core_update(&plan)
+    }
+
+    pub fn mark_core_restore_down(&mut self, id: Uuid) -> Result<()> {
+        let plan = self.require_core_update(id)?;
+        let state = self.core_state()?;
+        if plan.phase != (UpdatePhase::Restoring {}) || !matches!(state, CoreState::Down { .. }) {
+            return Err(Error::Invalid("CORE_RESTORE_STATE_UNKNOWN"));
+        }
+        self.transition_core_state_inner(
+            &state,
+            CoreState::Down {
+                generation: plan.old_generation()?,
+            },
+            Some(&plan.before),
+        )
+    }
+
+    pub fn require_core_update(&self, id: Uuid) -> Result<CoreUpdate> {
+        self.core_update()?
+            .filter(|p| p.plan_id == id)
+            .ok_or(Error::Invalid("CORE_UPDATE_PLAN_CHANGED"))
+    }
+
+    pub fn resolve_core_update_request(&mut self, id: Uuid, exclude: Option<Uuid>) -> Result<()> {
+        use app_proxy_core::{
+            core_control::{CoreAction, CoreOutcome},
+            model::ProxySource,
+            registry::{ManualProxyInput, ProxyCredentialInput},
+        };
+        let plan = self.require_core_update(id)?;
+        let profile = plan
+            .after
+            .profiles
+            .iter()
+            .find(|p| p.id == plan.profile_id)
+            .expect("validated profile");
+        let ProxySource::Manual { nodes } = &profile.source;
+        let node = &nodes[0];
+        let credentials = node
+            .credentials
+            .as_ref()
+            .map(|c| {
+                self.read_secret(c.password_secret_id)
+                    .map(|password| ProxyCredentialInput {
+                        username: c.username.clone(),
+                        password,
+                    })
+            })
+            .transpose()?;
+        let prepare = CoreAction::PrepareUpdate {
+            expected_revision: plan.before.revision,
+            profile_id: plan.profile_id,
+            node: ManualProxyInput {
+                protocol: node.protocol.clone(),
+                host: node.host.clone(),
+                port: node.port,
+                credentials,
+            },
+        };
+        let prepared = CoreOutcome::Prepared {
+            impact: self.core_update_impact(&plan)?,
+        };
+        if plan.phase == (UpdatePhase::Prepared {}) {
+            return self.resolve_core_update_receipts(
+                plan.plan_id,
+                id,
+                &prepare,
+                prepared,
+                exclude,
+            );
+        }
+        // Check the execution binding first, before modifying any earlier receipt.
+        let request = plan
+            .execution_request
+            .ok_or(Error::Invalid("CORE_UPDATE_NOT_EXECUTED"))?;
+        let outcome = plan
+            .result
+            .ok_or(Error::Invalid("CORE_UPDATE_RESULT_UNKNOWN"))?;
+        self.resolve_core_update_receipts(
+            request,
+            id,
+            &CoreAction::ApplyUpdate { plan_id: id },
+            outcome,
+            exclude,
+        )?;
+        self.resolve_core_preparation_receipt(plan.plan_id, &prepare, prepared)
+    }
+
+    fn check_update_dependencies(&self, plan: &CoreUpdate) -> Result<()> {
+        if !same(&self.load()?, &plan.before)? || self.core_state()? != plan.previous {
+            return Err(Error::Invalid("CORE_UPDATE_PLAN_STALE"));
+        }
+        Ok(())
+    }
+
+    fn validate_core_update(&self, plan: &CoreUpdate) -> Result<()> {
+        let header = self.load()?;
+        crate::core_state::validate_state(&plan.previous, &header.owner_sid)?;
+        if plan.schema_version != 1
+            || plan.store_id != header.store_id
+            || plan.plan_id.is_nil()
+            || plan.profile_id.is_nil()
+            || plan.candidate.is_nil()
+            || plan.before.revision.checked_add(1) != Some(plan.after.revision)
+        {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+        }
+        let valid_phase = match (&plan.phase, &plan.result, plan.execution_request) {
+            (UpdatePhase::Prepared {}, None, None) => true,
+            (
+                UpdatePhase::Switching {} | UpdatePhase::Committing {} | UpdatePhase::Restoring {},
+                None,
+                Some(id),
+            ) => !id.is_nil(),
+            (
+                UpdatePhase::Committed {},
+                Some(app_proxy_core::core_control::CoreOutcome::Reconfigured {
+                    generation,
+                    revision,
+                    process,
+                }),
+                Some(id),
+            ) => {
+                !id.is_nil()
+                    && *generation == plan.candidate
+                    && *revision == plan.after.revision
+                    && process.user_sid == header.owner_sid
+                    && process.pid != 0
+                    && process.creation_time != 0
+                    && process.image_path.is_absolute()
+            }
+            (
+                UpdatePhase::Restored { core_down },
+                Some(app_proxy_core::core_control::CoreOutcome::Restored {
+                    core_down: result_down,
+                }),
+                Some(id),
+            ) => !id.is_nil() && core_down == result_down,
+            _ => false,
+        };
+        if !valid_phase {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+        }
+        self.validate(&plan.before)?;
+        self.validate(&plan.after)?;
+        let old = self.open_core_generation(plan.old_generation()?)?;
+        let candidate = self.open_core_generation(plan.candidate)?;
+        if !self.core_generation_matches(&old, &plan.before)?
+            || !self.core_generation_matches(&candidate, &plan.after)?
+            || old.profiles().iter().map(|p| p.id).collect::<Vec<_>>()
+                != candidate
+                    .profiles()
+                    .iter()
+                    .map(|p| p.id)
+                    .collect::<Vec<_>>()
+        {
+            return Err(Error::Invalid("CORE_UPDATE_GENERATION_MISMATCH"));
+        }
+        if !old.profiles().iter().any(|p| p.id == plan.profile_id) {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+        }
+        let mut expected: Manifest = store::decode(&store::encode(&plan.before, MANIFEST_LIMIT)?)?;
+        let profile = plan
+            .after
+            .profiles
+            .iter()
+            .find(|p| p.id == plan.profile_id)
+            .ok_or(Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
+        let target = expected
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == plan.profile_id)
+            .ok_or(Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
+        let app_proxy_core::model::ProxySource::Manual {
+            nodes: before_nodes,
+        } = &target.source;
+        let app_proxy_core::model::ProxySource::Manual { nodes: after_nodes } = &profile.source;
+        if before_nodes.len() != 1 || after_nodes.len() != 1 {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+        }
+        if profile.endpoint != target.endpoint
+            || profile.name != target.name
+            || profile.selected_node_id != target.selected_node_id
+            || target.revision.checked_add(1) != Some(profile.revision)
+        {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+        }
+        *target = profile.clone();
+        expected.revision = plan.after.revision;
+        if !same(&expected, &plan.after)? {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+        }
+        Ok(())
+    }
+
+    fn write_core_update(&self, plan: &CoreUpdate) -> Result<()> {
+        let _pins = self.core_directories(true)?;
+        self.replace_bounded(PATH, &store::encode(plan, LIMIT)?, LIMIT)
+    }
+}
+
+fn same(left: &Manifest, right: &Manifest) -> Result<bool> {
+    Ok(store::encode(left, MANIFEST_LIMIT)? == store::encode(right, MANIFEST_LIMIT)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use app_proxy_core::{
+        core_control::{CoreAction, CoreOutcome},
+        model::*,
+        registry::*,
+    };
+    use std::{fs, os::windows::fs::OpenOptionsExt};
+
+    fn setup() -> (tempfile::TempDir, Store, Uuid) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&temp.path().join("store")).unwrap();
+        let profile = Uuid::new_v4();
+        store
+            .apply_config(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: 1,
+                action: ConfigAction::CreateManualProfile {
+                    profile_id: profile,
+                    name: "fixture".into(),
+                    endpoint: Endpoint {
+                        host: "127.0.0.1".parse().unwrap(),
+                        port: 29001,
+                    },
+                    node: node(8080),
+                },
+            })
+            .unwrap();
+        let generation = store.prepare_core_generation(&[profile]).unwrap().id();
+        let starting = CoreState::Starting { generation };
+        store
+            .transition_core_state(&CoreState::Stopped {}, starting.clone())
+            .unwrap();
+        store
+            .transition_core_state(
+                &starting,
+                CoreState::Running {
+                    generation,
+                    process: crate::identity::current().unwrap(),
+                },
+            )
+            .unwrap();
+        (temp, store, profile)
+    }
+    fn node(port: u16) -> ManualProxyInput {
+        ManualProxyInput {
+            protocol: ManualProtocol::Http,
+            host: "proxy.example".into(),
+            port,
+            credentials: Some(ProxyCredentialInput {
+                username: "user".into(),
+                password: "private-update-password".into(),
+            }),
+        }
+    }
+    fn prepare(store: &mut Store, profile: Uuid) -> UpdateImpact {
+        let revision = store.load().unwrap().revision;
+        let plan = store
+            .prepare_core_update(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: revision,
+                action: ConfigAction::UpdateManualProfile {
+                    profile_id: profile,
+                    node: node(8081),
+                },
+            })
+            .unwrap();
+        store.publish_core_update(plan).unwrap()
+    }
+    fn begin(store: &mut Store, id: Uuid) -> CoreUpdate {
+        let request = Uuid::new_v4();
+        store
+            .begin_core_request(
+                request,
+                Uuid::new_v4(),
+                &CoreAction::ApplyUpdate { plan_id: id },
+            )
+            .unwrap();
+        store.start_core_update(id, request).unwrap()
+    }
+    fn candidate_running(store: &mut Store, plan: &CoreUpdate) {
+        let down = CoreState::Down {
+            generation: plan.old_generation().unwrap(),
+        };
+        store
+            .transition_core_update(plan.plan_id, &plan.previous, down.clone())
+            .unwrap();
+        let starting = CoreState::Starting {
+            generation: plan.candidate,
+        };
+        store
+            .transition_core_update(plan.plan_id, &down, starting.clone())
+            .unwrap();
+        store
+            .transition_core_update(
+                plan.plan_id,
+                &starting,
+                CoreState::Running {
+                    generation: plan.candidate,
+                    process: crate::identity::current().unwrap(),
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn checked_plan_preserves_manifest_until_exact_revision_and_plan_confirmation() {
+        let (temp, mut store, profile) = setup();
+        let before = store.load().unwrap();
+        let impact = prepare(&mut store, profile);
+        assert!(same(&store.load().unwrap(), &before).unwrap());
+        assert_eq!(impact.affected_profiles, [profile]);
+        assert!(
+            !fs::read_to_string(store.root().join(PATH))
+                .unwrap()
+                .contains("private-update-password")
+        );
+        drop(store);
+        let mut store = Store::open(&temp.path().join("store")).unwrap();
+        assert!(matches!(
+            store.require_core_update(Uuid::new_v4()),
+            Err(Error::Invalid("CORE_UPDATE_PLAN_CHANGED"))
+        ));
+        store
+            .apply_config(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: before.revision,
+                action: ConfigAction::RenameProfile {
+                    profile_id: profile,
+                    name: "changed while reviewing".into(),
+                },
+            })
+            .unwrap();
+        let execution = Uuid::new_v4();
+        store
+            .begin_core_request(
+                execution,
+                Uuid::new_v4(),
+                &CoreAction::ApplyUpdate {
+                    plan_id: impact.plan_id,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            store.start_core_update(impact.plan_id, execution),
+            Err(Error::Invalid("CORE_UPDATE_PLAN_STALE"))
+        ));
+        assert_eq!(
+            store.core_update().unwrap().unwrap().phase,
+            UpdatePhase::Prepared {}
+        );
+    }
+
+    #[test]
+    fn switching_blocks_other_writes_and_commit_is_recoverable_on_both_sides() {
+        for after_manifest in [false, true] {
+            let (temp, mut store, profile) = setup();
+            let impact = prepare(&mut store, profile);
+            let plan = begin(&mut store, impact.plan_id);
+            assert!(store.ensure_core_update_idle().is_err());
+            assert!(
+                store
+                    .apply_config(&ConfigRequest {
+                        request_id: Uuid::new_v4(),
+                        expected_revision: plan.before.revision,
+                        action: ConfigAction::RenameProfile {
+                            profile_id: profile,
+                            name: "blocked".into()
+                        }
+                    })
+                    .is_err()
+            );
+            assert!(
+                store
+                    .transition_core_state(&plan.previous, CoreState::Stopped {})
+                    .is_err()
+            );
+            candidate_running(&mut store, &plan);
+            let mut staged = store.require_core_update(plan.plan_id).unwrap();
+            staged.phase = UpdatePhase::Committing {};
+            store.write_core_update(&staged).unwrap();
+            if after_manifest {
+                let mut target = staged.after;
+                target.revision = plan.before.revision;
+                store.commit_snapshot(plan.before.revision, target).unwrap();
+            }
+            drop(store);
+            let mut store = Store::open(&temp.path().join("store")).unwrap();
+            assert!(store.ensure_core_update_idle().is_err());
+            assert_eq!(
+                store.commit_core_update(plan.plan_id).unwrap(),
+                plan.before.revision + 1
+            );
+            store
+                .resolve_core_update_request(plan.plan_id, None)
+                .unwrap();
+            assert!(!store.has_unresolved_core_requests().unwrap());
+            assert!(store.ensure_core_update_idle().is_ok());
+            assert!(matches!(
+                store.core_update().unwrap().unwrap().result,
+                Some(CoreOutcome::Reconfigured { .. })
+            ));
+            assert_eq!(store.load().unwrap().revision, plan.before.revision + 1);
+        }
+    }
+
+    #[test]
+    fn commit_file_lock_keeps_intent_and_never_rolls_back_an_uncertain_commit() {
+        let (_temp, mut store, profile) = setup();
+        let impact = prepare(&mut store, profile);
+        let plan = begin(&mut store, impact.plan_id);
+        candidate_running(&mut store, &plan);
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(store.root().join("manifest.json"))
+            .unwrap();
+        assert!(store.commit_core_update(plan.plan_id).is_err());
+        assert_eq!(
+            store.require_core_update(plan.plan_id).unwrap().phase,
+            UpdatePhase::Committing {}
+        );
+        assert!(store.begin_core_restore(plan.plan_id).is_err());
+        drop(held);
+        store.commit_core_update(plan.plan_id).unwrap();
+        store
+            .resolve_core_update_request(plan.plan_id, None)
+            .unwrap();
+        assert!(!store.has_unresolved_core_requests().unwrap());
+    }
+
+    #[test]
+    fn failed_restore_retains_old_generation_and_unknown_start_cannot_claim_completion() {
+        let (_temp, mut store, profile) = setup();
+        let impact = prepare(&mut store, profile);
+        let plan = begin(&mut store, impact.plan_id);
+        let down = CoreState::Down {
+            generation: plan.old_generation().unwrap(),
+        };
+        store
+            .transition_core_update(plan.plan_id, &plan.previous, down.clone())
+            .unwrap();
+        let starting = CoreState::Starting {
+            generation: plan.candidate,
+        };
+        store
+            .transition_core_update(plan.plan_id, &down, starting.clone())
+            .unwrap();
+        store.begin_core_restore(plan.plan_id).unwrap();
+        assert!(store.finish_core_restore(plan.plan_id, true).is_err());
+        assert!(store.mark_core_restore_down(plan.plan_id).is_err());
+        // The caller has now confirmed this fixture spawn never happened.
+        store
+            .transition_core_update(
+                plan.plan_id,
+                &starting,
+                CoreState::Down {
+                    generation: plan.candidate,
+                },
+            )
+            .unwrap();
+        store.mark_core_restore_down(plan.plan_id).unwrap();
+        store.finish_core_restore(plan.plan_id, true).unwrap();
+        assert!(same(&store.load().unwrap(), &plan.before).unwrap());
+        assert_eq!(store.core_state().unwrap(), down);
+        store
+            .resolve_core_update_request(plan.plan_id, None)
+            .unwrap();
+        assert!(!store.has_unresolved_core_requests().unwrap());
+    }
+
+    #[test]
+    fn damaged_plan_and_other_manifest_changes_are_rejected_without_replacing_data() {
+        let (_temp, mut store, profile) = setup();
+        let impact = prepare(&mut store, profile);
+        let mut plan = store.require_core_update(impact.plan_id).unwrap();
+        plan.after.settings.test_url = "https://changed.example".into();
+        store.write_core_update(&plan).unwrap();
+        let bytes = fs::read(store.root().join(PATH)).unwrap();
+        assert!(store.core_update().is_err());
+        assert_eq!(fs::read(store.root().join(PATH)).unwrap(), bytes);
+        assert!(same(&store.load().unwrap(), &plan.before).unwrap());
+    }
+
+    #[test]
+    fn update_receipts_require_matching_action_digest_and_do_not_resolve_other_work() {
+        let (_temp, mut store, profile) = setup();
+        let impact = prepare(&mut store, profile);
+        let unrelated = Uuid::new_v4();
+        store
+            .begin_core_request(unrelated, Uuid::new_v4(), &CoreAction::Stop {})
+            .unwrap();
+        assert!(matches!(
+            store.start_core_update(impact.plan_id, unrelated),
+            Err(Error::Invalid("CORE_UPDATE_REQUEST_MISMATCH"))
+        ));
+        let plan = begin(&mut store, impact.plan_id);
+        candidate_running(&mut store, &plan);
+        store.commit_core_update(plan.plan_id).unwrap();
+        let mut altered = store.require_core_update(plan.plan_id).unwrap();
+        altered.execution_request = Some(unrelated);
+        store.write_core_update(&altered).unwrap();
+        let unrelated_path = store
+            .root()
+            .join(format!("state/core-requests/{unrelated}.json"));
+        let original_path = store.root().join(format!(
+            "state/core-requests/{}.json",
+            plan.execution_request.unwrap()
+        ));
+        let before = (
+            fs::read(&unrelated_path).unwrap(),
+            fs::read(&original_path).unwrap(),
+        );
+        assert!(matches!(
+            store.resolve_core_update_request(plan.plan_id, None),
+            Err(Error::Invalid("CORE_UPDATE_REQUEST_MISMATCH"))
+        ));
+        assert_eq!(
+            before,
+            (
+                fs::read(unrelated_path).unwrap(),
+                fs::read(original_path).unwrap()
+            )
+        );
+    }
+}

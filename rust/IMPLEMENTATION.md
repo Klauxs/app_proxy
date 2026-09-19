@@ -14,7 +14,8 @@
 | 实例数据目录 | 已实现，独立 review 通过 | store/LocalState 命名空间、归属/ACL/目录句柄、空白创建、保留数据；6 项目录测试 + 2 项模板子进程测试；真实包内访问待验证 |
 | 实例配置编辑 | 已实现，独立 review 通过 | 已接入 coordinator 与 CLI；7 项规则 + 4 项真实 CLI 写测试，物理去重、保留数据及列表脱敏；菜单及外部集成清理待实现 |
 | 实例 CLI / 列表摘要 | 已实现，独立 review 通过 | create/list/clone/rename/bind/remove/request，按 revision 和字节预算分页；尚无启动/保护授权操作 |
-| 手动代理配置 / CLI | 已实现，独立 review 通过 | HTTP/SOCKS5 create/list/show/update/rename/remove/request；自动入口、认证分存与脱敏、引用及活动 generation 保护；运行中确认重配置和交互菜单待实现 |
+| 手动代理配置 / CLI | 已实现，独立 review 通过 | HTTP/SOCKS5 create/list/show/update/rename/remove/request；自动入口、认证分存与脱敏、引用及活动 generation 保护；运行中更新已接确认/回滚，交互菜单待实现 |
+| 共享 core 手动上游重配置 | 已实现，独立 review 通过 | 检查候选、影响预览/具体计划确认、原程序切换、失败回滚、持久化阶段/回执恢复；活动集合增减、未知 Starting 的完整核对及未来应用启动许可仍待续 |
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
 | 实例启动 | 待实现 | 统一状态机、安装解析和已运行判断 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
@@ -53,3 +54,5 @@
 - core 控制 RPC / CLI：独立审查和增量复审通过。提交主题 `feat(rust): coordinate durable shared core operations`。新增 11 项测试，全量 117 项通过、7 项顶层 ignored，clippy/fmt 通过。覆盖请求规范化、跨操作编号冲突、时钟回拨、终态保留/未决不清理、任务取消、回执占用、并发/丢 ACK 及真实 CLI 跨 host 重启。CLI 接入 start/stop/status/request；未决副作用不自动重放，历史结果与当前监听状态分开。尚无安装、重配置确认/回滚、持续健康通知或应用启动许可。
 - sing-box 一键安装 / 取消：独立审查和增量复审通过，提交主题 `feat(rust): install and cancel verified sing-box downloads`。固定官方 1.14.1 artifact，zip/EXE/DLL/LICENSE 校验，protected staging、版本/check、完整目录发布及安装回执；下载/校验移出配置锁而保留 store owner lease。真实受污染代理环境下 CLI 下载、安装、重启查询及复用通过（407.18 秒）；Windows PTY Ctrl+C 持久取消通过。修复长任务占满 16 个 IPC 槽导致查询/取消饥饿，增加独立后台计数和 32 个普通任务上限。全量 126 项通过、9 项顶层 ignored，clippy/fmt 通过；完整协议、应用与 Guard 验收未完成。
 - 手动代理配置 / CLI：独立审查与修复复审通过，提交主题 `feat(rust): manage manual proxy profiles and protected credentials`。新增 4 项编辑/认证规则、5 项秘密/事务/运行保护、2 项真实 CLI 测试；全量 137 项通过、9 项顶层 ignored，clippy/fmt 通过，两项真实 sing-box TLS/生命周期集成另行通过。审查发现并修复 pending 配置在旧内核启动后恢复提交的竞态，以及保存阶段遗漏协议认证限制。改名不重启，更新保持 ID/端口，移除检查实例/下载引用；密码独立原子存储，请求回执不含原文。当前活动 generation 编辑返回需重配置，具体影响确认与回滚仍待接入；不表示应用启动或 Guard 完成。
+
+- 共享 core 手动上游重配置：独立审查和增量复审通过，提交主题 `feat(rust): confirm and recover shared core proxy updates`。候选与当前 manifest 分离，确认前检查原程序及配置，具体计划绑定 revision/原 generation/进程；切换期间阻止普通生命周期及配置写入。候选验证修改出口，回滚以旧集合至少一个可用为成功、所有入口核对 PID，最多 4 个并发且每出口获得探测机会。6 项平台 journal、1 项服务恢复、1 项并发探测默认回归新增；全量 145 项通过、11 项顶层 ignored；两项新真实 core/CLI 集成另行通过，clippy/fmt 通过。修复无副作用 busy 请求永久未决、恢复回执摘要未绑定及过期原回执使恢复请求挂起；新增准备回执恢复、计划状态查询。未知 Starting 不盲目重放，活动集合增减/应用启动许可/持续监控未完成。

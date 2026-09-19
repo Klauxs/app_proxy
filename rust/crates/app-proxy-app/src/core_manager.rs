@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 pub struct CoreManager {
     root: PathBuf,
-    configuration: Arc<Configuration>,
-    gate: Mutex<()>,
+    pub(crate) configuration: Arc<Configuration>,
+    pub(crate) gate: Mutex<()>,
 }
 #[derive(Serialize)]
 pub struct ReadyCore {
@@ -31,6 +31,14 @@ pub struct CoreSnapshot {
     pub recorded: CoreState,
     pub observed: CoreObserved,
     pub profiles: Vec<CoreProfile>,
+    pub update: Option<CoreUpdateSummary>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreUpdateSummary {
+    pub phase: app_proxy_windows::core_update::UpdatePhase,
+    pub impact: app_proxy_core::core_control::UpdateImpact,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +90,7 @@ impl CoreManager {
         let mut requested_profiles = profiles.to_vec();
         let mut state = {
             let mut store = self.configuration.lock()?;
+            store.ensure_core_update_idle()?;
             store.recover_config_requests()?;
             store.core_state()?
         };
@@ -272,6 +281,7 @@ impl CoreManager {
 
     pub async fn stop(&self) -> Result<()> {
         let _gate = self.gate.lock().await;
+        self.configuration.lock()?.ensure_core_update_idle()?;
         let state = self.configuration.lock()?.core_state()?;
         match &state {
             CoreState::Stopped {} => Ok(()),
@@ -325,11 +335,21 @@ impl CoreManager {
             recorded,
             observed,
             profiles,
+            update: store
+                .core_update()?
+                .map(|plan| -> Result<CoreUpdateSummary> {
+                    let impact = store.core_update_impact(&plan)?;
+                    Ok(CoreUpdateSummary {
+                        phase: plan.phase,
+                        impact,
+                    })
+                })
+                .transpose()?,
         })
     }
 }
 
-async fn wait_listeners(core: &CoreProcess, endpoints: &[Endpoint]) -> Result<()> {
+pub(crate) async fn wait_listeners(core: &CoreProcess, endpoints: &[Endpoint]) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
         if !core.is_running()? {

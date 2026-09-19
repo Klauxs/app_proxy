@@ -161,3 +161,17 @@ coordinator 新增 core 接纳、结果查询与进程/端口观察；CLI 为 `c
 独立审查发现：已接受但未写入 manifest 的 profile 更新可在旧配置启动后恢复，绕过运行保护。现在 CoreManager 入口先恢复配置，平台进入 Starting 时在同一 store gate 内再次恢复并检查 candidate 当前性；占用未解除则不能启动，恢复后旧 candidate 被拒绝。第二项修复将协议认证可表达性校验共用于保存和 sing-box 编译，避免保存必然无法启动的认证。
 
 独立复审通过；全量 workspace 137 项通过、9 项顶层 ignored，clippy/fmt 通过。两项真实 sing-box TLS/生命周期集成显式通过（隔离本地夹具），没有运行真实 Codex/Claude 或写 IFEO。本批不含运行中配置切换/回滚、交互密码框、订阅或应用启动；活动 generation 的网络修改仍返回需重配置。
+
+**共享 core 手动上游重配置（2026-09-20）**
+
+`proxy update` 对当前运行集合中的 HTTP/SOCKS5 profile 创建受保护候选和检查过的计划，先返回受影响 profile/绑定实例，再由交互确认（默认返回）、`--apply-to-running` 或 `core apply-update <计划ID>` 执行。确认以完整旧快照及精确原进程状态为条件；改动配置或替换计划后，旧确认失效。原程序被重新核对并用于切换及回滚，不自动改用发现到的其他版本。
+
+journal 区分 Prepared、Switching、Committing、Committed、Restoring、Restored。启动或停止的普通入口在副作用前检查 barrier；运行阶段阻止其他配置写入。新配置通过目标出口健康检查后才写提交意图并提交 manifest；提交两侧中断可重复完成，不重复换代。切换失败恢复旧配置/原 generation；恢复健康检查优先旧目标出口，最多 4 个并发逐批探测，全部旧出口都有机会；只要至少一个仍可用就保留共享 core。所有入口继续核验 PID 归属。全部失败才记录旧配置保留但 core Down；应用不被终止或改为直连。
+
+6 项平台测试覆盖计划前后配置不变/陈旧确认、两侧提交恢复、文件占用、active barrier、未知 Starting 不误报完成、旧 generation Down 保留、坏记录保留及请求摘要绑定。1 项服务综合回归覆盖准备回执丢失、原 Apply 中断、普通 Start/Stop/重复 Apply 的确定拒绝、恢复再次中断、最终解除相关未知回执、idle 可退出，以及原终态回执实际按保留期清理后仍能完成当前恢复请求。1 项有界探测回归验证前 4 个慢失败而第 5 个健康仍可恢复，最大并发为 4。
+
+真实官方 sing-box 1.14.1 集成在隔离 store 中验证两个入口：候选准备不切换、只改变所编辑出口、失败恢复双旧路由、普通操作无法跨过恢复屏障、commit 文件锁恢复不再次重启、未知 Starting 不重放，以及旧集合部分故障仍可提交/恢复、全部恢复失败明确 Down。转发验证使用本地 HTTP CONNECT 夹具，说明路由与生命周期；生产仍调用已有经过 TLS/证书校验测试的 HTTPS probe，不能把本夹具称作新的 TLS 验收。
+
+真实 CLI→host 集成验证 JSON 预览后退出码 5 且原内核存活、改名后拒绝旧确认、显式执行失败后旧配置保留/内核 Down、重复恢复终态不重新创建进程、无永久未决回执。两项真实集成显式运行通过，独立 reviewer 也分别复跑通过。全量 workspace 145 项通过、11 项顶层 ignored，clippy/fmt 通过；未启动用户 Codex/Claude 或写 IFEO。
+
+当前重配置支持已有运行 profile 的手动上游编辑。活动集合扩容/移除、无身份 Starting 的进一步进程核对、应用启动许可及持续故障监控仍待实现；`core status` 显示最近计划/阶段，`core recover-update` 只执行已有 journal 支持的核对。不会以这些组件证据宣称整套代理/应用/Guard 完成。
