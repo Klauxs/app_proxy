@@ -217,7 +217,9 @@ pub fn apply(
         }
         ConfigAction::UpdateManualProfile { profile_id, node } => {
             let target = profile_mut(&mut manifest, *profile_id)?;
-            let ProxySource::Manual { nodes } = &target.source;
+            let ProxySource::Manual { nodes } = &target.source else {
+                return Err(ValidationError("MANUAL_PROFILE_REQUIRED"));
+            };
             if nodes.len() != 1 {
                 return Err(ValidationError("SINGLE_MANUAL_NODE_REQUIRED"));
             }

@@ -72,22 +72,7 @@ pub async fn download(target: &str, endpoint: Option<&Endpoint>) -> Result<Downl
 }
 
 fn validate(value: &str) -> Result<Url> {
-    if value.len() > 8192 || value.chars().any(char::is_control) {
-        return Err(Error::InvalidUrl);
-    }
-    // Reject even empty userinfo before URL normalization can discard it.
-    if value.split_once("://").is_none_or(|(_, rest)| {
-        rest.split(['/', '?', '#'])
-            .next()
-            .is_some_and(|s| s.contains('@'))
-    }) {
-        return Err(Error::InvalidUrl);
-    }
-    let url = Url::parse(value).map_err(|_| Error::InvalidUrl)?;
-    if !allowed_url(&url) {
-        return Err(Error::InvalidUrl);
-    }
-    Ok(url)
+    app_proxy_core::subscription::source_url(value).map_err(|_| Error::InvalidUrl)
 }
 fn allowed_url(url: &Url) -> bool {
     matches!(url.scheme(), "http" | "https")

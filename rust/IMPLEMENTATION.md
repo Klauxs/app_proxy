@@ -2,13 +2,13 @@
 
 目标：按已确认设计完整实现 Rust 版，每项功能经独立 review、修复与验证后单独 commit。此文件记录进度，不缩小设计范围；不把实验、编译或局部测试作为整个产品完成的证据。
 
-最近完成：Clash YAML 与客户端文本适配通过独立 review；合计 22 项解析专项、3 项真实 sing-box 契约测试通过，包含 GET/POST 本地收包验证。全量 333 项通过（30 项顶层 ignored），clippy/fmt/diff 通过。提交主题 `feat(rust): parse Clash and client text subscriptions`。此前 URI/Base64 已提交 `a0ec753`，下载传输层已提交 `3fe03a1`。实现与验收范围见 `TEST-RESULTS.md`；秘密分存、刷新和生产导入流程待续。
+最近完成：订阅节点秘密分存、manifest/目录和共享内核编译接入通过独立 review；10 项新增默认回归及真实 sing-box 7 profile 混合配置 check 经独立复跑通过。全量 343 项通过（31 项顶层 ignored），clippy/fmt/diff 通过。提交主题 `feat(rust): persist subscription nodes through protected secret references`。此前格式适配已提交 `a37180c`。实现与验收范围见 `TEST-RESULTS.md`；导入/刷新事务、节点选择和 CLI 写入口待续。
 
 | 功能 | 当前状态 | 完成证据 / 下一项验证 |
 |---|---|---|
 | M0 普通进程/身份/调试创建候选 | 已实现，独立 review 通过 | `TEST-RESULTS.md`，普通/调试 child 契约测试；不等于完整 M0 通过 |
 | MSIX 包内 helper | 生产执行链及恢复已接入，独立 review 通过；完整验收待续 | Claude/Codex 各两个直连分身同时运行、目录写入隔离及重复请求复用通过；Codex 原版共存通过；登录、实际代理及更新验收待续 |
-| 配置模型 | 基础模型已实现，独立 review 通过 | 严格 JSON、引用/路径/Guard/IFEO 校验；13 项 core 测试；当前节点仅手动 HTTP/SOCKS5，订阅与其他协议后续实现 |
+| 配置模型 | 手动和订阅来源模型已实现，独立 review 通过 | 严格 JSON、引用/路径/Guard/IFEO 校验；HTTP/SOCKS5 与六协议订阅元数据/秘密引用，读取和提交校验完整 typed 秘密；刷新编辑入口待续 |
 | 配置存储 | 基础存储已实现，独立 review 通过 | 归属/ACL、revision、锁、原子替换/上一份备份、不可变秘密与坏文件拒绝；10 项 store 测试；恢复界面与运行 journal 待实现 |
 | IPC 传输 | 已实现，独立 review 通过 | 双向身份/普通权限/会话/映像验证、管道 ACL、1 MiB 帧与超时/取消；4 项真实管道 + 2 项帧测试 |
 | coordinator | 引导、配置写、core 控制及普通 EXE 启动 RPC 已实现，独立 review 通过 | 单所有者、握手、去重/查询/取消；丢应答继续执行，任务/内核/未决请求保活；共享 core gate、应用退出只读维护已验证，完整未知副作用核对待续 |
@@ -29,7 +29,8 @@
 | sing-box 程序发现/检查 | 已实现，独立 review 通过 | 自动发现/真实 version、有界子进程输出及 check；CLI discover sing-box 已接入，安装及生产运行待实现 |
 | HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和真实 sing-box TLS/管理集成，已接初始内核管理，应用启动/运行监控待实现 |
 | 订阅下载 | 传输层已实现，独立 review 通过 | 明确路由、UA 回退、TLS/重定向限制、双 8 MiB 上限、四种压缩及完整成员读取；11 项专项通过，尚未接订阅 CLI、ManagedCore 选择和刷新提交 |
-| 订阅解析 | 六协议 typed Node、URI/Base64、Clash YAML、客户端文本与单 outbound 编译已实现，独立 review 通过 | 22 项专项、28 个真实 1.14.1 check 样例及 GET/POST 本地收包通过；有界 YAML 别名与层级、凭据引号/单次解码、严格字段/语义组合。秘密分存、刷新与 CLI 待续 |
+| 订阅解析 | 六协议 typed Node、URI/Base64、Clash YAML、客户端文本与单 outbound 编译已实现，独立 review 通过 | 22 项专项、28 个真实 1.14.1 check 样例及 GET/POST 本地收包通过；有界 YAML 别名与层级、凭据引号/单次解码、严格字段/语义组合 |
+| 订阅持久化与共享编译 | 已实现，独立 review 通过；导入/刷新入口待续 | 10 项默认回归及真实 7 profile check，URL/节点秘密分存、严格绑定与损坏保留、目录脱敏、选中节点编译、旧启动摘要兼容；IPC 2.11。选择保持、运行中变更和 CLI 写入口待续 |
 | IFEO | 注册/恢复平台层已实现并通过独立 review，入口待接入 | 受保护归属及父值备份、精确路径过滤、持久断点恢复、冲突保留；15 项专项测试通过。尚无生产调用方写入规则，真实匹配/防递归/子进程/完整接管待验收 |
 | Guard/ETW | 监听 host、授权安装、普通侧监听监督、自动扫描与纠正触发已接入 | 调度/受控进程/状态/协议测试及独立 review 通过；真实提权事件链路、登录任务与 IFEO 仍待验收或实现 |
 | 原生 ETW 进程事件平台层 | 已实现，独立 review 通过；实际 kernel provider 采集待授权验证 | 固定 provider/事件、TDH 命名属性、1024 项有界提示队列、丢失统计、会话归属及退出；默认 4 项及真实空会话控制测试通过，当前权限启用 provider 返回 Win32 5；未接入提权部署或事件管道 |

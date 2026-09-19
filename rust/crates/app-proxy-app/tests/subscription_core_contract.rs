@@ -208,3 +208,63 @@ async fn clash_http_method_is_preserved_on_the_real_wire() {
         child.wait().await.unwrap();
     }
 }
+
+#[tokio::test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX pointing to verified sing-box 1.14.1"]
+async fn saved_subscription_profiles_compile_together_with_manual_profile_for_real_core() {
+    use app_proxy_core::{
+        model::*,
+        singbox,
+        subscription::{self, saved::SavedNode},
+    };
+    use std::collections::HashMap;
+    use uuid::Uuid;
+    let binary = std::path::PathBuf::from(std::env::var_os("APP_PROXY_TEST_SING_BOX").unwrap());
+    let version = invoke(&binary, &["version"], None).await;
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("sing-box version 1.14.1"));
+    let mut manifest: Manifest =
+        serde_json::from_str(include_str!("../../../examples/manifest.json")).unwrap();
+    let mut secrets = HashMap::new();
+    for (index, node) in subscription::parse(include_str!(
+        "../../app-proxy-core/tests/fixtures/subscription.yaml"
+    ))
+    .unwrap()
+    .nodes
+    .iter()
+    .enumerate()
+    {
+        let (saved, secret) = SavedNode::capture(Uuid::new_v4(), Uuid::new_v4(), node).unwrap();
+        secrets.insert(saved.secret_id, secret);
+        manifest.profiles.push(ProxyProfile {
+            id: Uuid::new_v4(),
+            name: format!("fixture-{index}"),
+            revision: 1,
+            kind: ProxyKind::Managed,
+            endpoint: Endpoint {
+                host: "127.0.0.1".parse().unwrap(),
+                port: 19000 + index as u16,
+            },
+            selected_node_id: saved.id,
+            source: ProxySource::Subscription {
+                url_secret_id: Uuid::new_v4(),
+                revision: 1,
+                nodes: vec![saved],
+            },
+        });
+    }
+    let ids: Vec<_> = manifest.profiles.iter().map(|p| p.id).collect();
+    let config = singbox::compile(&manifest, &ids, |id| Ok(secrets[&id].clone())).unwrap();
+    assert_eq!(config.profiles().len(), 7);
+    let result = invoke(
+        &binary,
+        &["check", "-c", "stdin"],
+        Some(config.bytes().to_vec()),
+    )
+    .await;
+    assert!(
+        result.status.success(),
+        "synthetic shared config: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

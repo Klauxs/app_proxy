@@ -826,6 +826,32 @@ fn entries(manifest: &Manifest, id: Uuid) -> Result<(&Application, &Instance)> {
 }
 
 fn dependency_digest(manifest: &Manifest, id: Uuid) -> Result<[u8; 32]> {
+    // Preserve the previous manual tuple's serialization, including struct field
+    // order. Converting to Value would change hashes of existing saved launches.
+    #[derive(serde::Serialize)]
+    #[serde(untagged)]
+    enum Connection<'a> {
+        Manual(
+            (
+                &'a app_proxy_core::model::Endpoint,
+                Uuid,
+                &'a app_proxy_core::model::ManualProtocol,
+                &'a str,
+                u16,
+                &'a Option<app_proxy_core::model::Credentials>,
+            ),
+        ),
+        Subscription(
+            (
+                &'a app_proxy_core::model::Endpoint,
+                Uuid,
+                app_proxy_core::subscription::saved::ProtocolKind,
+                &'a str,
+                u16,
+                Uuid,
+            ),
+        ),
+    }
     let (app, instance) = entries(manifest, id)?;
     let profile = match instance.network {
         NetworkBinding::Direct {} => None,
@@ -835,19 +861,38 @@ fn dependency_digest(manifest: &Manifest, id: Uuid) -> Result<[u8; 32]> {
                 .iter()
                 .find(|p| p.id == profile_id)
                 .ok_or(Error::Invalid("PROFILE_NOT_FOUND"))?;
-            let ProxySource::Manual { nodes } = &profile.source;
-            let node = nodes
-                .iter()
-                .find(|n| n.id == profile.selected_node_id)
-                .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?;
-            Some((
-                &profile.endpoint,
-                node.id,
-                &node.protocol,
-                &node.host,
-                node.port,
-                &node.credentials,
-            ))
+            Some(match &profile.source {
+                ProxySource::Manual { nodes } => {
+                    let node = nodes
+                        .iter()
+                        .find(|n| n.id == profile.selected_node_id)
+                        .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?;
+                    Connection::Manual((
+                        &profile.endpoint,
+                        node.id,
+                        &node.protocol,
+                        &node.host,
+                        node.port,
+                        &node.credentials,
+                    ))
+                }
+                ProxySource::Subscription { nodes, .. } => {
+                    let node = nodes
+                        .iter()
+                        .find(|n| n.id == profile.selected_node_id)
+                        .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?;
+                    // Immutable secret identity covers every connection field. Source
+                    // URL/revision and unselected nodes do not change this launch.
+                    Connection::Subscription((
+                        &profile.endpoint,
+                        node.id,
+                        node.protocol,
+                        &node.server,
+                        node.port,
+                        node.secret_id,
+                    ))
+                }
+            })
         }
     };
     Ok(Sha256::digest(serde_json::to_vec(&(

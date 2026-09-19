@@ -297,7 +297,7 @@ pub(super) fn transport(options: &mut Options, tls_enabled: bool) -> Result<Opti
             path: options.take(&["path"])?.unwrap_or_else(|| "/".into()),
             host: options.take(&["host"])?,
         }),
-        "quic" => Some(Transport::Quic),
+        "quic" => Some(Transport::Quic {}),
         _ => return Err(Error::UnsupportedOption),
     })
 }

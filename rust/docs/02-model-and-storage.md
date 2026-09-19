@@ -94,6 +94,10 @@ manifest 是单个权威配置快照。第一次创建只接受空目录或正�
 
 机密按不可变 secret-id 单独保存，改机密创建新 ID；manifest 引用新 ID 后再延迟清理旧值。首版沿用 ACL 保护的本机明文机密存储，不宣称加密保险箱；sing-box 运行配置同样受 ACL 保护。持久化 JSON 参数也视为敏感存储。默认配置导出排除 secrets、机器绝对路径、登录数据和运行状态；导入要求重新绑定资源。
 
+订阅来源现有 `kind: "subscription"`、`url_secret_id`、独立 `revision` 和节点列表。节点 manifest 只保存 id、name、protocol、server、port、secret_id；URL 整体单独保存，节点完整连接参数（包括 UUID、密码、TLS/传输字段和路径）编码为版本 1 的严格 typed 秘密文档，最大 64 KiB。它不是原始订阅正文或任意 sing-box JSON。每个来源最多 4096 个节点，source revision 必须非零，选中 ID 必须存在；列表名称和 ID 不能重复。
+
+读取与提交 store 时校验 URL 和全部节点秘密，节点文档须与 manifest 的名称、协议、服务器、端口一致，并重新通过协议组合校验；坏引用、未知字段、版本或损坏内容拒绝且不重置原文件。生成内核配置只解析所选节点的秘密，沿用每 profile 的固定入口/出口路由。启动依赖摘要包含所选节点的不可变 secret_id，来源 URL、来源 revision 和其他节点变化不使其误判为连接变化；既有手动代理摘要字节格式保留。来源导入、刷新事务和秘密延迟清理的生产入口仍待接入。
+
 MSIX LocalState 可能在 store 之外。每个 location 都记录自己的归属标记、namespace 和路径约束；不能用一个“必须位于 store 内”的检查错误拒绝合法包目录，也不能允许用户 arbitrary path 绕过归属校验。原版数据不接管、不清理。
 
 **6. 写入与恢复**

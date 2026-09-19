@@ -6,6 +6,92 @@ use std::{
     time::Instant,
 };
 
+#[test]
+fn subscription_dependency_tracks_selected_secret_and_preserves_legacy_manual_digest() {
+    use app_proxy_core::subscription::{self, saved::SavedNode};
+    let mut manifest: Manifest =
+        serde_json::from_str(include_str!("../../../../examples/manifest.json")).unwrap();
+    let id = manifest.instances[0].id;
+    let ProxySource::Manual { nodes } = &mut manifest.profiles[0].source else {
+        panic!()
+    };
+    nodes[0].credentials = Some(app_proxy_core::model::Credentials {
+        username: "fixture-user".into(),
+        password_secret_id: Uuid::new_v4(),
+    });
+    let (app, instance) = entries(&manifest, id).unwrap();
+    let profile = &manifest.profiles[0];
+    let ProxySource::Manual { nodes } = &profile.source else {
+        panic!()
+    };
+    let node = &nodes[0];
+    // This is the exact pre-subscription serialization, not a JSON Value.
+    let legacy: [u8; 32] = Sha256::digest(
+        serde_json::to_vec(&(
+            &app.locator,
+            app.template_ref,
+            instance.application_id,
+            &instance.data,
+            &instance.args,
+            &instance.env,
+            &instance.cwd,
+            &instance.network,
+            Some((
+                &profile.endpoint,
+                node.id,
+                &node.protocol,
+                &node.host,
+                node.port,
+                &node.credentials,
+            )),
+            &manifest.settings.test_url,
+            &manifest.settings.health_policy,
+        ))
+        .unwrap(),
+    )
+    .into();
+    assert_eq!(dependency_digest(&manifest, id).unwrap(), legacy);
+
+    let parsed = subscription::parse(include_str!(
+        "../../../app-proxy-core/tests/fixtures/subscription.yaml"
+    ))
+    .unwrap();
+    let nodes: Vec<_> = parsed
+        .nodes
+        .iter()
+        .map(|node| {
+            SavedNode::capture(Uuid::new_v4(), Uuid::new_v4(), node)
+                .unwrap()
+                .0
+        })
+        .collect();
+    manifest.profiles[0].selected_node_id = nodes[0].id;
+    manifest.profiles[0].source = ProxySource::Subscription {
+        url_secret_id: Uuid::new_v4(),
+        revision: 1,
+        nodes,
+    };
+    let before = dependency_digest(&manifest, id).unwrap();
+    manifest.profiles[0].name = "display only".into();
+    let ProxySource::Subscription {
+        url_secret_id,
+        revision,
+        nodes,
+    } = &mut manifest.profiles[0].source
+    else {
+        panic!()
+    };
+    *url_secret_id = Uuid::new_v4();
+    *revision += 1;
+    nodes[1].secret_id = Uuid::new_v4();
+    assert_eq!(dependency_digest(&manifest, id).unwrap(), before);
+    let ProxySource::Subscription { nodes, .. } = &mut manifest.profiles[0].source else {
+        panic!()
+    };
+    nodes[0].secret_id = Uuid::new_v4();
+    assert_ne!(dependency_digest(&manifest, id).unwrap(), before);
+}
+
 fn hold_replacement(path: &Path) -> std::fs::File {
     std::fs::OpenOptions::new()
         .read(true)

@@ -156,10 +156,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 print(&serde_json::json!({"revision":catalog.revision,"profiles":profiles}))?;
             } else {
                 for p in profiles {
-                    let protocol = match p.protocol {
-                        ManualProtocol::Http => "HTTP",
-                        ManualProtocol::Socks5 => "SOCKS5",
-                    };
+                    let protocol = p.protocol.label();
                     println!(
                         "{}  {}  {} {}:{}  入口 {}:{}  {}",
                         p.id,

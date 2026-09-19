@@ -422,7 +422,9 @@ impl Store {
                 .iter()
                 .find(|p| p.id == plan.profile_id)
                 .expect("validated profile");
-            let ProxySource::Manual { nodes } = &profile.source;
+            let ProxySource::Manual { nodes } = &profile.source else {
+                return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+            };
             let node = &nodes[0];
             let credentials = node
                 .credentials
@@ -593,8 +595,14 @@ impl Store {
             .ok_or(Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
         let app_proxy_core::model::ProxySource::Manual {
             nodes: before_nodes,
-        } = &target.source;
-        let app_proxy_core::model::ProxySource::Manual { nodes: after_nodes } = &profile.source;
+        } = &target.source
+        else {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+        };
+        let app_proxy_core::model::ProxySource::Manual { nodes: after_nodes } = &profile.source
+        else {
+            return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+        };
         if before_nodes.len() != 1 || after_nodes.len() != 1 {
             return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
         }

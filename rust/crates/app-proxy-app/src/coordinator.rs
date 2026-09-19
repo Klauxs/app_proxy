@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 10;
+const PROTOCOL_MINOR: u32 = 11;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -418,6 +418,17 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if matches!(&request.operation, Operation::Catalog { .. }) && client_minor < 11 {
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: Reply::Error {
+                    code: "CATALOG_PROTOCOL_UPDATE_REQUIRED".into(),
+                },
+            })
+            .await;
+    }
     if let Operation::GuardStatus { instance_id } = request.operation {
         if client_minor < 10 {
             return connection
@@ -620,6 +631,9 @@ async fn rpc(
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
     if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 10 {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
+    if matches!(&request.operation, Operation::Catalog { .. }) && server.protocol_minor < 11 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
     let request_id = request.request_id;

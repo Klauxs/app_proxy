@@ -290,8 +290,26 @@ impl Store {
         if manifest.store_id != self.owner.store_id || manifest.owner_sid != self.owner.owner_sid {
             return Err(Error::Invalid("MANIFEST_OWNER_MISMATCH"));
         }
-        for id in manifest.secret_ids() {
-            self.read_secret(id)?;
+        let mut checked = std::collections::HashSet::new();
+        for profile in &manifest.profiles {
+            if let app_proxy_core::model::ProxySource::Subscription {
+                url_secret_id,
+                nodes,
+                ..
+            } = &profile.source
+            {
+                app_proxy_core::subscription::source_url(&self.read_secret(*url_secret_id)?)
+                    .map_err(|_| Error::Invalid("SUBSCRIPTION_URL_INVALID"))?;
+                checked.insert(*url_secret_id);
+                for node in nodes {
+                    node.resolve(&self.read_secret(node.secret_id)?)
+                        .map_err(|_| Error::Invalid("INVALID_SUBSCRIPTION_SECRET"))?;
+                    checked.insert(node.secret_id);
+                }
+            }
+        }
+        for id in manifest.secret_ids().difference(&checked) {
+            self.read_secret(*id)?;
         }
         Ok(())
     }

@@ -258,7 +258,9 @@ async fn managed_core_persists_reuses_recovers_and_preserves_runtime_failures() 
     let change_port = |port| {
         let mut store = configuration.lock().unwrap();
         let mut manifest = store.load().unwrap();
-        let ProxySource::Manual { nodes } = &mut manifest.profiles[0].source;
+        let ProxySource::Manual { nodes } = &mut manifest.profiles[0].source else {
+            panic!("manual fixture required")
+        };
         nodes[0].port = port;
         store.commit(manifest.revision, manifest).unwrap();
     };

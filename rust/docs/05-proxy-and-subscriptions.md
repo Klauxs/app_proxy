@@ -26,7 +26,7 @@ Rust 负责配置、验证和生命周期；sing-box 继续实现协议。产品
 
 全部 profile 都属于 managed，不提供“绑定已有 sing-box 端口”选项。本地入口只绑定回环地址，IPv6 输出用标准括号形式。检查端口监听者时必须对应自有 ManagedCore 的已确认身份；端口可用不等于内核归属成立。端口被其他服务占用时提示换端口，不能认领或停止占用者。
 
-手动来源使用 `source: {kind: "manual", nodes: [...]}`，节点含 id、name、protocol 及协议字段，profile 的 selected_node_id 引用唯一节点。示例配置中的 HTTP 上游仅为远端占位地址，需用户替换；不以手动上游入口变相提供已有本机 sing-box 服务复用。
+手动来源使用 `source: {kind: "manual", nodes: [...]}`，节点含 id、name、protocol 及协议字段，profile 的 selected_node_id 引用唯一节点。订阅来源使用 `source: {kind: "subscription", url_secret_id, revision, nodes: [...]}`；节点连接字段另存受保护秘密文档，manifest 保留显示元数据和引用。两类 profile 使用同一共享内核配置编译、生命周期和本地 HTTP 入口。旧手动更新操作不能覆盖订阅来源，订阅刷新/选节点的变更入口另行接入。示例配置中的 HTTP 上游仅为远端占位地址，需用户替换；不以手动上游入口变相提供已有本机 sing-box 服务复用。
 
 **3. 代理证据分层**
 
@@ -90,7 +90,7 @@ HTTP 客户端按用途创建：代理健康/出口请求显式指定 profile；
 
 特殊兼容点单独建 fixture：URI 凭据中的字面 `%XX` 不被无条件二次解码；节点名/查询字段按各格式规则处理；ALPN 块列表不能变成额外节点；Base64 的 padding/URL-safe 差异；IPv6 地址；国家旗帜及地区归类；重复名称；VMess JSON；非法端口及空必需字段。
 
-URI/Base64 适配与 typed Node 现已实现：六协议、标准/URL-safe Base64、有无 padding、VMess 严格 JSON、IPv6/IDN、名称地区推断、重名拒绝。输入最大 8 MiB、单行 64 KiB、最多 4096 个有效或不支持条目；诊断仅含解码后来源行号和固定错误类别。原始 URI 凭据只百分号解码一次，Base64 解出的 Shadowsocks 密码和 VMess JSON 字段不再百分号解码；节点名中的加号按 fragment 字面保留。节点、协议与 TLS/transport 类型没有 Debug/Serialize，不直接写入 manifest。
+URI/Base64 适配与 typed Node 现已实现：六协议、标准/URL-safe Base64、有无 padding、VMess 严格 JSON、IPv6/IDN、名称地区推断、重名拒绝。输入最大 8 MiB、单行 64 KiB、最多 4096 个有效或不支持条目；诊断仅含解码后来源行号和固定错误类别。原始 URI 凭据只百分号解码一次，Base64 解出的 Shadowsocks 密码和 VMess JSON 字段不再百分号解码；节点名中的加号按 fragment 字面保留。Node/Protocol 没有 Debug/Serialize；只有私有磁盘适配器能编码其秘密文档，TLS/transport 使用严格 serde 结构，连接参数不直接写入 manifest。
 
 允许的扩展包括 TLS SNI/证书验证开关/ALPN/uTLS、Reality、VLESS Vision、VMess 加密/alter-id、Hysteria2 salamander/带宽，以及 WebSocket、HTTP、gRPC、HTTPUpgrade、QUIC。只从已验证类型生成单个 outbound，不能注入任意 JSON。Reality 公钥输出规范化为 URL-safe 无 padding，SS2022 每个密钥输出标准带 padding Base64；ChaCha20 的 SS2022 多密钥链拒绝，AES 可用。字段以 [sing-box 出口文档](https://sing-box.sagernet.org/configuration/outbound/)、[TLS](https://sing-box.sagernet.org/configuration/shared/tls/)、[传输](https://sing-box.sagernet.org/configuration/shared/v2ray-transport/) 为依据，并用本机固定 1.14.1 实测 check。
 
@@ -100,7 +100,7 @@ URI/Base64 适配与 typed Node 现已实现：六协议、标准/URL-safe Base6
 
 文本读取 `[Proxy]`、`[server_local]` 或无节名节点列表，支持命名节点和 Quantumult X 协议前缀、位置参数和键值参数、带引号的逗号/等号/反斜杠。其他节忽略，仅支持整行注释；客户端的全部扩展并未覆盖。未知连接选项、证书约束、SS 插件、自定义传输头和不等价组合会报告不可选，不能静默删除。`client-fingerprint` 才映射 uTLS，证书 `fingerprint` 当前不支持；`udp: false` 保留 TCP 限制（AnyTLS 无等价字段则拒绝）。
 
-Clash `network: http` 与 URI 显式 http 分开处理：无 TLS 时明确保留默认 GET 或 `http-opts.method`，有 TLS 时拒绝，避免把 TCP 伪装转成 HTTP/2。真实 sing-box 1.14.1 本地收包夹具已验证 GET/POST 方法，另有 YAML/文本六协议共 12 个配置通过 check；这些不是完整协议握手或真实订阅服务验收。秘密持久化、刷新提交和 CLI 集成仍待续。
+Clash `network: http` 与 URI 显式 http 分开处理：无 TLS 时明确保留默认 GET 或 `http-opts.method`，有 TLS 时拒绝，避免把 TCP 伪装转成 HTTP/2。真实 sing-box 1.14.1 本地收包夹具已验证 GET/POST 方法，另有 YAML/文本六协议共 12 个配置通过 check；这些不是完整协议握手或真实订阅服务验收。秘密分存和共享编译已接入，六订阅 profile 加一个手动 profile 的完整配置也通过真实 check；导入/刷新提交和 CLI 写入口仍待续。
 
 刷新先锁外下载/解析，再对 source revision 做 compare-and-swap。按节点名保留选中项；重名拒绝；报告新增和删除；若刷新清空选择则保留旧配置。source 已变化就丢弃旧响应，不能写回覆盖。导入成功不等于节点实网可用，需生成配置 check 和对应探测。
 

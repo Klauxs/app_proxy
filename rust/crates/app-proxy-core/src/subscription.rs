@@ -3,6 +3,7 @@
 mod clash;
 mod fields;
 mod node;
+pub mod saved;
 mod text;
 mod uri;
 use base64::{
@@ -18,6 +19,8 @@ const LINE_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    #[error("SUBSCRIPTION_URL_INVALID")]
+    InvalidUrl,
     #[error("SUBSCRIPTION_EMPTY")]
     Empty,
     #[error("SUBSCRIPTION_TOO_LARGE")]
@@ -40,6 +43,32 @@ pub enum Error {
     DuplicateNames,
 }
 type Result<T> = std::result::Result<T, Error>;
+
+/// A subscription source is secret-bearing even when only its query has a token.
+pub fn source_url(value: &str) -> Result<url::Url> {
+    if value.len() > 8192
+        || value.chars().any(char::is_control)
+        || value.split_once("://").is_none_or(|(_, rest)| {
+            rest.split(['/', '?', '#'])
+                .next()
+                .is_some_and(|s| s.contains('@'))
+        })
+    {
+        return Err(Error::InvalidUrl);
+    }
+    let url = url::Url::parse(value).map_err(|_| Error::InvalidUrl)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || url.port() == Some(0)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.as_str().len() > 8192
+    {
+        return Err(Error::InvalidUrl);
+    }
+    Ok(url)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Issue {

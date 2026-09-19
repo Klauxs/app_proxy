@@ -33,10 +33,32 @@ pub struct ProfileSummary {
     pub name: String,
     pub revision: u64,
     pub endpoint: model::Endpoint,
-    pub protocol: model::ManualProtocol,
+    pub protocol: ProfileProtocol,
     pub host: String,
     pub port: u16,
     pub authenticated: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProfileProtocol {
+    Manual(model::ManualProtocol),
+    Subscription(app_proxy_core::subscription::saved::ProtocolKind),
+}
+impl ProfileProtocol {
+    pub fn label(&self) -> &'static str {
+        use app_proxy_core::subscription::saved::ProtocolKind;
+        match self {
+            Self::Manual(model::ManualProtocol::Http) => "HTTP",
+            Self::Manual(model::ManualProtocol::Socks5) => "SOCKS5",
+            Self::Subscription(ProtocolKind::AnyTls) => "AnyTLS",
+            Self::Subscription(ProtocolKind::Vless) => "VLESS",
+            Self::Subscription(ProtocolKind::Vmess) => "VMess",
+            Self::Subscription(ProtocolKind::Shadowsocks) => "Shadowsocks",
+            Self::Subscription(ProtocolKind::Trojan) => "Trojan",
+            Self::Subscription(ProtocolKind::Hysteria2) => "Hysteria2",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,20 +124,41 @@ pub fn catalog_page(
             .skip(offset)
             .take(PAGE)
             .map(|p| {
-                let model::ProxySource::Manual { nodes } = p.source;
-                let node = nodes
-                    .into_iter()
-                    .find(|n| n.id == p.selected_node_id)
-                    .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?;
+                let (protocol, host, port, authenticated) = match p.source {
+                    model::ProxySource::Manual { nodes } => {
+                        let node = nodes
+                            .into_iter()
+                            .find(|n| n.id == p.selected_node_id)
+                            .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?;
+                        (
+                            ProfileProtocol::Manual(node.protocol),
+                            node.host,
+                            node.port,
+                            node.credentials.is_some(),
+                        )
+                    }
+                    model::ProxySource::Subscription { nodes, .. } => {
+                        let node = nodes
+                            .into_iter()
+                            .find(|n| n.id == p.selected_node_id)
+                            .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?;
+                        (
+                            ProfileProtocol::Subscription(node.protocol),
+                            node.server,
+                            node.port,
+                            true,
+                        )
+                    }
+                };
                 Ok(ProfileSummary {
                     id: p.id,
                     name: display(p.name),
                     revision: p.revision,
                     endpoint: p.endpoint,
-                    protocol: node.protocol,
-                    host: node.host,
-                    port: node.port,
-                    authenticated: node.credentials.is_some(),
+                    protocol,
+                    host,
+                    port,
+                    authenticated,
                 })
             })
             .collect::<Result<Vec<_>>>()?,

@@ -46,29 +46,44 @@ pub fn compile(
             .iter()
             .find(|p| p.id == *id)
             .ok_or(ValidationError("PROFILE_NOT_FOUND"))?;
-        let ProxySource::Manual { nodes } = &profile.source;
-        let node = nodes
-            .iter()
-            .find(|n| n.id == profile.selected_node_id)
-            .ok_or(ValidationError("SELECTED_NODE_NOT_FOUND"))?;
         let incoming = format!("in-{id}");
         let outgoing = format!("out-{id}");
         inbounds.push(json!({"type":"http","tag":incoming,"listen":profile.endpoint.host.to_string(),"listen_port":profile.endpoint.port,"set_system_proxy":false}));
-        let mut outbound = json!({"type":match node.protocol { ManualProtocol::Http => "http", ManualProtocol::Socks5 => "socks" },"tag":outgoing,"server":node.host,"server_port":node.port});
-        if matches!(node.protocol, ManualProtocol::Socks5) {
-            outbound["version"] = json!("5");
-            outbound["network"] = json!("tcp");
-        }
-        if let Some(credentials) = &node.credentials {
-            let password = secret(credentials.password_secret_id)?;
-            crate::model::validate_proxy_credentials(
-                &node.protocol,
-                &credentials.username,
-                &password,
-            )?;
-            outbound["username"] = json!(credentials.username);
-            outbound["password"] = json!(password);
-        }
+        let outbound = match &profile.source {
+            ProxySource::Manual { nodes } => {
+                let node = nodes
+                    .iter()
+                    .find(|n| n.id == profile.selected_node_id)
+                    .ok_or(ValidationError("SELECTED_NODE_NOT_FOUND"))?;
+                let mut outbound = json!({"type":match node.protocol { ManualProtocol::Http => "http", ManualProtocol::Socks5 => "socks" },"tag":outgoing,"server":node.host,"server_port":node.port});
+                if matches!(node.protocol, ManualProtocol::Socks5) {
+                    outbound["version"] = json!("5");
+                    outbound["network"] = json!("tcp");
+                }
+                if let Some(credentials) = &node.credentials {
+                    let password = secret(credentials.password_secret_id)?;
+                    crate::model::validate_proxy_credentials(
+                        &node.protocol,
+                        &credentials.username,
+                        &password,
+                    )?;
+                    outbound["username"] = json!(credentials.username);
+                    outbound["password"] = json!(password);
+                }
+                outbound
+            }
+            ProxySource::Subscription { nodes, .. } => {
+                let saved = nodes
+                    .iter()
+                    .find(|n| n.id == profile.selected_node_id)
+                    .ok_or(ValidationError("SELECTED_NODE_NOT_FOUND"))?;
+                let node = saved
+                    .resolve(&secret(saved.secret_id)?)
+                    .map_err(|_| ValidationError("INVALID_SUBSCRIPTION_SECRET"))?;
+                node.outbound(&outgoing)
+                    .map_err(|_| ValidationError("INVALID_SUBSCRIPTION_NODE"))?
+            }
+        };
         outbounds.push(outbound);
         rules.push(json!({"inbound":[incoming],"action":"route","outbound":outgoing}));
     }

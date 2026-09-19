@@ -74,7 +74,9 @@ fn manual_proxy_edits_keep_identity_endpoint_binding_and_redact_password() {
     assert!(p.endpoint == endpoint);
     assert_eq!(p.selected_node_id, node_id);
     assert_eq!(p.revision, 2);
-    let ProxySource::Manual { nodes } = &p.source;
+    let ProxySource::Manual { nodes } = &p.source else {
+        panic!("manual fixture required")
+    };
     assert_eq!(
         nodes[0].credentials.as_ref().unwrap().password_secret_id,
         change.request_id

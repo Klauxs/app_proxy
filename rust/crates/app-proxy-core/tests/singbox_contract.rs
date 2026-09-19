@@ -10,7 +10,9 @@ fn fixture() -> Manifest {
     second.name = "second".into();
     second.endpoint.host = "::1".parse().unwrap();
     second.endpoint.port += 1;
-    let ProxySource::Manual { nodes } = &mut second.source;
+    let ProxySource::Manual { nodes } = &mut second.source else {
+        panic!("manual fixture required")
+    };
     nodes[0].protocol = ManualProtocol::Socks5;
     nodes[0].host = "2001:db8::2".into();
     manifest.profiles.push(second);
@@ -88,7 +90,9 @@ fn resolves_only_selected_credentials_and_preserves_literal_secret_characters() 
     let mut manifest = fixture();
     let id = manifest.profiles[0].id;
     let secret_id = Uuid::new_v4();
-    let ProxySource::Manual { nodes } = &mut manifest.profiles[0].source;
+    let ProxySource::Manual { nodes } = &mut manifest.profiles[0].source else {
+        panic!("manual fixture required")
+    };
     nodes[0].credentials = Some(Credentials {
         username: "user@example".into(),
         password_secret_id: secret_id,
@@ -142,7 +146,9 @@ fn rejects_missing_profiles_invalid_listeners_and_unrepresentable_socks_auth() {
         "PROFILE_NOT_FOUND"
     );
     let id = manifest.profiles[1].id;
-    let ProxySource::Manual { nodes } = &mut manifest.profiles[1].source;
+    let ProxySource::Manual { nodes } = &mut manifest.profiles[1].source else {
+        panic!("manual fixture required")
+    };
     nodes[0].credentials = Some(Credentials {
         username: "socks-user".into(),
         password_secret_id: Uuid::new_v4(),

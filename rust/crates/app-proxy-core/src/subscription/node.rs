@@ -3,6 +3,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -45,7 +46,8 @@ pub enum Protocol {
         down_mbps: Option<u32>,
     },
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tls {
     pub server_name: Option<String>,
     pub insecure: bool,
@@ -53,12 +55,14 @@ pub struct Tls {
     pub fingerprint: Option<String>,
     pub reality: Option<Reality>,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Reality {
     pub public_key: String,
     pub short_id: String,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Transport {
     WebSocket {
         path: String,
@@ -76,7 +80,7 @@ pub enum Transport {
         path: String,
         host: Option<String>,
     },
-    Quic,
+    Quic {},
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,7 +324,7 @@ impl Node {
                 }
             }
             if (matches!(self.protocol, Protocol::Hysteria2 { .. })
-                || self.transport == Some(Transport::Quic))
+                || self.transport == Some(Transport::Quic {}))
                 && (tls.fingerprint.is_some() || tls.reality.is_some())
             {
                 return Err(Error::UnsupportedOption);
@@ -363,8 +367,8 @@ impl Node {
                         return Err(Error::InvalidNode);
                     }
                 }
-                Transport::Quic if self.tls.is_none() => return Err(Error::InvalidNode),
-                Transport::Quic => {}
+                Transport::Quic {} if self.tls.is_none() => return Err(Error::InvalidNode),
+                Transport::Quic {} => {}
             }
         }
         Ok(())
@@ -475,7 +479,7 @@ impl Node {
                     }
                     value
                 }
-                Transport::Quic => json!({"type":"quic"}),
+                Transport::Quic {} => json!({"type":"quic"}),
             };
         }
         Ok(out)

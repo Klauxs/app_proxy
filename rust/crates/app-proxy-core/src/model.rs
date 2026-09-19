@@ -181,7 +181,14 @@ pub struct Endpoint {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProxySource {
-    Manual { nodes: Vec<ManualNode> },
+    Manual {
+        nodes: Vec<ManualNode>,
+    },
+    Subscription {
+        url_secret_id: Uuid,
+        revision: u64,
+        nodes: Vec<crate::subscription::saved::SavedNode>,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -354,26 +361,48 @@ impl Manifest {
             {
                 return Err(ValidationError("INVALID_OR_DUPLICATE_ENDPOINT"));
             }
-            let ProxySource::Manual { nodes } = &profile.source;
             let mut node_ids = HashSet::new();
             let mut names = HashSet::new();
-            for node in nodes {
-                if node.id.is_nil()
-                    || !node_ids.insert(node.id)
-                    || node.name.trim().is_empty()
-                    || !names.insert(&node.name)
-                    || node.host.is_empty()
-                    || node.host.contains(['\0', '/', '\\', '@'])
-                    || node.host.chars().any(char::is_whitespace)
-                    || node.port == 0
-                {
-                    return Err(ValidationError("INVALID_NODE"));
+            match &profile.source {
+                ProxySource::Manual { nodes } => {
+                    for node in nodes {
+                        if node.id.is_nil()
+                            || !node_ids.insert(node.id)
+                            || node.name.trim().is_empty()
+                            || !names.insert(&node.name)
+                            || node.host.is_empty()
+                            || node.host.contains(['\0', '/', '\\', '@'])
+                            || node.host.chars().any(char::is_whitespace)
+                            || node.port == 0
+                        {
+                            return Err(ValidationError("INVALID_NODE"));
+                        }
+                        if let Some(credentials) = &node.credentials
+                            && (credentials.username.contains('\0')
+                                || credentials.password_secret_id.is_nil())
+                        {
+                            return Err(ValidationError("INVALID_CREDENTIAL_REFERENCE"));
+                        }
+                    }
                 }
-                if let Some(credentials) = &node.credentials
-                    && (credentials.username.contains('\0')
-                        || credentials.password_secret_id.is_nil())
-                {
-                    return Err(ValidationError("INVALID_CREDENTIAL_REFERENCE"));
+                ProxySource::Subscription {
+                    url_secret_id,
+                    revision,
+                    nodes,
+                } => {
+                    if url_secret_id.is_nil()
+                        || *revision == 0
+                        || nodes.len() > crate::subscription::NODE_LIMIT
+                    {
+                        return Err(ValidationError("INVALID_SUBSCRIPTION_SOURCE"));
+                    }
+                    for node in nodes {
+                        node.validate()
+                            .map_err(|_| ValidationError("INVALID_SUBSCRIPTION_NODE"))?;
+                        if !node_ids.insert(node.id) || !names.insert(&node.name) {
+                            return Err(ValidationError("INVALID_SUBSCRIPTION_NODE"));
+                        }
+                    }
                 }
             }
             if !node_ids.contains(&profile.selected_node_id) {
@@ -521,10 +550,21 @@ impl Manifest {
             }
         }
         for profile in &self.profiles {
-            let ProxySource::Manual { nodes } = &profile.source;
-            for node in nodes {
-                if let Some(c) = &node.credentials {
-                    ids.insert(c.password_secret_id);
+            match &profile.source {
+                ProxySource::Manual { nodes } => {
+                    for node in nodes {
+                        if let Some(c) = &node.credentials {
+                            ids.insert(c.password_secret_id);
+                        }
+                    }
+                }
+                ProxySource::Subscription {
+                    url_secret_id,
+                    nodes,
+                    ..
+                } => {
+                    ids.insert(*url_secret_id);
+                    ids.extend(nodes.iter().map(|node| node.secret_id));
                 }
             }
         }

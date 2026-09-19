@@ -2,6 +2,18 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：订阅节点秘密分存与共享内核编译接入**
+
+manifest 新增 Subscription 来源（URL secret ID、独立 revision、SavedNode 列表）。节点只公开显示元数据和引用，完整 typed Node 通过私有 serde adapter 编码为版本化秘密文档，包含密码、UUID 与可能携带 token 的传输路径；保留现有 ACL 保护的不可变秘密文件，不宣称加密存储。Store 提交/读取验证全部引用、URL、节点类型和显示元数据绑定；未知字段、损坏或不匹配拒绝且保留原文件。共享编译器只读取选中节点并生成既有固定路由；旧手动更新拒绝覆盖订阅来源。
+
+新增 10 项默认回归通过：六协议秘密往返与 manifest 脱敏；严格嵌套 JSON/版本/凭据/元数据/大小；混合来源共享编译、只解析所选秘密及失败传播；来源/重名/选中引用校验与手动更新拒绝；共享 URL 校验；真实 store 写入/reopen/持久请求重放及 manifest/journal/backup 脱敏；未选中节点秘密也须有效、坏提交保留及已有损坏不重置；Catalog 只显示元数据并支持六协议；所选 secret ID 的启动依赖、旧 manual 摘要兼容；真实双向 IPC minor 11 目录边界。
+
+审查发现并修复两处问题：内部 tagged Quic unit variant 可能忽略未知字段，改为空 struct 变体并回归；先转 JSON Value 会重排旧手动认证对象字段、改变历史启动 digest，改为 untagged tuple 直接序列化，并与旧算法逐字节摘要对照。URL/来源 revision 和未选中节点变化不影响已有连接的依赖摘要；所选不可变 secret ID 改变会影响。
+
+新增真实 sing-box 1.14.1 契约单独显式通过：从秘密文档还原六种协议，连同一个手动 HTTP profile，生产共享编译器生成的 7 入口/出口配置通过 `check -c stdin`。没有启动这七个上游连接、使用真实订阅或操作用户应用，因此不构成协议实网验收。导入/刷新、选择保持、运行中订阅变更确认和 CLI 写入口仍未接入。
+
+全量 workspace **343 项通过、0 失败、31 项顶层 ignored**，日志 `.tools/subscription-saved-final-tests.log`；新增真实内核契约属于 ignored 中另行显式通过的一项。workspace clippy -D warnings、fmt/diff 通过。最终独立复审无阻塞，独立复跑全部 10 项新默认回归及 7 profile 真实 check 均通过；提交主题 `feat(rust): persist subscription nodes through protected secret references`。
+
 **2026-09-20：Clash YAML 与客户端文本订阅适配**
 
 统一解析入口识别 YAML、客户端文本、URI 和一层 Base64 包装，复用六协议 typed Node 与 outbound 编译。YAML 使用有界事件解析，支持锚点/别名/合并且限制物理深度、别名逻辑深度与展开工作量；仅提取 proxies。文本支持 Proxy/server_local 节、位置参数和键值参数、引号内的分隔符与转义。未知连接字段和无法等价转换的选项报告不可选，不将原始内容写入诊断或 manifest。

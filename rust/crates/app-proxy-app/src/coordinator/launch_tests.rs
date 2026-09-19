@@ -582,3 +582,64 @@ async fn guard_status_requires_current_minor_in_both_directions() {
     drop(connection);
     server.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn subscription_catalog_requires_minor_eleven_in_both_directions() {
+    let fixture = Fixture::new();
+    let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+    let identity = fixture.shared.identity.clone();
+    let old_server = tokio::spawn(async move {
+        let mut connection = listener.accept().await.unwrap();
+        connection.receive::<Hello>().await.unwrap();
+        let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
+        greeting.protocol_minor = 10;
+        connection
+            .send(&Welcome::Ready { hello: greeting })
+            .await
+            .unwrap();
+        assert!(connection.receive::<Request>().await.is_err());
+    });
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::Catalog {
+                    offset: 0,
+                    expected_revision: None
+                }
+            )
+            .await,
+        Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+    ));
+    old_server.await.unwrap();
+    let server = fixture.server();
+    let policy = policy();
+    let mut connection = ipc::connect(
+        fixture.shared.identity.store_id,
+        &policy,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
+    greeting.protocol_minor = 10;
+    connection.send(&greeting).await.unwrap();
+    connection.receive::<Welcome>().await.unwrap();
+    connection
+        .send(&Request {
+            protocol_major: PROTOCOL_MAJOR,
+            request_id: Uuid::new_v4(),
+            operation: Operation::Catalog {
+                offset: 0,
+                expected_revision: None,
+            },
+        })
+        .await
+        .unwrap();
+    let response: Response = connection.receive().await.unwrap();
+    assert!(
+        matches!(response.result, Reply::Error { code } if code == "CATALOG_PROTOCOL_UPDATE_REQUIRED")
+    );
+    drop(connection);
+    server.await.unwrap().unwrap();
+}
