@@ -209,3 +209,13 @@ core 启动许可在 ReadyToSpawn 时随 journal 发布，核对 generation/入�
 7 项新增测试全部通过，包括四线程初始化、原生跨进程排他、owner 死亡后未知保留、真实创建确认、存活禁止释放、精确退出后重新预留。父测试显式运行新增 ignored 子进程 fixture，均使用隔离临时目录，无用户应用或默认全局目录变更。全量 workspace 162 项通过、14 项顶层 ignored；真实 sing-box 扩容与启动许可竞争另行通过（7.81 秒）。审查方独立复跑 7 项资源及 7 项启动状态测试通过，最终复审无阻塞。clippy `-D warnings`、fmt 和 diff 检查通过。
 
 这批提供执行前的可组合约束，尚无生产 LaunchEngine/CLI 接入；外部手动进程识别、EXE 更新后的旧进程占用、MSIX 授权/回执及未知结果核对仍需后续实现。
+
+**完整身份绑定的原生进程查询（2026-09-20）**
+
+ToolHelp 快照只返回进程提示，WMI COM 查询仅接受同用户/同会话完整身份；查询期间保留只读进程句柄，前后核对创建时间、映像、SID/session 和存活，并检查 WMI CreationDate 微秒精度对应关系。不会按 PID 或父 PID 单独认领实例；不会把访问失败、空命令行或查询超时视为应用不存在。
+
+命令行通过 Windows CommandLineToArgvW 解析，保留空参数、Unicode、引号和反斜杠，不派生 Debug/Serialize，不输出 provider 描述。枚举状态遵循 [IEnumWbemClassObject::Next](https://learn.microsoft.com/en-us/windows/win32/api/wbemcli/nf-wbemcli-ienumwbemclassobject-next)；参数和时间来源为 [Win32_Process](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process)。新增 windows 0.62.2 COM 绑定，接口与 VARIANT 在专用线程内自动释放；不创建 PowerShell 查询进程或读取跨进程 PEB。
+
+5 项新增测试通过：DMTF 精度/时区/无效日期、Windows 参数边界、超时和取消后实际线程仍持 slot、异常退出释放 slot、真实测试子进程参数/父 PID 回执及伪造身份/退出拒绝。外层 5 秒预算不能强制终止 COM 调用；每个进程最多一个实际未结束查询，之后返回忙而不积累查询线程。原生 helper 由父测试显式运行、精确清理，未查询或关闭用户应用的命令行。
+
+独立审查通过并复跑全部 5 项测试；最终全量 workspace 167 项通过、15 项顶层 ignored（包含上述父调用 helper），clippy `-D warnings`、fmt 和 diff 检查通过。仅交付查询平台层，实例归属判断、外部实例占用决策和 LaunchEngine/Guard 调用仍待实现。

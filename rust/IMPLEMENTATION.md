@@ -20,6 +20,7 @@
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
 | 实例启动 | 持久状态、core 许可及跨 store 预留已实现，独立 review 通过；完整执行待续 | 请求别名、物理 key、跨进程锁、一次性 dispatch、未创建证据及精确退出测试通过；LaunchEngine/CLI、外部进程发现、普通/MSIX 完整流程和未知结果核对待实现 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
+| 进程只读查询 | 已实现，独立 review 通过 | 原生快照提示、完整身份句柄/WMI 创建时间复核、有界查询/取消及 Windows argv；5 项行为测试通过，实例归属分类和启动/Guard 集成待续 |
 | sing-box 管理/一键安装 | 初始生命周期、coordinator/CLI、一键安装/取消已实现，独立 review 通过；产品集成待续 | 自有共享进程；固定官方包校验、自动目录、交互确认/重试、并发安装、进度与取消；启动许可、重配置/回滚、未知副作用核对及持续故障通知待实现 |
 | sing-box 配置生成 | 已实现，独立 review 通过 | 活动 profile 合并、固定入口→出口、末尾拒绝、HTTP/SOCKS5 认证及稳定配置；4 项规则测试和 1 项真实内核转发测试，已接入初始内核管理组件 |
 | sing-box 程序发现/检查 | 已实现，独立 review 通过 | 自动发现/真实 version、有界子进程输出及 check；CLI discover sing-box 已接入，安装及生产运行待实现 |
@@ -63,3 +64,5 @@
 - 实例启动持久状态 / core 许可：独立审查及增量复审通过，提交主题 `feat(rust): persist launch attempts and protect core startup permissions`。一个受保护原子 journal 保存请求映射、attempt 和确认会话；同实例未决请求指向同一 attempt，跨配置/core 请求编号冲突拒绝。创建前必须成功持久化 intent，旧 epoch 的前置准备可结束，SpawnRequested 之后保留未知且不按时间释放；晚取消不声称未启动。ReadyToSpawn 发布与 core stop/reconfigure 共用 gate，持久许可在未知结果期间继续阻止破坏性变更。新增 7 项平台行为测试（含真实子进程）及扩展的真实 core 竞争测试通过；workspace 154 项通过后新增容量/时间回归单独通过，共 155 项默认行为已验证、13 项顶层 ignored，clippy/fmt/diff 通过。尚未接实际 LaunchEngine、CLI、跨 store 资源锁、MSIX 回执或确认未创建时的失败终结，不等于生产启动闭环已完成。
 
 - 跨 store 实例预留 / 一次性执行许可：独立审查与修复复审通过，提交主题 `feat(rust): reserve physical instances across stores before dispatch`。按物理安装/数据身份生成 key，独立用户目录内核文件锁配合持久占用，owner 死亡不清除未知；确认后仅精确退出可释放。审查发现并修复未创建证据可重用和跨 store 混用：本地原子写后唯一发放带随机 nonce 的许可，全局授权消费许可，平台创建再消费授权，证据完整绑定 store/attempt/epoch/nonce。新增 7 项行为测试含真实跨进程锁及创建/退出；全量 162 项通过、14 项顶层 ignored，真实 core 扩容/许可竞争另行通过（7.81 秒），clippy/fmt/diff 通过。尚未接入生产 LaunchEngine/CLI、外部进程发现和 MSIX helper，不表示完整启动已交付。
+
+- 进程只读查询：独立审查通过，提交主题 `feat(rust): inspect exact process arguments with bounded native WMI`。ToolHelp 提供有界快照提示，独立 COM 线程读取参数并复核完整身份/创建时间；查询无终止权限，未提供命令行不等于空参数。5 秒调用预算与一个实际未结束查询的限制覆盖超时、取消和异常；参数及 provider 描述不外传。5 项新增测试含真实子进程参数回执和身份伪造拒绝，审查方独立复跑通过；全量 167 项通过、15 项顶层 ignored，clippy/fmt/diff 通过。尚未提供实例归属分类、完整 LaunchEngine 或 Guard 执行。

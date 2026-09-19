@@ -13,6 +13,7 @@ pub mod ipc;
 pub mod launch_state;
 pub mod package;
 pub mod process;
+pub mod process_query;
 pub mod singbox_binary;
 pub mod singbox_install;
 mod storage_security;
