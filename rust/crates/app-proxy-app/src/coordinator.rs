@@ -1,5 +1,5 @@
 //! Authenticated coordinator RPC; configuration writes use durable request records.
-use crate::configuration::Configuration;
+use crate::configuration::{CatalogPage, Configuration, catalog_page};
 use app_proxy_core::{
     model::Manifest,
     registry::{ConfigAction, ConfigRequest},
@@ -14,7 +14,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 0;
+const PROTOCOL_MINOR: u32 = 1;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -48,6 +48,10 @@ struct Request {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
     Status {},
+    Catalog {
+        offset: usize,
+        expected_revision: Option<u64>,
+    },
     Configure {
         expected_revision: u64,
         action: ConfigAction,
@@ -69,6 +73,7 @@ struct Response {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
     Status { status: Status },
+    Catalog { page: CatalogPage },
     Configured { outcome: ConfigOutcome },
     RequestStatus { status: Option<ConfigRequestStatus> },
     Error { code: String },
@@ -99,6 +104,12 @@ impl Shared {
     }
     fn execute(&self, request: Request) -> Result<Reply> {
         match request.operation {
+            Operation::Catalog {
+                offset,
+                expected_revision,
+            } => Ok(Reply::Catalog {
+                page: catalog_page(self.configuration.snapshot()?, offset, expected_revision)?,
+            }),
             Operation::Status {} => Ok(Reply::Status {
                 status: self.update(&self.configuration.snapshot()?),
             }),
@@ -343,6 +354,8 @@ async fn rpc(
             "REQUEST_ID_CONFLICT" => "REQUEST_ID_CONFLICT",
             "INVALID_REQUEST_ID" => "INVALID_REQUEST_ID",
             "CONFIG_REQUEST_PENDING" => "CONFIG_REQUEST_PENDING",
+            "CATALOG_CHANGED" => "CATALOG_CHANGED",
+            "CATALOG_ENTRY_TOO_LARGE" => "CATALOG_ENTRY_TOO_LARGE",
             _ => "COORDINATOR_OPERATION_FAILED",
         }));
     }
@@ -375,6 +388,45 @@ pub async fn request_status(
     {
         Reply::RequestStatus { status } => Ok(status),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn catalog(root: PathBuf) -> Result<CatalogPage> {
+    let mut offset = 0;
+    let mut combined: Option<CatalogPage> = None;
+    loop {
+        let expected_revision = combined.as_ref().map(|c| c.revision);
+        let Reply::Catalog { mut page } = client_operation(
+            root.clone(),
+            Uuid::new_v4(),
+            Operation::Catalog {
+                offset,
+                expected_revision,
+            },
+        )
+        .await?
+        else {
+            return Err(Error::Invalid("IPC_RESPONSE_MISMATCH"));
+        };
+        let next = page.next_offset;
+        if let Some(all) = &mut combined {
+            if page.revision != all.revision {
+                return Err(Error::Invalid("CATALOG_CHANGED"));
+            }
+            all.applications.append(&mut page.applications);
+            all.instances.append(&mut page.instances);
+            all.profiles.append(&mut page.profiles);
+        } else {
+            page.next_offset = None;
+            combined = Some(page);
+        }
+        let Some(next) = next else {
+            return Ok(combined.expect("first page inserted"));
+        };
+        if next <= offset {
+            return Err(Error::Invalid("IPC_RESPONSE_MISMATCH"));
+        }
+        offset = next;
     }
 }
 

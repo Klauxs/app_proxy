@@ -14,6 +14,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 管理实例登记；目前不启动应用或安装保护组件
+    Instance {
+        #[command(subcommand)]
+        command: app_proxy_app::instance_cli::Command,
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// 查询协调进程状态；首次运行创建全新 Rust 数据目录
     Status {
         #[arg(long)]
@@ -62,7 +69,11 @@ enum Probes {
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error}");
-        std::process::exit(1);
+        std::process::exit(
+            error
+                .downcast_ref::<app_proxy_app::instance_cli::Failure>()
+                .map_or(1, |e| e.exit_code),
+        );
     }
 }
 
@@ -76,6 +87,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     identity::assert_ordinary_user()?;
     let cli = Cli::parse();
     match cli.command {
+        Commands::Instance { command, json } => {
+            let root = cli
+                .home
+                .map(Ok)
+                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            runtime.block_on(app_proxy_app::instance_cli::run(root, command, json))?;
+            Ok(())
+        }
         Commands::Status { json } => {
             let root = match cli.home {
                 Some(path) => path,

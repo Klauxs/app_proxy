@@ -9,10 +9,11 @@
 | 配置模型 | 基础模型已实现，独立 review 通过 | 严格 JSON、引用/路径/Guard/IFEO 校验；13 项 core 测试；当前节点仅手动 HTTP/SOCKS5，订阅与其他协议后续实现 |
 | 配置存储 | 基础存储已实现，独立 review 通过 | 归属/ACL、revision、锁、原子替换/上一份备份、不可变秘密与坏文件拒绝；10 项 store 测试；恢复界面与运行 journal 待实现 |
 | IPC 传输 | 已实现，独立 review 通过 | 双向身份/普通权限/会话/映像验证、管道 ACL、1 MiB 帧与超时/取消；4 项真实管道 + 2 项帧测试 |
-| coordinator | 引导及配置写 RPC 已实现，独立 review 通过 | 单所有者、握手、status、配置编辑/请求查询；锁外安装检查、并发重放及丢响应恢复；CLI 写入口、运行任务恢复待实现 |
+| coordinator | 引导及配置写 RPC 已实现，独立 review 通过 | 单所有者、握手、status、配置编辑/请求查询；锁外安装检查、并发重放及丢响应恢复；CLI 跨进程写入已验证，运行任务恢复待实现 |
 | 启动模板 | 纯合成已实现，独立 review 通过 | 原版/分身参数环境、直连/代理、秘密引用、路径变量；7 项模板测试；不表示代理就绪或可以启动 |
 | 实例数据目录 | 已实现，独立 review 通过 | store/LocalState 命名空间、归属/ACL/目录句柄、空白创建、保留数据；6 项目录测试 + 2 项模板子进程测试；真实包内访问待验证 |
-| 实例配置编辑 | 已实现，独立 review 通过 | 7 项纯配置规则测试，已接入 coordinator 写接口与物理安装/原版去重；CLI/菜单及外部集成清理待实现 |
+| 实例配置编辑 | 已实现，独立 review 通过 | 已接入 coordinator 与 CLI；7 项规则 + 4 项真实 CLI 写测试，物理去重、保留数据及列表脱敏；菜单及外部集成清理待实现 |
+| 实例 CLI / 列表摘要 | 已实现，独立 review 通过 | create/list/clone/rename/bind/remove/request，按 revision 和字节预算分页；尚无启动/代理创建/保护授权操作 |
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
 | 实例启动 | 待实现 | 统一状态机、安装解析和已运行判断 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
@@ -40,3 +41,4 @@
 - 配置请求恢复/去重：独立审查发现并修复完成记录超前于还原后配置的误报；复审通过，8 项事务测试及 workspace clippy 通过。提交主题 `feat(rust): recover durable configuration requests`。全量测试此前 68 项通过，后续修复与新增 2 项回归已在事务套件通过。保护目录内先记录 intent，提交 manifest，再记录回执；不覆盖外部副作用及启动会话恢复。
 - 安装解析：独立审查及桥接测试增量复审通过，3 项安装身份/更新夹具与 2 项 PowerShell 桥接夹具通过；真实 Codex/Claude discover 只读查询成功。提交主题 `feat(rust): resolve installation identity and package updates`。本批全量 75 项测试通过，3 项顶层 ignored（其中 2 项由父测试显式调用的子进程 fixture 已运行）；clippy 通过。尚未接入创建/启动，也未验证真实应用启动、多开或代理。
 - 配置写服务 / coordinator RPC：独立审查发现并修复旧状态快照覆盖 Guard 空闲策略的竞态；复审及查询恢复增量审查通过。提交主题 `feat(rust): coordinate durable configuration edits over IPC`。全量 81 项测试通过；随后新增临时文件占用查询恢复回归，4 项服务测试通过（共 82 项已验证行为测试）；clippy/fmt 通过。新增管道写测试仍为同测试进程两端；实际 CLI 写链路下一批验证。开发版协议 major 2；尚未实现启动、网络准备或 Guard 执行。
+- 实例配置 CLI：独立审查发现并修复长 Unicode locator 超出 IPC 帧限制的分页边界；复审通过。提交主题 `feat(rust): expose instance configuration commands`。4 项真实 CLI→host 测试验证创建/克隆/改名/绑定/移除/查询、只登记分身、安装别名复用及数据保留；列表隐藏参数/环境值，另有字节预算分页回归。全量 87 项测试通过（3 项顶层 ignored 的含义同前），clippy/fmt 通过；不包含真实应用启动、代理或保护执行。

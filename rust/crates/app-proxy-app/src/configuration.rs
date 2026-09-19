@@ -10,8 +10,118 @@ use app_proxy_windows::{
     installation::{self, ResolvedApplication},
     store::Store,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceSummary {
+    pub id: Uuid,
+    pub application_id: Uuid,
+    pub name: String,
+    pub revision: u64,
+    pub isolated: bool,
+    pub network: model::NetworkBinding,
+    pub guard: model::Desired,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub revision: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogPage {
+    pub revision: u64,
+    pub next_offset: Option<usize>,
+    pub applications: Vec<model::Application>,
+    pub instances: Vec<InstanceSummary>,
+    pub profiles: Vec<ProfileSummary>,
+}
+
+/// Only display metadata, never argv, environment, credentials or subscription URLs.
+pub fn catalog_page(
+    manifest: Manifest,
+    offset: usize,
+    expected_revision: Option<u64>,
+) -> Result<CatalogPage> {
+    const PAGE: usize = 16;
+    if expected_revision.is_some_and(|r| r != manifest.revision) {
+        return Err(Error::Invalid("CATALOG_CHANGED"));
+    }
+    offset
+        .checked_add(PAGE)
+        .ok_or(Error::Invalid("INVALID_CATALOG_OFFSET"))?;
+    let total = manifest
+        .applications
+        .len()
+        .max(manifest.instances.len())
+        .max(manifest.profiles.len());
+    let display = |name: String| name.chars().take(256).collect();
+    let mut page = CatalogPage {
+        revision: manifest.revision,
+        next_offset: None,
+        applications: manifest
+            .applications
+            .into_iter()
+            .skip(offset)
+            .take(PAGE)
+            .map(|mut a| {
+                a.name = display(a.name);
+                a
+            })
+            .collect(),
+        instances: manifest
+            .instances
+            .into_iter()
+            .skip(offset)
+            .take(PAGE)
+            .map(|i| InstanceSummary {
+                id: i.id,
+                application_id: i.application_id,
+                name: display(i.name),
+                revision: i.revision,
+                isolated: matches!(i.data, model::InstanceData::Isolated { .. }),
+                network: i.network,
+                guard: i.guard.desired,
+            })
+            .collect(),
+        profiles: manifest
+            .profiles
+            .into_iter()
+            .skip(offset)
+            .take(PAGE)
+            .map(|p| ProfileSummary {
+                id: p.id,
+                name: display(p.name),
+                revision: p.revision,
+            })
+            .collect(),
+    };
+    // Count limits alone do not bound UTF-8 locator sizes. Keep ample room for
+    // the RPC envelope, preserve complete locators, and fail explicitly if even
+    // one entry cannot fit. All three collections advance by the same count.
+    let mut count = PAGE;
+    loop {
+        let end = offset + count;
+        page.next_offset = (end < total).then_some(end);
+        if serde_json::to_vec(&page)?.len() <= 512 * 1024 {
+            return Ok(page);
+        }
+        if count == 1 {
+            return Err(Error::Invalid("CATALOG_ENTRY_TOO_LARGE"));
+        }
+        count /= 2;
+        page.applications.truncate(count);
+        page.instances.truncate(count);
+        page.profiles.truncate(count);
+    }
+}
 
 pub struct Configuration {
     store: Mutex<Store>,
@@ -167,6 +277,55 @@ mod tests {
     use model::*;
     use registry::{NewData, NewInstance};
     use std::{fs, sync::Arc};
+
+    #[test]
+    fn catalog_bounds_serialized_bytes_preserves_locators_and_detects_revision_changes() {
+        let mut manifest = Manifest::empty("S-1-5-21-fixture".into());
+        let directories = format!("{}\\", "目录".repeat(60)).repeat(180);
+        for n in 0..20 {
+            let path = std::path::PathBuf::from(format!("C:\\{directories}app-{n}.exe"));
+            assert!(path.to_str().unwrap().encode_utf16().count() < 32767);
+            manifest
+                .applications
+                .push(application(path, Template::Codex));
+        }
+        manifest.validate().unwrap();
+        let encoded = serde_json::to_vec(&manifest).unwrap();
+        let mut offset = 0;
+        let mut observed = Vec::new();
+        loop {
+            let page =
+                catalog_page(serde_json::from_slice(&encoded).unwrap(), offset, Some(1)).unwrap();
+            assert!(serde_json::to_vec(&page).unwrap().len() <= 512 * 1024);
+            if offset == 0 {
+                assert!(page.applications.len() < 16);
+            }
+            observed.extend(page.applications);
+            let Some(next) = page.next_offset else {
+                break;
+            };
+            offset = next;
+        }
+        assert_eq!(observed.len(), manifest.applications.len());
+        for (a, b) in observed.iter().zip(&manifest.applications) {
+            assert!(a.locator == b.locator);
+            assert_eq!(a.id, b.id);
+        }
+        manifest.revision = 2;
+        assert!(matches!(
+            catalog_page(manifest, 1, Some(1)),
+            Err(Error::Invalid("CATALOG_CHANGED"))
+        ));
+        let mut manifest = Manifest::empty("S-1-5-21-fixture".into());
+        manifest.applications.push(application(
+            std::path::PathBuf::from(format!("C:\\{}.exe", "目录".repeat(100_000))),
+            Template::Codex,
+        ));
+        assert!(matches!(
+            catalog_page(manifest, 0, None),
+            Err(Error::Invalid("CATALOG_ENTRY_TOO_LARGE"))
+        ));
+    }
 
     fn request(revision: u64, action: ConfigAction) -> ConfigRequest {
         ConfigRequest {

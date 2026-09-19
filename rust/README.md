@@ -19,7 +19,21 @@ cargo fmt --all -- --check
 
 本机 Rust 安装在项目 `.tools` 内，未修改系统 PATH；可使用 `./scripts/cargo.ps1 build --workspace --locked`。传递 Cargo 的 `-p` 或 `--` 等参数时用数组，避免 PowerShell 参数绑定冲突，例如 `./scripts/cargo.ps1 -CargoArgs @('clippy','--workspace','--all-targets','--locked','--','-D','warnings')`。
 
-`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前只返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑、持久化请求去重和结果查询已接入 coordinator RPC；用户 CLI 写入口、菜单和应用运行 journal 仍待实现。开发版 IPC 已升级至 major 2，CLI 与 host 必须成套使用。
+`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前只返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑、持久化请求去重和结果查询已接入 coordinator RPC 与实例 CLI；菜单和应用运行 journal 仍待实现。开发版 IPC 为 major 2，CLI 与 host 必须成套使用。
+
+实例配置命令已可使用（仅保存配置，不启动应用或启用保护）：
+
+```powershell
+.\target\debug\app-proxy.exe instance create --preset claude --data isolated --direct --name "Claude 分身"
+.\target\debug\app-proxy.exe instance list --json
+.\target\debug\app-proxy.exe instance clone <实例ID> --name "新分身"
+.\target\debug\app-proxy.exe instance rename <实例ID> "新名称"
+.\target\debug\app-proxy.exe instance bind <实例ID> --direct
+.\target\debug\app-proxy.exe instance remove <实例ID>
+.\target\debug\app-proxy.exe instance request <请求ID> --json
+```
+
+创建默认原版，必须选择 `--direct` 或 `--proxy <已登记代理ID>`；普通 EXE 使用 `--exe <绝对路径> --adapter codex|claude|chromium|environment`，只有已支持的 Codex/Claude 模板允许分身。应用位置和分身存储自动解析，不复制登录数据。移除只删除登记，保留数据；已有系统集成时先要求清理。每次写入前会输出请求编号，响应中断后查询原编号，不自动重新创建。首次登记应用和创建实例是两个请求，实例创建失败可能保留应用记录。列表为摘要，显示名最多 256 字符，不含参数、环境值和代理凭据；不是完整配置导出。代理创建、启动及 Guard 授权仍待后续实现。
 
 `probe package claude` 仅在已安装 Claude 的包身份下启动本产品测试 helper，验证回执和独立临时目录读写，不启动 Claude 界面或修改其登录数据。`probe process --debug-detach` 验证调试创建和脱离，**不代表真实 IFEO 注册或 Electron 子进程兼容性已经通过**。
 
