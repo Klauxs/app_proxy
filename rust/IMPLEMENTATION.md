@@ -20,6 +20,7 @@
 | sing-box 管理/一键安装 | 待实现 | 自行启动、多个入口/出口共享进程、安装/取消、CONNECT/TLS、配置切换恢复 |
 | sing-box 配置生成 | 已实现，独立 review 通过 | 活动 profile 合并、固定入口→出口、末尾拒绝、HTTP/SOCKS5 认证及稳定配置；4 项规则测试和 1 项真实内核转发测试，尚未接入内核管理 |
 | sing-box 程序发现/检查 | 已实现，独立 review 通过 | 自动发现/真实 version、有界子进程输出及 check；CLI discover sing-box 已接入，安装及生产运行待实现 |
+| HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和 1 项真实 sing-box TLS 集成，待接入生产启动/运行监控 |
 | 订阅解析 | 待实现 | 六协议、URI/Base64/Clash/文本格式、兼容 fixtures、刷新保持选择 |
 | IFEO | 仅调试创建候选 | 实际注册匹配/防递归/子进程/调用语义/恢复；未管理原版不受干预 |
 | Guard/ETW | 待实现 | 默认范围、普通/提权分工、事件/扫描、身份未知、限流及未管理进程存活 |
@@ -46,3 +47,4 @@
 - 实例配置 CLI：独立审查发现并修复长 Unicode locator 超出 IPC 帧限制的分页边界；复审通过。提交主题 `feat(rust): expose instance configuration commands`。4 项真实 CLI→host 测试验证创建/克隆/改名/绑定/移除/查询、只登记分身、安装别名复用及数据保留；列表隐藏参数/环境值，另有字节预算分页回归。全量 87 项测试通过（3 项顶层 ignored 的含义同前），clippy/fmt 通过；不包含真实应用启动、代理或保护执行。
 - sing-box 配置生成：独立审查通过，4 项配置契约及 1 项 sing-box 1.14.1 真实进程测试通过。提交主题 `feat(rust): compile shared sing-box proxy configurations`。真实测试覆盖同一内核的双上游认证、未匹配入口拒绝和故障不串线；全量 91 项测试通过、4 项顶层 ignored（其中真实内核测试另行显式运行），clippy/fmt 通过。尚未实现生产内核生命周期、安装或 CONNECT/TLS 健康检查。
 - sing-box 程序发现/检查：独立审查发现并修复版本字符串排序错误，跨位数回归及增量复审通过。提交主题 `feat(rust): discover and validate sing-box binaries`。4 项单测、扩展后的真实内核集成、全量 95 项测试及 clippy/fmt 通过。只查找程序并执行 version/check，未实现安装、运行管理或网络健康检查；同步文件 I/O 不受异步超时强制取消。
+- HTTPS 代理健康检查：独立审查及真实 sing-box TLS 增量复审通过。提交主题 `feat(rust): verify HTTPS connectivity through explicit proxies`。6 项新行为测试通过，全量 101 项通过（6 项顶层 ignored，其中两个真实内核测试分别显式运行，另三个为父测试调用的 helper）；clippy/fmt 通过。真实 core→HTTP 上游→TLS 夹具验证 204 与 core 退出后失败，不表示生产生命周期、目标应用代理或 Guard 已完成。

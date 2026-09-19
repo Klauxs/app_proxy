@@ -5,3 +5,4 @@ pub mod configuration;
 pub mod coordinator;
 pub mod instance_cli;
 pub mod probe;
+pub mod proxy_health;
