@@ -83,6 +83,12 @@ WindowsPlatform 对上层仍提供一个 spawn 契约，内部根据已安装规
 
 **6. 同名子进程与 MSIX**
 
+2026-09-20 可行性复核：下面的辅助 continuation 是候选要求，尚无兼容实现。Chromium 官方明确说明 IFEO 使调用方拿到 debugger 的句柄而非预期子进程句柄，另有沙箱问题。[官方 IFEO 说明](https://www.chromium.org/developers/how-tos/debugging-on-windows/#image-file-execution-options)。当前 [Chromium broker 源码](https://github.com/chromium/chromium/blob/main/sandbox/win/src/broker_services.cc) 挂起创建受限目标后，继续对返回的线程设置 token，并以返回的进程句柄初始化沙箱；继承句柄、Job 和 AppContainer 也是创建契约的一部分。
+
+本仓库的 DebugDetach 会另建进程并解除自己的调试关系，无法将原调用方已经取得的 host process/thread handle 替换成目标句柄。父链验证、等待/退出码转发或普通命令行重放都不能单独解决这一问题。暂停生产接线前，必须先证明可行的兼容后端；不能用关闭沙箱、复制/改名应用或临时撤销 Debugger 绕过。该结论来自平台机制与源码复核，不是本机 Codex/Claude IFEO 启动的失败实测，当前 Chromium main 也不等于它们捆绑的具体版本。
+
+用户要求的默认 Guard/启动前接管范围暂不改写。已提出是否以监听纠正作为当前交付路径、IFEO 验证后再启用的设计问题，等待用户决定；其余实现继续推进。当前没有对真实应用安装规则，也没有把 IFEO 报为 active。
+
 Electron/Chromium 常用同一个 EXE 创建 renderer、GPU、utility 等子进程，路径过滤不能区分这些角色。把每次命中都送进“启动默认实例”会破坏整个应用。模板必须区分外部主进程、已验证运行实例的辅助进程和未知调用。
 
 辅助进程只允许在进程祖先、创建时间、用户/session、目标映像及实例归属均可确认时进入平台级 continuation，不建立新的 Instance/LaunchAttempt，不更改继承的网络/目录语义。`--type=renderer` 等参数或一个 bypass 标记本身不能授权放行。continuation 的父子关系、继承句柄、沙箱令牌、Job 和父进程等待语义必须实测；无法保持时，该应用整体不开放 IFEO，不能只声称主进程测试通过。
