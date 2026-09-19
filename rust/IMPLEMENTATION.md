@@ -29,6 +29,7 @@
 | 订阅解析 | 待实现 | 六协议、URI/Base64/Clash/文本格式、兼容 fixtures、刷新保持选择 |
 | IFEO | 调试创建候选及普通创建前只读检查 | 普通 EXE 服务发现 Debugger 时拒绝误入；实际注册匹配/防递归/子进程/调用语义/恢复待实现，未管理原版不受干预 |
 | Guard/ETW | 待实现 | 默认范围、普通/提权分工、事件/扫描、身份未知、限流及未管理进程存活 |
+| 原生 ETW 进程事件平台层 | 已实现，独立 review 通过；实际 kernel provider 采集待授权验证 | 固定 provider/事件、TDH 命名属性、1024 项有界提示队列、丢失统计、会话归属及退出；默认 4 项及真实空会话控制测试通过，当前权限启用 provider 返回 Win32 5；未接入提权部署或事件管道 |
 | Guard 纠正执行服务 | 已实现，独立 review 通过；自动触发待接入 | 精确误启动主进程、持久一次性停止许可、全局限流、辅助残留等待及停止后代理失败禁止直连；9 项新增回归通过，不自动监听或注册 IFEO |
 | Guard 只读扫描 | 已实现，独立 review 通过；监听接入待续 | 登记实例归属、历史会话绑定保留、未决/歧义保守处理，目录不创建；扫描结束复核 revision/未决请求，超时解析线程不累积 |
 | Guard CLI / 授权状态边界 | 已实现，独立 review 通过；组件安装待续 | status/enable/disable、desired/实际/组件分离；只登记分身 IFEO 不适用，保存后未授权返回 requires_action/5，已有 IFEO 不静默停用；查询不会激活保护 |
@@ -92,3 +93,5 @@
 - Guard 只读实例扫描：独立 review 及增量复审通过，提交主题 `feat(rust): scan guarded instances without disturbing managed sessions`。扫描保留 Confirmed 的历史网络绑定，排除未管理原版，未决/身份未知/多个主进程不输出纠正目标；完成后再次检查配置 revision 和新未决请求。新增只打开既有分身目录的接口，不创建或认领 store/LocalState 数据。独立复跑 6 项扫描和 2 项目录测试通过；全量 227 项通过、21 项顶层 ignored，clippy/fmt/diff 通过。解析工作线程持有单槽直到实际返回，5 秒扫描超时不会堆积后台解析。尚未接自动监听、授权、ETW 或 IFEO。
 
 - Guard CLI 与授权状态边界：独立 review 及 JSON 严格性修复复审通过，提交主题 `feat(rust): expose guard configuration and authorization status`。新增 status/enable/disable、2.9 RPC、单槽观察及旧 host 拒绝；保留配置回执，组件未授权返回 requires_action/5，现有 IFEO 不允许静默停用。只分身 IFEO 不适用、manifest 登记不视为实际 active。新增 5 项回归，全量 232 项通过、21 项 ignored；输出调整后 10 项 CLI 契约再次通过，独立复跑 17 项 Guard 测试通过，clippy/fmt/diff 通过。没有安装特权组件或自动监听/纠正。
+
+- 原生 ETW 进程事件平台层：独立审查及修复复审通过，提交主题 `feat(rust): add bounded native process event listener`。固定 Microsoft-Windows-Kernel-Process / ProcessStart，TDH 按属性名解码，事件只提供 PID/短名/时间提示；队列去重、溢出和解码/系统丢失要求补扫。原会话 handle、GUID 和名称核对后才停止，不接管同名会话。修复会话已结束时 drain 丢失最终批次的问题，保留真实结束原因。全量 236 项通过、24 项顶层 ignored，clippy/fmt/diff 通过；真实空会话冲突/归属/外部结束测试另行通过。当前普通令牌启用 kernel provider 返回 Win32 5，不能宣称真实事件采集通过；检查无残留本产品 ETW session。提权部署、事件 IPC 和自动 Guard 尚未接入。

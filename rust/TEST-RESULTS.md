@@ -318,3 +318,13 @@ LaunchEngine 新增内部 Guard 纠正入口，普通请求的 origin 标签不�
 新增 2 项真实 CLI、2 项 RPC 和 1 项严格 JSON 回归；独立复跑 17 项 Guard 相关测试通过。CLI 验证只分身范围、缺授权回执、重复禁用不改 revision、直连拒绝、原版 IFEO 需求、伪造的配置登记不产生 active、未清理 IFEO 时禁止禁用；仅写临时 store 元数据，没有系统 IFEO 或 UAC 操作。全量 workspace 232 项通过、21 项顶层 ignored；最后输出文本/状态字段调整后全部 10 项 CLI 契约再次通过，clippy -D warnings、fmt/diff 通过。
 
 组件授权部署、后台监听、ETW、定时扫描纠正与 IFEO 注册执行仍未接入。本次入口明确暴露待完成状态，不能作为这些功能已完成的证据。
+
+**原生 ETW 进程事件平台层（2026-09-20）**
+
+新增固定 kernel process provider 的 ProcessStart 监听，不接受任意 provider 或执行动作。会话名绑定当前用户/store/session，每次拥有独立 epoch GUID；同名冲突只查询后拒绝，不接管。停止前按原 handle 查询并核对 GUID、完整名称和实时属性。消费者保留回调状态与日志结构直到 ProcessTrace 返回，协调超时、迟到 handle 发布和 CloseTrace；不请求 UAC 或更改组权限。
+
+TDH 读取命名 ProcessID/ImageName 属性，不把事件头 PID 或固定 payload 偏移作为生产解析依据。输出只有 PID、映像短名和事件时间，并非实例身份或停止授权。1024 项队列按 PID/短名合并，溢出/解码失败及拥有会话的丢失统计变化要求全量补扫。EVENT_TRACE_LOGFILE.EventsLost 为未使用字段，实际统计读取 EVENT_TRACE_PROPERTIES。事件批次尚未接入管道，接入时必须另外满足 1 MiB 字节预算。
+
+4 项默认测试覆盖名称/载荷限制、队列去重/溢出/丢失/结束、真实 TDH 元数据解码及回调截断处理、会话消失后的最终批次和异主拒绝。真实空会话控制测试显式通过：StartTrace/Query、同名冲突、错误 GUID 拒绝停止、拥有的会话被另一控制句柄结束后仍可取最终批次、同名重开及清理。真实 kernel provider 子进程事件测试也显式尝试，但在 EnableProcessTrace 返回 Win32 5（访问被拒绝）；没有采集到真实事件，未触发 UAC。该失败不能由空会话控制成功抵消。
+
+独立 review 发现并修复 drain 因 session 已消失而遮蔽最终事件/结束原因的问题；复审通过并复跑全部 4 项默认测试。全量 workspace 236 项通过、24 项顶层 ignored；clippy -D warnings、fmt/diff 通过。logman 只读检查确认无 AppProxyRust-Process- 会话残留。此批不含提权安装、事件管道、自动扫描或 IFEO，完整权限与端到端事件采集仍需后续授权组件实测。
