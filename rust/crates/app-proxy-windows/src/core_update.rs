@@ -255,6 +255,7 @@ impl Store {
     }
 
     pub fn start_core_update(&mut self, id: Uuid, execution_request: Uuid) -> Result<CoreUpdate> {
+        self.ensure_core_launch_idle()?;
         if execution_request.is_nil() {
             return Err(Error::Invalid("INVALID_REQUEST_ID"));
         }

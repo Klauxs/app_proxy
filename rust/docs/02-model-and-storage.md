@@ -78,8 +78,7 @@ args 内拒绝 NUL、受管参数冲突、含混 `--` 分隔位置。只支持�
   secrets/<secret-id>.json
   instances/<instance-id>/user-data/ ...
   state/owner.lock
-  state/attempts/<attempt-id>.json
-  state/sessions.json
+  state/launch.json
   state/operations/<operation-id>.json
   state/requests/...
   config/generations/<generation-id>/sing-box.json
@@ -88,6 +87,8 @@ args 内拒绝 NUL、受管参数冲突、含混 `--` 分隔位置。只支持�
   icons/<instance-id>.<content-hash>.ico
   backups/ bin/
 ```
+
+`state/launch.json` 在同一次受保护原子替换中保存启动请求别名、attempt 和确认会话，避免请求映射与进程回执分开提交。只保存依赖摘要、资源 key、实际网络绑定和完整进程身份，不保存 argv/env 原文。文件上限 8 MiB，最多 4096 个请求映射；可释放的终态保留 7 天，未决及尚未确认退出的会话不按时间清理。容量耗尽拒绝新增请求，但仍可查询、重放、取消和核对已有记录。
 
 manifest 是单个权威配置快照。第一次创建只接受空目录或正确归属标记；ACL 限制为当前用户、管理员及系统。读到未知 schema、损坏 JSON 或 owner 不匹配时停止写入，提供诊断，禁止初始化成空配置掩盖错误。
 

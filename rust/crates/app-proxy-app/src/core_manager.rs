@@ -58,6 +58,42 @@ impl CoreManager {
         }
     }
 
+    /// Publish a durable launch permission under the same gate used by stop and
+    /// reconfiguration. The launch engine must use this entry, not call the store
+    /// transition while another core lifecycle operation may be in flight.
+    pub async fn ready_launch(
+        &self,
+        id: Uuid,
+        epoch: Uuid,
+        binding: app_proxy_core::launch::LaunchBinding,
+    ) -> Result<app_proxy_core::launch::LaunchAttempt> {
+        let _gate = self.gate.lock().await;
+        let mut store = self.configuration.lock()?;
+        if let app_proxy_core::launch::LaunchNetwork::Profile { generation, .. } = binding.network {
+            let CoreState::Running {
+                generation: current,
+                process,
+            } = store.core_state()?
+            else {
+                return Err(Error::Invalid("LAUNCH_CORE_CHANGED"));
+            };
+            if generation != current {
+                return Err(Error::Invalid("LAUNCH_CORE_CHANGED"));
+            }
+            let core = CoreProcess::attach(&process)?;
+            let endpoints: Vec<_> = store
+                .open_core_generation(generation)?
+                .profiles()
+                .iter()
+                .map(|p| p.endpoint.clone())
+                .collect();
+            if !core.listeners_verified(&endpoints)? {
+                return Err(Error::Invalid("CORE_LISTENER_OWNER_UNCONFIRMED"));
+            }
+        }
+        store.ready_launch(id, epoch, binding)
+    }
+
     pub async fn ensure(
         &self,
         profiles: &[Uuid],
@@ -282,6 +318,7 @@ impl CoreManager {
     pub async fn stop(&self) -> Result<()> {
         let _gate = self.gate.lock().await;
         self.configuration.lock()?.ensure_core_update_idle()?;
+        self.configuration.lock()?.ensure_core_launch_idle()?;
         let state = self.configuration.lock()?.core_state()?;
         match &state {
             CoreState::Stopped {} => Ok(()),

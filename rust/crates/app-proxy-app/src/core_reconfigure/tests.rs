@@ -504,6 +504,36 @@ async fn real_shared_core_expansion_preserves_routes_reuses_subsets_and_rolls_ba
             })
             .unwrap();
     }
+    let instance = Uuid::new_v4();
+    let application = Uuid::new_v4();
+    let mut manifest = store.load().unwrap();
+    manifest.applications.push(Application {
+        id: application,
+        name: "launch fixture".into(),
+        revision: 1,
+        locator: ApplicationLocator::Exe {
+            path: std::env::current_exe().unwrap(),
+        },
+        template_ref: Template::Environment,
+    });
+    manifest.instances.push(Instance {
+        id: instance,
+        application_id: application,
+        name: "launch fixture".into(),
+        revision: 1,
+        data: InstanceData::Original {},
+        args: vec![],
+        env: SavedEnvironment::default(),
+        cwd: WorkingDirectory::Application {},
+        network: NetworkBinding::Profile {
+            profile_id: profiles[0],
+        },
+        guard: GuardConfig {
+            desired: Desired::Disabled,
+            policy: GuardPolicy::StopUnproxied,
+        },
+    });
+    store.commit(manifest.revision, manifest).unwrap();
     drop(reservations);
     let configuration = Arc::new(Configuration::new(store));
     let _cleanup = Cleanup(configuration.clone());
@@ -515,6 +545,125 @@ async fn real_shared_core_expansion_preserves_routes_reuses_subsets_and_rolls_ba
         })
         .await
         .unwrap();
+    // A queued launch permission and a queued stop share the lifecycle gate.
+    // Permission publishes first; stop must fail before terminating the core.
+    use app_proxy_core::launch::*;
+    let epoch = Uuid::new_v4();
+    let launch = LaunchRequest {
+        request_id: Uuid::new_v4(),
+        instance_id: instance,
+        origin: LaunchOrigin::Interactive,
+    };
+    {
+        let mut store = configuration.lock().unwrap();
+        store.begin_launch(&launch, epoch).unwrap();
+        let mut phase = LaunchPhase::Accepted {};
+        for next in [
+            LaunchPhase::Resolving {},
+            LaunchPhase::CheckingInstance {},
+            LaunchPhase::PreparingProxy {},
+            LaunchPhase::PreparingData {},
+        ] {
+            store
+                .advance_launch(launch.request_id, epoch, &phase, next.clone())
+                .unwrap();
+            phase = next;
+        }
+    }
+    let identity = app_proxy_windows::identity::current().unwrap();
+    let binding = LaunchBinding {
+        dependency_digest: [1; 32],
+        resource_key: [2; 32],
+        executable: identity.image_path,
+        image: identity.image_file,
+        session_id: identity.session_id,
+        network: LaunchNetwork::Profile {
+            profile_id: profiles[0],
+            generation: ready.generation,
+            endpoint: endpoints[0].clone(),
+        },
+    };
+    let held = manager.gate.lock().await;
+    let permission = manager.ready_launch(launch.request_id, epoch, binding);
+    tokio::pin!(permission);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut permission)
+            .await
+            .is_err()
+    );
+    let stopping = manager.stop();
+    tokio::pin!(stopping);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut stopping)
+            .await
+            .is_err()
+    );
+    drop(held);
+    let (permission, stopping) = tokio::join!(permission, stopping);
+    permission.unwrap();
+    assert!(matches!(
+        stopping,
+        Err(Error::Invalid("CORE_LAUNCH_IN_PROGRESS"))
+    ));
+    assert_eq!(via(endpoints[0].clone()).await.unwrap(), "first");
+    let reused = manager
+        .ensure_with(&profiles[..1], profiles[0], |e| async {
+            via(e).await.map(|_| ())
+        })
+        .await
+        .unwrap();
+    assert_eq!(reused.process, ready.process);
+    let blocked_plan = manager
+        .prepare_expand(
+            Uuid::new_v4(),
+            configuration.snapshot().unwrap().revision,
+            &profiles[1..],
+            profiles[1],
+        )
+        .await
+        .unwrap();
+    let apply = Uuid::new_v4();
+    configuration
+        .lock()
+        .unwrap()
+        .begin_core_request(
+            apply,
+            epoch,
+            &app_proxy_core::core_control::CoreAction::ApplyUpdate {
+                plan_id: blocked_plan.plan_id,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        manager
+            .apply_update(blocked_plan.plan_id, apply, |_| async { Ok(()) })
+            .await,
+        Err(Error::Invalid("CORE_LAUNCH_IN_PROGRESS"))
+    ));
+    assert!(
+        matches!(manager.state().unwrap(), CoreState::Running { process, .. } if process == ready.process)
+    );
+    {
+        let mut store = configuration.lock().unwrap();
+        store
+            .finish_core_request(
+                apply,
+                epoch,
+                CoreOutcome::Failed {
+                    code: "CORE_LAUNCH_IN_PROGRESS".into(),
+                },
+            )
+            .unwrap();
+        store.request_launch_cancel(launch.request_id).unwrap();
+        store
+            .advance_launch(
+                launch.request_id,
+                epoch,
+                &LaunchPhase::ReadyToSpawn {},
+                LaunchPhase::Cancelled {},
+            )
+            .unwrap();
+    }
     let revision = configuration.snapshot().unwrap().revision;
     assert!(matches!(
         manager

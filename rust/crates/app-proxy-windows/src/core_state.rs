@@ -292,6 +292,7 @@ impl Store {
     /// A Starting record without an identity is unresolved, never auto-replayed.
     pub fn transition_core_state(&mut self, expected: &CoreState, next: CoreState) -> Result<()> {
         self.ensure_core_update_idle()?;
+        self.ensure_core_launch_idle()?;
         self.transition_core_state_inner(expected, next, None)
     }
 

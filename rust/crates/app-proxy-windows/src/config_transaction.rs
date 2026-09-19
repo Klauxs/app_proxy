@@ -73,7 +73,9 @@ impl Store {
         if request.request_id.is_nil() {
             return Err(Error::Invalid("INVALID_REQUEST_ID"));
         }
-        if self.core_request_status(request.request_id)?.is_some() {
+        if self.core_request_status(request.request_id)?.is_some()
+            || self.launch_request(request.request_id)?.is_some()
+        {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }
         let digest = digest_bytes(&store::encode(request, REQUEST_LIMIT)?);
@@ -99,7 +101,9 @@ impl Store {
         request: &ConfigRequest,
         rejection: Option<&'static str>,
     ) -> Result<ConfigOutcome> {
-        if self.core_request_status(request.request_id)?.is_some() {
+        if self.core_request_status(request.request_id)?.is_some()
+            || self.launch_request(request.request_id)?.is_some()
+        {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }
         if rejection.is_some_and(|code| {

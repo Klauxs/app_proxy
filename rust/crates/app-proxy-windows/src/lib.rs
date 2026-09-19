@@ -9,6 +9,7 @@ pub mod identity;
 pub mod installation;
 pub mod instance_data;
 pub mod ipc;
+pub mod launch_state;
 pub mod package;
 pub mod process;
 pub mod singbox_binary;

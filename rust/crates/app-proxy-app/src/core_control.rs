@@ -231,6 +231,10 @@ impl CoreControl {
             store.core_state()?,
             CoreState::Stopped {} | CoreState::Down { .. }
         ) && !store.has_unresolved_core_requests()?
+            && !store
+                .launch_attempts()?
+                .iter()
+                .any(|a| a.reserves_instance())
             && store.ensure_core_update_idle().is_ok())
     }
 

@@ -208,6 +208,47 @@ pub fn terminate_exact(expected: &ProcessIdentity) -> Result<()> {
     Ok(())
 }
 
+/// Read-only observation: false means this exact process has exited, including
+/// PID reuse. Access denied or unreadable identity is an error, never absence.
+pub fn is_running_exact(expected: &ProcessIdentity) -> Result<bool> {
+    identity::assert_ordinary_user()?;
+    let caller = identity::current()?;
+    if expected.pid == 0
+        || expected.creation_time == 0
+        || expected.user_sid != caller.user_sid
+        || expected.session_id != caller.session_id
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    let handle = match identity::open(
+        expected.pid,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+    ) {
+        Ok(handle) => handle,
+        Err(Error::Windows {
+            code: ERROR_INVALID_PARAMETER,
+            ..
+        }) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: retain the exact process handle through wait and identity checks.
+    unsafe {
+        match WaitForSingleObject(handle.as_raw_handle(), 0) {
+            WAIT_OBJECT_0 => return Ok(false),
+            WAIT_TIMEOUT => {}
+            _ => return Err(last_error("ObserveApplicationWait")),
+        }
+        let actual = identity::inspect_handle(handle.as_raw_handle())?;
+        if actual.creation_time != expected.creation_time {
+            return Ok(false);
+        }
+        if actual != *expected {
+            return Err(Error::IdentityMismatch);
+        }
+    }
+    Ok(true)
+}
+
 pub fn spawn(spec: SpawnSpec) -> Result<StartedProcess> {
     identity::assert_ordinary_user()?;
     spec.environment.validate()?;
