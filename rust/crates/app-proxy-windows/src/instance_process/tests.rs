@@ -59,6 +59,79 @@ fn words(values: &[&str]) -> Vec<OsString> {
 }
 
 #[test]
+fn proxy_evidence_distinguishes_missing_conflicting_and_unreadable_arguments() {
+    let endpoint: SocketAddr = "127.0.0.1:32123".parse().unwrap();
+    let check = |args: &[&str]| proxy_arguments(Some(&words(args)), endpoint);
+    for arg in [
+        "--proxy-server=http://127.0.0.1:32123",
+        "--proxy-server=127.0.0.1:32123",
+        "-PROXY-SERVER=HTTP://127.0.0.1:32123",
+        "/proxy-server=http://127.0.0.1:32123",
+    ] {
+        assert_eq!(check(&[arg]), ProxyArguments::Matching);
+    }
+    assert_eq!(check(&[]), ProxyArguments::Mismatched);
+    for args in [
+        vec!["--proxy-server"],
+        vec!["--proxy-server=direct://"],
+        vec!["--proxy-server=http://127.0.0.1:32124"],
+        vec!["--proxy-server=socks5://127.0.0.1:32123"],
+        vec![
+            "--proxy-server=http://127.0.0.1:32123",
+            "--proxy-server=http://127.0.0.1:32123",
+        ],
+        vec!["--proxy-server=http://127.0.0.1:32123", "--no-proxy-server"],
+        vec![
+            "--proxy-server=http://127.0.0.1:32123",
+            "--proxy-pac-url=private-value",
+        ],
+        vec![
+            "--proxy-server=http://127.0.0.1:32123",
+            "--proxy-auto-detect",
+        ],
+        vec![
+            "--proxy-server=http://127.0.0.1:32123",
+            "--proxy-bypass-list=*",
+        ],
+        vec!["--", "--proxy-server=http://127.0.0.1:32123"],
+    ] {
+        assert_eq!(check(&args), ProxyArguments::Mismatched);
+    }
+    for args in [
+        vec!["--proxy-server=http://localhost:32123"],
+        vec!["--proxy-server=http=127.0.0.1:32123;https=127.0.0.1:32123"],
+        vec!["--proxy-server=http://127.0.0.1:32123,direct://"],
+        vec!["--proxy-server=unknown://127.0.0.1:32123"],
+        vec!["--single-argument"],
+        vec!["--user-data-dir="],
+        vec!["--user-data-dir=C:\\one", "--user-data-dir=C:\\two"],
+    ] {
+        assert_eq!(check(&args), ProxyArguments::Unknown);
+    }
+    assert_eq!(proxy_arguments(None, endpoint), ProxyArguments::Unknown);
+    assert_eq!(
+        proxy_arguments(Some(&[]), endpoint),
+        ProxyArguments::Unknown
+    );
+    assert_eq!(
+        proxy_arguments(
+            Some(&words(&["--proxy-server=http://[::1]:32123"])),
+            "[::1]:32123".parse().unwrap()
+        ),
+        ProxyArguments::Matching
+    );
+    // A URL/file payload after the terminator is not a proxy switch.
+    assert_eq!(
+        check(&[
+            "--proxy-server=http://127.0.0.1:32123",
+            "--",
+            "--no-proxy-server"
+        ]),
+        ProxyArguments::Matching
+    );
+}
+
+#[test]
 fn chromium_prefixes_duplicates_terminator_and_unavailable_arguments_are_distinct() {
     let app = application();
     let target = InstanceTarget::new(&app, None, Template::Claude).unwrap();
@@ -253,6 +326,8 @@ async fn exact_native_child_is_classified_without_adoption_or_termination() {
                 "instance_process::tests::attribution_child".into(),
                 "--skip".into(),
                 format!("--user-data-dir={}", data.paths.user_data.display()).into(),
+                "--skip".into(),
+                "--proxy-server=http://127.0.0.1:32123".into(),
             ],
             cwd: temp.path().to_owned(),
             environment,
@@ -276,6 +351,37 @@ async fn exact_native_child_is_classified_without_adoption_or_termination() {
     assert_eq!(found.relation, InstanceRelation::Target);
     assert_eq!(found.role, ProcessRole::Main);
     assert_eq!(found.identity, child.0.identity);
+    let endpoint: SocketAddr = "127.0.0.1:32123".parse().unwrap();
+    assert_eq!(
+        target
+            .inspect_proxy(&child.0.identity, endpoint)
+            .await
+            .unwrap()
+            .proxy,
+        ProxyArguments::Matching
+    );
+    assert_eq!(
+        target
+            .inspect_proxy(&child.0.identity, "127.0.0.1:32124".parse().unwrap())
+            .await
+            .unwrap()
+            .proxy,
+        ProxyArguments::Mismatched
+    );
+    assert!(
+        target
+            .inspect_proxy(&child.0.identity, "192.0.2.1:32123".parse().unwrap())
+            .await
+            .is_err()
+    );
+    let (_other_store, other_data) = prepared(&temp.path().join("other-store"));
+    let other_target = InstanceTarget::new(&app, Some(&other_data), Template::Codex).unwrap();
+    let other = other_target
+        .inspect_proxy(&child.0.identity, endpoint)
+        .await
+        .unwrap();
+    assert_eq!(other.relation, InstanceRelation::Other);
+    assert_eq!(other.proxy, ProxyArguments::Unknown);
     assert!(process::is_running_exact(&child.0.identity).unwrap());
     let mut forged = child.0.identity.clone();
     forged.creation_time += 10;
@@ -404,6 +510,14 @@ async fn auxiliary_inherits_only_live_exact_ancestry_and_keeps_its_role() {
         let _cleanup = Cleanup(child.clone());
         let observed = target.inspect(&child).await.unwrap();
         assert_eq!(observed.role, ProcessRole::Auxiliary);
+        assert_eq!(
+            target
+                .inspect_proxy(&child, "127.0.0.1:32123".parse().unwrap())
+                .await
+                .unwrap()
+                .proxy,
+            ProxyArguments::Unknown
+        );
         assert_eq!(
             observed.relation,
             if isolated {

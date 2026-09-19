@@ -7,6 +7,7 @@ use crate::{
 use app_proxy_core::{FileIdentity, ProcessIdentity, model::Template};
 use std::{
     ffi::OsString,
+    net::SocketAddr,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::{Component, Path, PathBuf, Prefix},
     ptr,
@@ -30,12 +31,21 @@ pub enum InstanceRelation {
     Unknown,
 }
 
+/// Argument evidence only, never a network health result or stop authorization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyArguments {
+    Matching,
+    Mismatched,
+    Unknown,
+}
+
 /// Contains no arguments or environment. Auxiliary identities are never main
 /// targets; a parent PID alone cannot promote one to a managed main process.
 pub struct InstanceObservation {
     pub identity: ProcessIdentity,
     pub role: ProcessRole,
     pub relation: InstanceRelation,
+    pub proxy: ProxyArguments,
 }
 
 /// Installation/data handles borrowed here remain pinned through observation.
@@ -61,6 +71,27 @@ impl<'a> InstanceTarget<'a> {
     }
 
     pub async fn inspect(&self, expected: &ProcessIdentity) -> Result<InstanceObservation> {
+        self.inspect_with_proxy(expected, None).await
+    }
+
+    /// Use the running session's recorded endpoint when it has one, rather than
+    /// substituting a newly edited binding. No proxy connection is attempted.
+    pub async fn inspect_proxy(
+        &self,
+        expected: &ProcessIdentity,
+        endpoint: SocketAddr,
+    ) -> Result<InstanceObservation> {
+        if !endpoint.ip().is_loopback() || endpoint.port() == 0 {
+            return Err(Error::Invalid("INVALID_PROXY_ENDPOINT"));
+        }
+        self.inspect_with_proxy(expected, Some(endpoint)).await
+    }
+
+    async fn inspect_with_proxy(
+        &self,
+        expected: &ProcessIdentity,
+        endpoint: Option<SocketAddr>,
+    ) -> Result<InstanceObservation> {
         identity::assert_ordinary_user()?;
         let caller = identity::current()?;
         if expected.user_sid != caller.user_sid || expected.session_id != caller.session_id {
@@ -90,6 +121,7 @@ impl<'a> InstanceTarget<'a> {
                 identity: expected.clone(),
                 role: ProcessRole::Unknown,
                 relation,
+                proxy: ProxyArguments::Unknown,
             });
         }
         if self.template == Template::Environment {
@@ -97,15 +129,24 @@ impl<'a> InstanceTarget<'a> {
                 identity: expected.clone(),
                 role: ProcessRole::Main,
                 relation: InstanceRelation::Target,
+                proxy: ProxyArguments::Unknown,
             });
         }
         let data = self.data.map(|data| data.paths.user_data.clone());
         process_query::inspect_with(expected, move |observed, deadline| {
             let (role, relation) = classify_family(&observed, data.as_deref(), deadline, 0)?;
+            let proxy = if role == ProcessRole::Main && relation == InstanceRelation::Target {
+                endpoint.map_or(ProxyArguments::Unknown, |endpoint| {
+                    proxy_arguments(observed.arguments.as_deref(), endpoint)
+                })
+            } else {
+                ProxyArguments::Unknown
+            };
             Ok(InstanceObservation {
                 identity: observed.identity,
                 role,
                 relation,
+                proxy,
             })
         })
         .await
@@ -201,6 +242,48 @@ fn classify(
 struct ChromiumSwitches {
     user_data: Option<PathBuf>,
     process_type: Option<String>,
+    proxy_server: Option<String>,
+    proxy_conflict: bool,
+}
+
+fn proxy_arguments(arguments: Option<&[OsString]>, endpoint: SocketAddr) -> ProxyArguments {
+    let Some(switches) = arguments.and_then(chromium_switches) else {
+        return ProxyArguments::Unknown;
+    };
+    if switches.proxy_conflict {
+        return ProxyArguments::Mismatched;
+    }
+    let Some(value) = switches.proxy_server.as_deref().filter(|s| !s.is_empty()) else {
+        return ProxyArguments::Mismatched;
+    };
+    if value.eq_ignore_ascii_case("direct://") {
+        return ProxyArguments::Mismatched;
+    }
+    // Chromium defaults a bare host:port to HTTP. Named hosts, per-scheme maps
+    // and fallback lists can be equivalent, but are outside this small parser;
+    // do not turn an interpretation we cannot prove into correction evidence.
+    if value.contains([';', ',', '=', ' ', '@']) {
+        return ProxyArguments::Unknown;
+    }
+    let (scheme, address) = value.split_once("://").unwrap_or(("http", value));
+    let Ok(actual) = address.parse::<SocketAddr>() else {
+        return ProxyArguments::Unknown;
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return if ["https", "socks", "socks4", "socks5"]
+            .iter()
+            .any(|s| scheme.eq_ignore_ascii_case(s))
+        {
+            ProxyArguments::Mismatched
+        } else {
+            ProxyArguments::Unknown
+        };
+    }
+    if actual == endpoint {
+        ProxyArguments::Matching
+    } else {
+        ProxyArguments::Mismatched
+    }
 }
 
 fn chromium_switches(arguments: &[OsString]) -> Option<ChromiumSwitches> {
@@ -210,6 +293,8 @@ fn chromium_switches(arguments: &[OsString]) -> Option<ChromiumSwitches> {
     let mut result = ChromiumSwitches {
         user_data: None,
         process_type: None,
+        proxy_server: None,
+        proxy_conflict: false,
     };
     for word in &arguments[1..] {
         let word = word.to_str()?.trim();
@@ -230,6 +315,15 @@ fn chromium_switches(arguments: &[OsString]) -> Option<ChromiumSwitches> {
             // Chromium's Windows parser has a raw-command-line special case;
             // a flattened argv is insufficient to classify it safely.
             "single-argument" => return None,
+            "proxy-server" => {
+                if result.proxy_server.is_some() {
+                    result.proxy_conflict = true;
+                }
+                result.proxy_server = Some(value.into());
+            }
+            "proxy-pac-url" | "proxy-auto-detect" | "proxy-bypass-list" | "no-proxy-server" => {
+                result.proxy_conflict = true;
+            }
             "user-data-dir" => {
                 if value.is_empty() || result.user_data.is_some() {
                     return None;

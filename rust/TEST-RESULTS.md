@@ -279,3 +279,12 @@ Codex 首次启动被 INSTANCE_PROCESS_UNKNOWN 拒绝。只读核对发现原版
 3 项真实隐藏窗口夹具测试通过：正常关闭/无关窗口保留/身份伪造及 PID 复用拒绝；窗口处理 WM_CLOSE 但保持存活时不误报退出、显式 force 后结束；窗口线程挂起时有限等待后精确结束。夹具只创建自己的不可见窗口，不关闭用户应用。独立 review 通过并复跑全部 3 项通过。全量 workspace 209 项通过、21 项顶层 ignored，最终 1.5 秒等待修订后定向测试再次通过；clippy -D warnings、fmt/diff 通过。
 
 该 API 的调用方仍必须证明实例归属和停止授权；结果仅针对一个进程，不表示辅助进程已消失。窗口句柄是瞬时对象，关闭消息只是尽力请求，不能作为可信管理授权或退出回执。实例级停机、Guard 动作/限流和用户命令仍待接入。
+**Guard 代理参数证据（2026-09-20）**
+
+InstanceTarget.inspect_proxy 在同一次有界 WMI/完整身份及目录归属观测内核对代理参数，只有目标 Main 输出参数匹配结果。错误实例、辅助、旧映像/角色或目录未知均返回 Unknown；环境型模板不提供这项证据。端点必须为非零端口的 loopback 地址，不发起 DNS 或健康探测，不读取/输出进程环境。
+
+参数复用 Chromium 开关解释，缺失/空代理、明确不同 literal 地址或已知不同协议、重复代理及直接/PAC/auto/bypass 冲突为 Mismatched；正确单一 HTTP endpoint 为 Matching。独立 review 发现裸 IP:port 被错误拒绝，按 [Chromium 官方代理说明](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/net/docs/proxy.md#http-proxy-scheme) 修复其默认 HTTP 语义。命名 host、复杂按协议映射、回退列表、未知 scheme 和歧义 argv 保留 Unknown，不扩大为通用代理解析器。
+
+新增一项表格回归覆盖大小写、前缀、IPv4/IPv6、终止符、缺失/冲突/歧义和裸地址等价；真实子进程观测扩展验证匹配、不同端口、非目标/辅助 Unknown，且进程持续存活。全量 workspace 210 项通过、21 项顶层 ignored；解析修复后 6 项归属测试再通过，独立审查复跑同组通过，clippy -D warnings、fmt/diff 通过。
+
+Matching 只描述启动参数，不证明代理健康、环境变量或所有流量均受代理。调用方需要为已确认会话使用原 endpoint，不能因为新配置值或健康失败把旧会话判为误启动。当前未启用自动停止、Guard 监听、纠正或 IFEO；这些仍需后续实现和验收。

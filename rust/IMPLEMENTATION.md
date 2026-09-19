@@ -30,6 +30,7 @@
 | IFEO | 调试创建候选及普通创建前只读检查 | 普通 EXE 服务发现 Debugger 时拒绝误入；实际注册匹配/防递归/子进程/调用语义/恢复待实现，未管理原版不受干预 |
 | Guard/ETW | 待实现 | 默认范围、普通/提权分工、事件/扫描、身份未知、限流及未管理进程存活 |
 | 精确进程正常关闭 | 平台能力已实现，独立 review 通过 | 同用户/session/完整身份、限时 WM_CLOSE、1.5 秒等待及显式强制结束，3 项真实隐藏窗口测试通过；实例归属授权、辅助进程收尾及 Guard/CLI 接入待续 |
+| Guard 代理参数证据 | 平台能力已实现，独立 review 通过 | 目标主进程的匹配/不匹配/未知，支持 HTTP literal 地址及裸地址等价；其他实例与辅助不提供纠正依据；运行健康、Guard 动作和监听待续 |
 | 中文菜单/快捷方式/维护 | 待实现 | 端到端创建启动、改名/绑定/克隆/移除、保护授权、入口修复及保留数据卸载 |
 | 发布与实机验收 | 待实现 | 干净环境、Codex/Claude 原版/分身、升级、故障恢复、性能和完整发行清单 |
 
@@ -82,3 +83,4 @@
 - MSIX 生产启动接入及恢复：独立审查与增量复审通过，提交主题 `feat(rust): integrate package launches and durable recovery`。bridge 激活 package-child，LaunchEngine 消费一次性能力并等待持久回执；取消/截止由同一 gate 撤销，未知保留应用。隔离存储包将请求发布至自有 LocalState/store UUID 命名空间，helper 不访问被包虚拟化的原 store。修复旧包映像候选遗漏；同 basename 的未核对旧版本保守阻止重复创建。新增 namespace、旧包候选、四种恢复状态和跨 store 同 attempt 回执拒绝 4 项默认测试，全量 205 项通过、20 项顶层 ignored；真实 Claude 过期 helper 集成另行通过（24.13 秒），不启动 Claude 应用。审查方独立复跑相关 15 项通过；clippy/fmt/diff 通过。真实应用分身启动、数据隔离、代理及 Guard/IFEO 验收仍待续。
 - 辅助进程存活祖先归属：真实 Codex 原版辅助进程无数据目录参数导致分身误拒绝，现通过同映像/SID/session/更早创建时间的存活祖先补充只读归属，最多 8 层共享查询预算，每层句柄返回时复核；无终止授权。独立 review 通过，审查方复跑 5 项归属及 6 项查询测试通过。新增真实父子进程回归，全量 206 项通过、20 项顶层 ignored，clippy/fmt/diff 通过。实际 Claude/Codex 各两个直连分身同开、独立目录写入、重复启动复用通过；Codex 原版一直存活。测试进程通过核对身份后的自有句柄清理，四个 attempt 均核对退出。提交主题 `fix(rust): resolve auxiliary ancestry before instance launch`。这些实机结果不等于登录、代理、Guard/IFEO 或完整发行验收。
 - 精确进程正常关闭：独立 review 通过，提交主题 `feat(rust): close exact application processes with bounded waits`。先以查询权限核对身份并限时请求目标窗口关闭，等待 1.5 秒；仅调用方显式选择 force 才申请终止权限并再次核对，终止后最多等待 3 秒。单次消息最多 100ms、消息总预算 1 秒，窗口消息返回不构成退出证据。新增 3 项真实隐藏窗口测试，全量 209 项通过、21 项顶层 ignored；最终等待时间修订后 3 项定向复跑通过，审查方独立复跑通过，clippy/fmt/diff 通过。仅提供单进程能力，不按名/树终止，不代表实例停止、辅助清理或 Guard/IFEO 已完成。
+- Guard 代理参数证据：独立 review 和误判修复复审通过，提交主题 `feat(rust): inspect proxy arguments on exact managed main processes`。复用身份/目录/角色观测，仅目标 Main 提供 Matching/Mismatched/Unknown；辅助和其他实例不能成为纠正目标。复审修复 Chromium 裸 IP:port 与 HTTP URI 等价写法；命名 host、复杂映射/回退列表和未知 scheme 保留 Unknown。新增 1 项参数回归并扩展真实 child 契约，全量 210 项通过、21 项顶层 ignored，修复后 6 项归属测试和 clippy/fmt/diff 通过，审查方独立复跑通过。没有健康探测或停止动作，运行故障不得据此关闭应用；Guard 的会话绑定选择、限流、监听和执行集成待续。
