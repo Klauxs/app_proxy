@@ -101,22 +101,21 @@ impl LaunchEngine {
         request: LaunchRequest,
         expected_revision: Option<u64>,
     ) -> Result<LaunchAttempt> {
-        self.submit_checked(request, expected_revision, None).await
+        self.submit_checked(request, expected_revision, None)
     }
 
     /// Internal Guard adapter. A caller-supplied origin label on ordinary launch
     /// never grants stop permission; this path binds an exact observed target.
-    pub async fn submit_guard(
+    pub fn submit_guard(
         self: &Arc<Self>,
         request: LaunchRequest,
         revision: u64,
         target: GuardTarget,
     ) -> Result<LaunchAttempt> {
         self.submit_checked(request, Some(revision), Some(target))
-            .await
     }
 
-    async fn submit_checked(
+    fn submit_checked(
         self: &Arc<Self>,
         request: LaunchRequest,
         expected_revision: Option<u64>,
@@ -931,4 +930,4 @@ fn error_code(error: &Error) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

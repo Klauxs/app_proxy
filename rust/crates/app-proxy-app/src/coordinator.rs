@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 9;
+const PROTOCOL_MINOR: u32 = 10;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -166,7 +166,10 @@ impl Shared {
         )?;
         Ok(Self {
             identity,
-            guard_monitor: crate::guard_monitor::Monitor::new(configuration.clone()),
+            guard_monitor: crate::guard_monitor::Monitor::new(
+                configuration.clone(),
+                launch.clone(),
+            ),
             configuration,
             core,
             launch,
@@ -386,6 +389,7 @@ async fn handle(
 ) -> Result<()> {
     let status = &shared.identity;
     let request: Hello = connection.receive().await?;
+    let client_minor = request.protocol_minor;
     let rejection = if request.protocol_major != PROTOCOL_MAJOR {
         Some("PROTOCOL_VERSION_MISMATCH")
     } else if request.store_id != status.store_id {
@@ -415,6 +419,17 @@ async fn handle(
     let request_id = request.request_id;
     let epoch = status.epoch;
     if let Operation::GuardStatus { instance_id } = request.operation {
+        if client_minor < 10 {
+            return connection
+                .send(&Response {
+                    request_id,
+                    epoch,
+                    result: Reply::Error {
+                        code: "GUARD_PROTOCOL_UPDATE_REQUIRED".into(),
+                    },
+                })
+                .await;
+        }
         let permit = shared.guard_queries.clone().try_acquire_owned().ok();
         let runtime = tokio::runtime::Handle::current();
         let result = tokio::task::spawn_blocking(move || {
@@ -426,25 +441,7 @@ async fn handle(
                 instance_id,
                 scan_allowed,
             ))?;
-            // Receiving events is distinct from applying Guard policy. Until
-            // the scan consumer is connected, keep protection explicitly blocked.
-            if status.desired == app_proxy_core::model::Desired::Enabled
-                && status.diagnostic.as_deref()
-                    == Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED")
-            {
-                let listener = shared.guard_monitor.snapshot();
-                status.diagnostic = Some(match listener.phase {
-                    crate::guard_monitor::Phase::Etw => {
-                        "GUARD_EVENTS_CONNECTED_SCAN_PENDING".into()
-                    }
-                    crate::guard_monitor::Phase::Polling => {
-                        "GUARD_EVENTS_INTERRUPTED_SCAN_PENDING".into()
-                    }
-                    _ => listener
-                        .diagnostic
-                        .unwrap_or_else(|| "GUARD_LISTENER_START_PENDING".into()),
-                });
-            }
+            shared.guard_monitor.update_status(&mut status);
             Ok::<_, Error>(status)
         })
         .await
@@ -622,7 +619,7 @@ async fn rpc(
     {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
-    if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 9 {
+    if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 10 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
     let request_id = request.request_id;

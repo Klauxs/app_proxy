@@ -57,7 +57,19 @@ fn fixture() -> (tempfile::TempDir, Arc<Monitor>) {
         },
     });
     store.commit(manifest.revision, manifest).unwrap();
-    (root, Monitor::new(Arc::new(Configuration::new(store))))
+    let configuration = Arc::new(Configuration::new(store));
+    let manager = Arc::new(crate::core_manager::CoreManager::new(
+        root.path().join("store"),
+        configuration.clone(),
+    ));
+    let resources = app_proxy_windows::instance_resource::ResourceRegistry::for_test_at(
+        &root.path().join("resources"),
+    )
+    .unwrap();
+    let launch =
+        LaunchEngine::with_resources(configuration.clone(), manager, Uuid::new_v4(), resources)
+            .unwrap();
+    (root, Monitor::new(configuration, launch))
 }
 
 async fn until(mut check: impl FnMut() -> bool) {

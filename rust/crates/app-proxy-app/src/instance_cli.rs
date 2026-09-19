@@ -374,12 +374,11 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
     let mut protection = None;
     if check_guard {
         match coordinator::guard_status(root.clone(), receipt.entity_id).await {
-            Ok(status) if status.desired == Desired::Enabled => {
-                let requires_action = if status.phase == crate::guard_control::GuardPhase::Blocked {
-                    "verify_guard_integrations"
-                } else {
-                    "authorize_guard_components"
-                };
+            Ok(status)
+                if status.desired == Desired::Enabled
+                    && status.phase != crate::guard_control::GuardPhase::Active =>
+            {
+                let requires_action = status.phase.required_action();
                 if json {
                     print(
                         &serde_json::json!({"request_id":request_id,"receipt":receipt,"application_started":false,
@@ -387,7 +386,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                     )?;
                 } else {
                     println!(
-                        "实例 {} 已保存。Guard 已按配置开启，但组件尚未授权或核验，保护未生效。当前版本尚未接入前台组件安装；可用 guard status 查询。",
+                        "实例 {} 已保存，Guard 尚未完全就绪；可用 guard status 查看检查进度和诊断，或用 guard enable 授权缺少的监听组件。",
                         receipt.entity_id
                     );
                 }

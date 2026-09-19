@@ -443,7 +443,7 @@ async fn interrupted_completion_recovers_both_journals_without_replaying_creatio
     }
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     engine: Arc<LaunchEngine>,
     instance: Uuid,
     exe: PathBuf,
@@ -451,7 +451,10 @@ struct Fixture {
     _root: tempfile::TempDir,
 }
 impl Fixture {
-    fn guarded() -> Self {
+    pub(crate) fn monitor(&self) -> Arc<crate::guard_monitor::Monitor> {
+        crate::guard_monitor::Monitor::new(self.engine.configuration.clone(), self.engine.clone())
+    }
+    pub(crate) fn guarded() -> Self {
         let fixture = Self::new(true);
         fixture.edit(|m| {
             let profile = Uuid::new_v4();
@@ -490,7 +493,7 @@ impl Fixture {
         });
         fixture
     }
-    fn external_guard_target(&self, isolated: bool, matching: bool) -> GuardChild {
+    pub(crate) fn external_guard_target(&self, isolated: bool, matching: bool) -> GuardChild {
         self.external_guard_tree(isolated, matching, false)
     }
     fn external_guard_tree(&self, isolated: bool, matching: bool, auxiliary: bool) -> GuardChild {
@@ -555,7 +558,6 @@ impl Fixture {
                     },
                 },
             )
-            .await
             .unwrap();
         self.result(request.request_id).await
     }
@@ -681,7 +683,7 @@ impl Fixture {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    async fn events(&self, count: usize) {
+    pub(crate) async fn events(&self, count: usize) {
         let deadline = Instant::now() + Duration::from_secs(3);
         while std::fs::read_dir(&self.events).unwrap().count() != count {
             assert!(Instant::now() < deadline, "unexpected creation count");
@@ -689,7 +691,7 @@ impl Fixture {
         }
     }
 }
-struct GuardChild(process::StartedProcess);
+pub(crate) struct GuardChild(pub process::StartedProcess);
 impl Drop for GuardChild {
     fn drop(&mut self) {
         let _ = self.0.terminate();
@@ -1050,7 +1052,6 @@ async fn guard_late_stop_worker_retains_resource_after_timeout_and_cannot_relaun
                 },
             },
         )
-        .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), entered_rx)
         .await
@@ -1111,7 +1112,6 @@ async fn guard_failed_stop_receipt_stays_unconfirmed_and_recovery_never_replays(
                 },
             },
         )
-        .await
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     while fixture

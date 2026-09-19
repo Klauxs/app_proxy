@@ -1,6 +1,6 @@
 //! Ordinary coordinator's listener lifecycle. Events only request a rescan;
 //! neither a PID hint nor a scheduled-task receipt grants process authority.
-use crate::configuration::Configuration;
+use crate::{configuration::Configuration, launch_engine::LaunchEngine};
 use app_proxy_core::model::Desired;
 use app_proxy_windows::{
     Error, Result,
@@ -10,6 +10,7 @@ use app_proxy_windows::{
     guard_task, identity,
 };
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -19,6 +20,8 @@ use tokio::{
     time::Instant,
 };
 use uuid::Uuid;
+
+mod scan;
 
 const RETRY: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_secs(2);
@@ -45,6 +48,18 @@ pub(crate) struct Snapshot {
     received: Option<Instant>,
 }
 impl Snapshot {
+    fn fresh(&self) -> Self {
+        let mut snapshot = self.clone();
+        if snapshot.phase == Phase::Etw
+            && snapshot
+                .received
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(5))
+        {
+            snapshot.phase = Phase::Polling;
+            snapshot.diagnostic = Some("GUARD_LISTENER_HEARTBEAT_STALE".into());
+        }
+        snapshot
+    }
     fn new(phase: Phase, diagnostic: Option<String>) -> Self {
         Self {
             phase,
@@ -78,6 +93,7 @@ struct State {
     owner: Option<Uuid>,
     snapshot: Snapshot,
     authorization: Option<Arc<Authorization>>,
+    scans: HashMap<Uuid, scan::Record>,
 }
 
 struct Preparation {
@@ -100,18 +116,21 @@ impl Drop for Preparation {
 
 pub(crate) struct Monitor {
     configuration: Arc<Configuration>,
+    launch: Arc<LaunchEngine>,
     state: Mutex<State>,
     native: Arc<Semaphore>,
     scan_requested: Notify,
 }
 impl Monitor {
-    pub fn new(configuration: Arc<Configuration>) -> Arc<Self> {
+    pub fn new(configuration: Arc<Configuration>, launch: Arc<LaunchEngine>) -> Arc<Self> {
         Arc::new(Self {
             configuration,
+            launch,
             state: Mutex::new(State {
                 owner: None,
                 snapshot: Snapshot::new(Phase::Disabled, None),
                 authorization: None,
+                scans: HashMap::new(),
             }),
             native: Arc::new(Semaphore::new(1)),
             scan_requested: Notify::new(),
@@ -136,21 +155,11 @@ impl Monitor {
         })
     }
     pub fn snapshot(&self) -> Snapshot {
-        let mut snapshot = self
-            .state
+        self.state
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .snapshot
-            .clone();
-        if snapshot.phase == Phase::Etw
-            && snapshot
-                .received
-                .is_none_or(|at| at.elapsed() >= Duration::from_secs(5))
-        {
-            snapshot.phase = Phase::Polling;
-            snapshot.diagnostic = Some("GUARD_LISTENER_HEARTBEAT_STALE".into());
-        }
-        snapshot
+            .fresh()
     }
     fn publish(
         &self,
@@ -165,11 +174,12 @@ impl Monitor {
         }
         let mut snapshot = Snapshot::new(phase, diagnostic);
         snapshot.generation = authorization.as_ref().map(|a| a.deployment.generation());
-        *state = State {
-            owner: Some(owner),
-            snapshot,
-            authorization,
-        };
+        if !matches!((&state.authorization, &authorization), (Some(old), Some(new)) if Arc::ptr_eq(old, new))
+        {
+            state.scans.clear();
+        }
+        state.snapshot = snapshot;
+        state.authorization = authorization;
     }
     fn wanted(&self) -> Result<Option<Uuid>> {
         let manifest = self.configuration.snapshot()?;
@@ -304,6 +314,10 @@ impl Monitor {
     }
 
     async fn run(self: Arc<Self>, owner_epoch: Uuid, mut stopped: watch::Receiver<bool>) {
+        let scanner = self.clone();
+        let _scanner = Task(tokio::spawn(async move {
+            scanner.scan_instances(owner_epoch).await
+        }));
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut preparing: Option<Task<Result<Connection>>> = None;
@@ -411,6 +425,7 @@ impl Drop for Service {
         if state.owner == Some(self.epoch) {
             state.owner = None;
             state.authorization = None;
+            state.scans.clear();
             state.snapshot = Snapshot::new(Phase::Disabled, None);
         }
     }

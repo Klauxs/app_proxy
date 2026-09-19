@@ -14,7 +14,21 @@ use uuid::Uuid;
 pub enum GuardPhase {
     Disabled,
     NeedsAuthorization,
+    Starting,
+    Active,
+    Degraded,
     Blocked,
+}
+impl GuardPhase {
+    pub(crate) fn required_action(self) -> Option<&'static str> {
+        match self {
+            Self::Disabled | Self::Active => None,
+            Self::NeedsAuthorization => Some("authorize_guard_components"),
+            Self::Starting => Some("wait_for_guard_check"),
+            Self::Degraded => Some("check_degraded_guard"),
+            Self::Blocked => Some("verify_guard_integrations"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +37,8 @@ pub enum ComponentState {
     NotApplicable,
     NeedsAuthorization,
     Unverified,
+    ActiveEtw,
+    ActivePolling,
 }
 
 #[derive(Serialize, Deserialize)]

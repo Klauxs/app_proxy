@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// 查看保护实际状态和只读进程检查；不会启用或纠正
+    /// 查看保护状态和进程检查；已启用的自动保护继续运行
     Status { id: Uuid },
     /// 保存启用意图；所需组件未授权时报告保护未完成
     Enable { id: Uuid },
@@ -33,6 +33,8 @@ fn component(value: ComponentState) -> &'static str {
         ComponentState::NotApplicable => "不适用",
         ComponentState::NeedsAuthorization => "待授权安装",
         ComponentState::Unverified => "组件待核验或等待监听",
+        ComponentState::ActiveEtw => "事件监听运行中",
+        ComponentState::ActivePolling => "轮询检查运行中",
     }
 }
 
@@ -102,7 +104,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
     {
         let mut foreground = crate::foreground::Foreground::new();
         println!(
-            "缺少进程监听组件，需要 Windows 管理员授权，安装位置自动选择。\n1. 安装监听组件\n2. 暂不安装（保留实例配置）\n组件安装后还需完成监听连接和保护核验，当前不会接管或关闭应用。"
+            "缺少进程监听组件，需要 Windows 管理员授权，安装位置自动选择。\n1. 安装监听组件\n2. 暂不安装（保留实例配置）\n组件就绪后会自动检查已启用保护的实例，关闭并纠正未按要求使用代理的误启动主进程。"
         );
         let answer = foreground.read_line().await?;
         if answer.trim() == "1" {
@@ -142,7 +144,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             };
             match installed {
                 Ok(_) => {
-                    println!("监听组件已安装并核验；保护尚未生效，仍需连接监听和完成其余组件。")
+                    println!("监听组件已安装并核验，自动检查将接入；请以接下来的保护状态为准。")
                 }
                 Err(app_proxy_windows::Error::Invalid("GUARD_INSTALL_CANCELLED")) => {
                     return Err(fail(5, "已取消 Windows 授权，实例配置保留。"));
@@ -162,11 +164,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 .map_err(|e| fail(6, e.to_string()))?;
         }
     }
-    let requires_action = match status.phase {
-        GuardPhase::Disabled => None,
-        GuardPhase::NeedsAuthorization => Some("authorize_guard_components"),
-        GuardPhase::Blocked => Some("verify_guard_integrations"),
-    };
+    let requires_action = status.phase.required_action();
     if json {
         println!(
             "{}",
@@ -184,7 +182,10 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             match status.phase {
                 GuardPhase::Disabled => "保护已关闭",
                 GuardPhase::NeedsAuthorization => "保护未生效，等待组件授权",
-                GuardPhase::Blocked => "保护组件待核验",
+                GuardPhase::Blocked => "保护受阻，请查看诊断",
+                GuardPhase::Starting => "保护正在检查或纠正",
+                GuardPhase::Active => "保护运行中",
+                GuardPhase::Degraded => "保护降级，请查看诊断",
             },
             component(status.listener),
             component(status.ifeo)
@@ -205,7 +206,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                     process.pid
                 ),
                 GuardObservation::Correction { target } => println!(
-                    "主进程 PID {} 的代理参数不匹配。本次检查保留进程，等待保护组件就绪。",
+                    "主进程 PID {} 的代理参数不匹配；自动保护就绪后会重新核验并纠正。",
                     target.process.pid
                 ),
                 GuardObservation::Blocked { code } => println!("无法确认进程状态：{code}。"),
@@ -215,7 +216,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             if code == "GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED" {
                 println!("监听组件注册已核验，运行连接尚未确认。");
             } else {
-                println!("保护核验尚未完成：{code}。");
+                println!("保护诊断：{code}。");
             }
         }
         if requires_action.is_some() {
@@ -225,7 +226,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         }
     }
     if desired.is_some() && requires_action.is_some() {
-        return Err(fail(5, "保护尚未完成：需要前台组件授权或核验。"));
+        return Err(fail(5, "保护尚未完全就绪，请按状态提示处理。"));
     }
     Ok(())
 }
