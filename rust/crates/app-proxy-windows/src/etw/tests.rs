@@ -239,3 +239,35 @@ fn native_session_conflict_owner_check_and_external_stop_final_batch() {
 fn event_fixture_child() {
     thread::sleep(Duration::from_secs(15));
 }
+
+#[test]
+#[ignore = "creates only its own empty temporary ETW session to validate crash recovery"]
+fn native_recovery_uses_persisted_epoch_and_query_returned_handle() {
+    let store = Uuid::new_v4();
+    let epoch = Uuid::new_v4();
+    let mut original = Session::start(store, epoch).unwrap();
+    assert!(matches!(
+        recover_owned(store, Uuid::new_v4()),
+        Err(Error::Invalid("ETW_SESSION_OWNER_MISMATCH"))
+    ));
+    original.query().unwrap();
+    // Models a controller crash after StartTrace but before saving its handle:
+    // recovery knows only the previously persisted epoch, SID/store/session.
+    recover_owned(store, epoch).unwrap();
+    assert!(matches!(
+        original.query(),
+        Err(Error::Windows {
+            code: ERROR_WMI_INSTANCE_NOT_FOUND,
+            ..
+        })
+    ));
+    original.stopped = true;
+    recover_owned(store, epoch).unwrap();
+    let mut successor = Session::start(store, Uuid::new_v4()).unwrap();
+    assert!(matches!(
+        recover_owned(store, epoch),
+        Err(Error::Invalid("ETW_SESSION_OWNER_MISMATCH"))
+    ));
+    successor.query().unwrap();
+    successor.stop().unwrap();
+}

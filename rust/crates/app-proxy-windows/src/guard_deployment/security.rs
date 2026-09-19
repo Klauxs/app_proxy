@@ -101,6 +101,30 @@ pub(super) fn read_file(path: &Path) -> Result<File> {
     storage_security::no_reparse(path)?;
     open_file(path, GENERIC_READ, OPEN_EXISTING, ptr::null())
 }
+pub(super) fn event_journal(path: &Path) -> Result<File> {
+    let _parent = directory(
+        path.parent()
+            .ok_or(Error::Invalid("GUARD_PARENT_REQUIRED"))?,
+        false,
+    )?;
+    match new_file(path) {
+        Ok(file) => Ok(file),
+        Err(Error::Windows {
+            code: ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS,
+            ..
+        }) => {
+            // No truncation or ACL repair. FILE_SHARE_READ excludes every other
+            // writer and deletion; verify the existing object before reading it.
+            open_file(
+                path,
+                GENERIC_READ | GENERIC_WRITE,
+                OPEN_EXISTING,
+                ptr::null(),
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
 fn open_file(
     path: &Path,
     access: u32,

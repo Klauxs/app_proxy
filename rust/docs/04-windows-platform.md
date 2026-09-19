@@ -76,6 +76,10 @@ request 消费采用独占 claim 文件/系统锁，helper 全程持有，确保
 
 **6. 命名管道协议边界**
 
+受保护 host 的 `event-listen --store UUID --generation UUID` 入口先核验提升权限、deployment 和自身映像，持有普通 coordinator 映像的身份/hash pin 后创建事件管道。在统一 30 秒截止前等待普通 coordinator 认证；陌生连接不会延长截止。只有认证通过才恢复/开启 ETW。每 250ms 发送提示或空心跳，满批次继续排空，结束标记在最后一批发送。管道断开/写入超时/查询错误时退出并停止自有 trace，用户应用不受影响。此入口没有接收控制命令、启动应用或终止应用的能力。
+
+ETW 所属记录固定保存在受保护 store 目录的 `events-<session>.json`，跨 helper generation 共享。写入句柄拒绝其他写入和删除，并保留至 trace 停止后。新 epoch 必须在 StartTrace 前同步到磁盘；崩溃后只在持有相同独占句柄、记录绑定 SID/store/session 且旧 epoch 与查询返回 GUID 一致时恢复。查询返回的 WNODE_HEADER.HistoricalContext 是会话 handle；再用该 handle 核对名称/GUID/实时模式/无日志文件，之后才停止。未知会话、损坏记录和身份冲突均保留并报错，不按名称直接删除。[Windows WNODE_HEADER 契约](https://learn.microsoft.com/en-us/windows/win32/etw/wnode-header)。旧 trace 停止后才写下一 epoch，部分写入不能丢失一个仍存活 trace 的所有权记录。
+
 普通 coordinator 管道和提权事件管道分开。两者都设置显式 DACL、拒绝远程客户端、限定用户/logon SID 和 session；客户端验证 server PID、令牌和映像身份，服务端验证连接方，nonce 不是身份校验的替代品。
 
 不能使用默认 named pipe DACL，也不能无意授予普通客户端创建同名 pipe 实例的权限。监听管道采用 first-instance 检测防占位冒充；发生冲突返回错误，禁止连接未经验证的端点。[微软管道权限说明](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)。

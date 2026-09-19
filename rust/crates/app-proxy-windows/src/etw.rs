@@ -251,13 +251,13 @@ pub struct ProcessListener {
     epoch: Uuid,
 }
 impl Session {
-    fn start(store_id: Uuid, epoch: Uuid) -> Result<Self> {
-        if store_id.is_nil() || epoch.is_nil() {
+    fn name(store_id: Uuid) -> Result<Vec<u16>> {
+        if store_id.is_nil() {
             return Err(Error::Invalid("INVALID_ETW_SCOPE"));
         }
         let caller = identity::current()?;
         let scope = format!("{:x}", Sha256::digest(caller.user_sid.as_bytes()));
-        let name: Vec<u16> = format!(
+        Ok(format!(
             "AppProxyRust-Process-{}-{}-{}",
             &scope[..16],
             store_id,
@@ -265,7 +265,13 @@ impl Session {
         )
         .encode_utf16()
         .chain(Some(0))
-        .collect();
+        .collect())
+    }
+    fn start(store_id: Uuid, epoch: Uuid) -> Result<Self> {
+        if store_id.is_nil() || epoch.is_nil() {
+            return Err(Error::Invalid("INVALID_ETW_SCOPE"));
+        }
+        let name = Self::name(store_id)?;
         let guid = GUID::from_u128(epoch.as_u128());
         let mut properties = Properties::new(guid);
         let mut handle = CONTROLTRACE_HANDLE::default();
@@ -294,6 +300,51 @@ impl Session {
             stopped: false,
         })
     }
+}
+
+/// Only the protected deployment journal may supply this epoch. Its exclusive
+/// writer handle must outlive recovery and the next trace. A name alone never
+/// authorizes recovery, and the public start API still refuses all collisions.
+pub(crate) fn recover_owned(store_id: Uuid, epoch: Uuid) -> Result<()> {
+    if epoch.is_nil() {
+        return Err(Error::Invalid("INVALID_ETW_SCOPE"));
+    }
+    let name = Session::name(store_id)?;
+    let mut properties = Properties::new(GUID::default());
+    properties.value.LogFileNameOffset = offset_of!(Properties, file) as u32;
+    // SAFETY: valid fixed-name query and sized output. This call is read-only.
+    let result = unsafe {
+        ControlTraceW(
+            CONTROLTRACE_HANDLE::default(),
+            name.as_ptr(),
+            &mut properties.value,
+            EVENT_TRACE_CONTROL_QUERY,
+        )
+    };
+    if result == ERROR_WMI_INSTANCE_NOT_FOUND {
+        return Ok(());
+    }
+    win(result, "QueryPreviousTrace")?;
+    if !same_guid(
+        properties.value.Wnode.Guid,
+        GUID::from_u128(epoch.as_u128()),
+    ) {
+        return Err(Error::Invalid("ETW_SESSION_OWNER_MISMATCH"));
+    }
+    // WNODE_HEADER documents HistoricalContext as the output session handle.
+    // Retain that handle, then query and verify GUID/name/mode again before stop.
+    // SAFETY: successful ControlTrace filled the HistoricalContext union member.
+    let handle = unsafe { properties.value.Wnode.Anonymous1.HistoricalContext };
+    if handle == 0 || handle == u64::MAX {
+        return Err(Error::Invalid("ETW_INVALID_RECOVERY_HANDLE"));
+    }
+    let mut session = Session {
+        handle: CONTROLTRACE_HANDLE { Value: handle },
+        guid: GUID::from_u128(epoch.as_u128()),
+        name,
+        stopped: false,
+    };
+    session.stop()
 }
 impl ProcessListener {
     /// Native permission checks apply. The production caller must first verify

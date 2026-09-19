@@ -8,6 +8,7 @@ pub mod core_update;
 pub mod etw;
 pub mod event_pipe;
 pub mod guard_deployment;
+pub mod guard_listener;
 pub mod guard_task;
 pub mod identity;
 pub mod ifeo;

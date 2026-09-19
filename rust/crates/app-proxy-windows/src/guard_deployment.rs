@@ -17,6 +17,7 @@ use std::{
 use uuid::Uuid;
 use windows_sys::Win32::Storage::FileSystem::*;
 
+mod event_journal;
 mod security;
 
 const FORMAT: &str = "app-proxy-rust-guard-deployment";
@@ -92,6 +93,14 @@ pub struct Deployment {
     _directories: Vec<OwnedHandle>,
 }
 impl Deployment {
+    pub(crate) fn event_trace(&self) -> Result<event_journal::EventTrace<'_>> {
+        identity::assert_elevated_user()?;
+        let current = identity::current()?;
+        if current.image_file != *self.host_image() {
+            return Err(Error::Invalid("GUARD_LISTENER_IMAGE_MISMATCH"));
+        }
+        event_journal::EventTrace::start(self, &current)
+    }
     pub fn generation(&self) -> Uuid {
         self.record.generation
     }

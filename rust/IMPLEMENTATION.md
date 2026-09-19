@@ -104,3 +104,5 @@
 - Guard 受保护 helper generation：独立审查与来源绑定修复复审通过，提交主题 feat(rust): stage verified administrator-owned guard helpers。固定自动目录、UAC 前 host/父目录 pin 和独立 fileID/size/hash、同用户普通 issuer 校验、管理员 owner/Users RX ACL、独占代际文件和回读；失败不激活或清除未知对象。6 项默认回归、全量 248 项通过，24 项 ignored，clippy/fmt/diff 通过。没有真实提权目录写入；前台必须保留 InstallerSource 并按固定 UAC 参数传递期望，任务/监听激活仍待接入与实测。
 
 - Guard 按需监听任务平台层：独立审查与增量复审通过，提交主题 feat(rust): validate and manage fixed guard listener tasks。固定 task/action 与 UUID 参数、管理员 owner/用户读运行 ACL、SID 解析、V2/context/触发和生命周期核验、当前 session RunEx 与空闲删除回读；不覆盖未知任务、不强制停机。4 项默认新增测试通过，全量 252 项通过、24 项 ignored；后续 task 收紧和 maintenance 变异回归定向再通过，clippy/fmt/diff 通过。本机仅建立内存 COM definitions 和只读查询，没有注册/运行/删除任务或 UAC；event-listen/前台授权/登录任务仍待接入。
+
+- Guard 生产监听入口与崩溃恢复：独立审查及增量复审通过，提交主题 `feat(rust): run protected guard listeners with trace recovery`。host 接入固定 event-listen/store/generation，核验提升权限和受保护自身/普通 coordinator 映像；统一认证截止后才开启 ETW，心跳/完整排队结束/断开停机。受保护 store/session journal 跨 generation 独占写入，先持久化 epoch，恢复按旧 epoch 及查询返回 handle 二次核验，冲突保留。7 项新增平台测试、真实 host 参数及普通权限拒绝契约通过；全量 260 项通过、25 项 ignored，新增真实空 ETW 恢复项单独显式通过；clippy/fmt/diff 通过且无测试 trace 残留。尚未连接前台授权、普通侧监听监督和自动 Guard，不宣称保护已激活；没有 UAC、任务注册或用户应用操作。

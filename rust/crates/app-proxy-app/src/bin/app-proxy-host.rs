@@ -12,6 +12,12 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    EventListen {
+        #[arg(long)]
+        store: uuid::Uuid,
+        #[arg(long)]
+        generation: uuid::Uuid,
+    },
     PackageChild {
         #[arg(long)]
         request: PathBuf,
@@ -30,6 +36,18 @@ enum Commands {
 
 fn main() {
     let result = match Cli::parse().command {
+        Commands::EventListen { store, generation } => {
+            match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime
+                    .block_on(app_proxy_windows::guard_listener::run(store, generation))
+                    .map_err(Into::into),
+                Err(error) => Err(error.into()),
+            }
+        }
         Commands::PackageChild { request } => {
             app_proxy_windows::package_launch::run_helper(&request).map_err(Into::into)
         }

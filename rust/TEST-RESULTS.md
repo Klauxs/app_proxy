@@ -362,3 +362,17 @@ run 只供已核对普通 coordinator 使用，显式当前 session>0，空替�
 4 项新增默认测试通过：固定名字/参数/路径限制、真实 Windows 安全描述符正负、本机 Task Scheduler 服务的未注册 COM definition 往返/缺失名字只读查询、主账户/权限/action/自动 trigger/maintenance/并行及超时条件变更拒绝。独立复审通过并复跑全部 4 项。全量 workspace 252 项通过、24 项 ignored；之后收紧替换语法、context/兼容级别和 maintenance 回归，全部 4 项再次通过，clippy -D warnings、fmt/diff 通过。
 
 本批没有在系统创建、运行或删除任何任务，也未触发 UAC。真实任务 ACL 持久化、普通侧 RunEx、提权 token/session 和 helper 激活仍未验证；前台授权、event-listen host、登录任务及自动 Guard 尚未接入，不能称监听已经生效。
+
+**Guard 生产监听入口与崩溃恢复（2026-09-20）**
+
+任务 action 对应的真实 host `event-listen` 入口现已接入。必须使用提升权限令牌和受保护 deployment 自身映像；普通 coordinator 的源映像经过 fileID/size/hash 验证并持续持有。认证等待共享一个 30 秒截止，坏对端不重置截止，监听器错误直接结束；认证通过后才恢复/创建 ETW。空心跳每 250ms，满批次立即继续，最终事件结束先发送再退出；断开、超时或查询错误停止 trace，普通应用不受影响。
+
+受保护 store 目录新增固定 session journal，显式管理员 owner/普通用户只读 ACL，保留拒绝其他写入/删除的句柄直到 trace Drop 完成，跨 generation 互斥。写入且同步新 epoch 早于 StartTrace，因此崩溃发生在 StartTrace 返回 handle 前也有恢复依据。恢复先核对严格记录绑定，再只读查询固定名称，GUID 必须为旧 epoch；Windows 返回 HistoricalContext handle 后，再核对该 handle 的名称/GUID/模式/无日志文件并停止。未知和损坏记录不改写，不碰不匹配会话；原会话停止后才替换记录，部分写入最多阻止后续启动。
+
+新增 4 项监听循环测试和 3 项 journal 测试通过，覆盖绝对认证预算、坏对端后成功、监听错误、排空队列/发送最终失败、断开不继续 drain、查询失败不发送健康心跳、空心跳、普通权限拒绝、先持久化 epoch、恢复失败保留原记录、错误 scope/格式/超大记录及真实文件写入/改名互斥。journal 正向流程使用普通临时文件，ACL 正向仍仅有既有内存描述符测试，不替代真实提权目录写入。新增真实 host 契约检查任务参数能到达入口并因普通权限退出，非法 UUID 被解析器拒绝。
+
+显式运行 `etw::tests::native_recovery_uses_persisted_epoch_and_query_returned_handle` 通过：本机创建自有空 trace，错误 epoch 拒绝且原会话仍可查询，正确 epoch 通过查询返回 handle 停止，重复恢复缺失成功，新 epoch 的后继会话不受旧记录影响。此测试模拟 controller 丢失 handle；未强杀 helper，也未启用 kernel provider。独立审查通过，并独立复跑 4 项监听、3 项 journal 和该原生恢复测试。
+
+真正的提权 helper↔普通 coordinator 端到端、provider 采集、前台授权和自动 Guard 尚未完成；没有 UAC、任务注册/删除或用户应用操作。
+
+最终全量 workspace 260 项通过、25 项顶层 ignored（新增真实空 trace 恢复项已单独显式通过）；真实 host 契约也经独立复跑。clippy -D warnings、fmt/diff 通过，logman 只读检查没有本产品残留 ETW 会话。提交主题 `feat(rust): run protected guard listeners with trace recovery`。
