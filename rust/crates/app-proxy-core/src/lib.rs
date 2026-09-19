@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod model;
+pub mod registry;
 pub mod template;
 
 use serde::{Deserialize, Serialize};

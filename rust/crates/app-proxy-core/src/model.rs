@@ -104,7 +104,7 @@ pub enum StorageLocation {
     },
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedEnvironment {
     #[serde(deserialize_with = "unique_map")]
@@ -112,14 +112,14 @@ pub struct SavedEnvironment {
     pub unset: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EnvValue {
     Literal { value: String },
     SecretRef { id: Uuid },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkingDirectory {
     Application {},
@@ -153,7 +153,7 @@ pub enum GuardPolicy {
     StopUnproxied,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyProfile {
     pub id: Uuid,
@@ -165,7 +165,7 @@ pub struct ProxyProfile {
     pub source: ProxySource,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyKind {
     Managed,
@@ -178,13 +178,13 @@ pub struct Endpoint {
     pub port: u16,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProxySource {
     Manual { nodes: Vec<ManualNode> },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManualNode {
     pub id: Uuid,
@@ -196,14 +196,14 @@ pub struct ManualNode {
     pub credentials: Option<Credentials>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManualProtocol {
     Http,
     Socks5,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
     pub username: String,
