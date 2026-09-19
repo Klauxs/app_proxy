@@ -529,7 +529,7 @@ pub(super) fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> 
     }
     serde_json::from_slice(&value.bytes).map_err(|_| Error::Invalid("IFEO_INVALID_RECORD"))
 }
-fn same_name(a: &str, b: &str) -> Result<bool> {
+pub(super) fn same_name(a: &str, b: &str) -> Result<bool> {
     let a: Vec<_> = a.encode_utf16().collect();
     let b: Vec<_> = b.encode_utf16().collect();
     // SAFETY: both UTF-16 buffers remain live for their explicitly supplied lengths.

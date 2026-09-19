@@ -412,3 +412,13 @@ run 只供已核对普通 coordinator 使用，显式当前 session>0，空替�
 15 项专项测试全部通过并经独立复跑：原始 UseFilter 缺失/0/1 与 mitigation 保留，重复安装，第三方冲突和物理别名，Unicode 共享父项及新一轮备份，Installing/Removing 参与者，7 个安装和 5 个解除持久断点，首次 intent 发布前中断，陌生空过滤项拒绝、丢失父项不重建，注册表原生链接拒绝，容量满后解除，严格记录/路径/字符串，以及实际 HKLM 根 ACL 只读检查。所有写入限随机自有 HKCU 子树并清理；没有 UAC、实际 HKLM IFEO 修改或用户应用操作。
 
 全量 workspace 293 项通过、26 项顶层 ignored（.tools/ifeo-rules-final-tests.log）；随后补数量上限检查与回归，最终 15 项专项、workspace clippy -D warnings、fmt/diff 通过。真实提权 mutex/ACL、规则匹配、启动入口、Electron 辅助 continuation 与完整应用链路仍待验收，不能称 IFEO 已启用。
+
+**IFEO 只读入口准备（2026-09-20）**
+
+新增原始命令行 capture/verify API，使用 GetCommandLineW 保留原始 UTF-16，不从已拆分 argv 重建。固定带引号 host、ifeo-entry、规范 UUID 及 ` -- ` 边界；不搜索后续分隔符、不允许外部 home/执行器选项。目标命令后缀原样保留，复用原生 CommandLineToArgvW 解析为 OsString，未配对 surrogate 参数不会被有损替换。数据类型不实现 Debug/Serialize，错误不含原始参数。
+
+验证读取 protected IFEO 登记，要求当前普通 medium token、非零交互 session，拒绝 restricted/UIAccess/AppContainer；核对实际 host 路径/fileID、登记归属和目标路径，继续持有受保护 deployment 文件/目录与登记目标的只读 pin。新增 open_verified 让调用方保留 Deployment；已有 verify_registered 契约保持不变。派发前复核整个登记、实际 host 和目标。当前只读准备对象不是内核 IFEO 触发证明或 spawn/continuation 授权，后续 coordinator 仍须独立校验配置和允许的激活类型。
+
+5 项新增测试及独立复跑通过：中文/空格/空参数/引号/尾反斜杠和原始 UTF-16 保留；固定边界/UUID/缺失目标/相对路径/大小/NUL 拒绝；目标路径与真实 host 归属、fileID 正反例；当前普通 token 及合成不支持上下文；原生 GetCommandLineW 与当前 argv 对照、未知登记拒绝。测试的正向路径绑定是合成元数据，未创建真实受保护安装，不能替代正向完整 verify 或原生 IFEO 重定向实测。
+
+全量 workspace 300 项通过、26 项顶层 ignored（.tools/ifeo-entry-final-tests.log），workspace clippy -D warnings、fmt/diff 通过。没有 UAC、HKLM 写入或用户应用操作；host 模式、认证转交、cwd/环境/STARTUPINFO/继承句柄/Job、模板激活及防递归/辅助 continuation 仍待接入验收。

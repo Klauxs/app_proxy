@@ -13,6 +13,7 @@ pub mod guard_listener;
 pub mod guard_task;
 pub mod identity;
 pub mod ifeo;
+pub mod ifeo_entry;
 pub mod ifeo_rules;
 pub mod installation;
 pub mod instance_data;

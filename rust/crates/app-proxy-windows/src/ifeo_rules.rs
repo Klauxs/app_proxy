@@ -37,6 +37,14 @@ pub struct Registration {
     pub host_image: FileIdentity,
 }
 impl Registration {
+    pub(crate) fn matches_entry_paths(&self, host: &Path, target: &Path) -> Result<()> {
+        if !journal::same_name(&dos_path(host)?, &dos_path(&self.host)?)?
+            || !journal::same_name(&dos_path(target)?, &dos_path(&self.target)?)?
+        {
+            return Err(Error::Invalid("IFEO_ENTRY_PATH_MISMATCH"));
+        }
+        Ok(())
+    }
     fn validate(&self) -> Result<()> {
         if self.format != FORMAT
             || [
@@ -146,6 +154,9 @@ pub fn read_registration(id: Uuid) -> Result<Registration> {
     Ok(record)
 }
 pub fn verify_registered(id: Uuid) -> Result<Registration> {
+    open_verified(id).map(|(record, _)| record)
+}
+pub(crate) fn open_verified(id: Uuid) -> Result<(Registration, Deployment)> {
     let record = read_registration(id)?;
     Roots::machine().verify(&record)?;
     let deployment = Deployment::open(record.store_id, record.deployment_generation)?;
@@ -155,7 +166,7 @@ pub fn verify_registered(id: Uuid) -> Result<Registration> {
     if identity::file_identity(&record.target)? != record.target_image {
         return Err(Error::Invalid("IFEO_TARGET_CHANGED"));
     }
-    Ok(record)
+    Ok((record, deployment))
 }
 /// Recovery does not require the portable coordinator or deployed host to work.
 /// It refuses changed/foreign registry contents instead of overwriting them.

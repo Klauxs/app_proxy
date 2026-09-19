@@ -59,6 +59,10 @@ IFEO 按安装路径匹配，不能替每个分身注册一条相同 EXE 规则�
 
 入口保留 Windows 原始宽字符命令行，按已验证的 Windows/模板规则解析，不使用空格 split，也不经 cmd/PowerShell 重新执行。启动器自己的固定参数与 Windows 追加的目标命令行有明确解析边界；空格、引号、尾反斜杠、中文和异常 argv[0] 均有 fixture。
 
+2026-09-20 已实现只读入口准备 API：`capture` 用 GetCommandLineW 读取原始宽字符串，仅接受已生成的带引号 host、固定模式、规范 UUID 和 ` -- ` 边界；目标后缀原样保留，再用 CommandLineToArgvW 解析为 OsString，不经有损 UTF-8 转换。只有核验后的完整登记能提供 store/instance 路由，不接受外部 `--home`。`verify` 要求普通交互会话的 medium token，拒绝 restricted、UIAccess、AppContainer，再核对 protected registry/deployment、实际 host 路径/fileID 和目标路径；目标 pin 只打开受保护登记中的路径。返回对象继续持有 deployment 和目标句柄，并提供派发前复核。该对象不证明请求来自内核 IFEO，也不是启动或辅助 continuation 授权；同用户手动构造入口仍需经过后续服务端配置和调用类型核验。
+
+此层的 5 项测试覆盖原生参数解析、UTF-16 保留、异常边界、身份策略以及当前普通 token/原始命令行读取，未执行真实 IFEO 启动。实际 host 模式、coordinator 转交、cwd/环境及 STARTUPINFO/Job/继承句柄语义仍待接入和验收。[GetCommandLineW](https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-getcommandlinew)、[CommandLineToArgvW](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-commandlinetoargvw)。
+
 `InterceptRequest` 包含 request_id、registration_id/generation、已校验的目标身份、调用类型、允许转发的参数、cwd 与环境快照；令牌/session 从系统连接身份核验。原始 URL、文件名和环境可能含秘密，不写诊断日志。环境遵循第二章的过滤和大小限制。
 
 主进程请求复用 Accepted → Confirmed/Failed/Indeterminate 状态机，记录 `LaunchOrigin = interactive | shortcut | guard | ifeo`。入口重连查询同一个 request_id；同一物理实例已有 pending 时返回原 attempt。代理不可用、配置冲突或 coordinator 不可达时不创建目标进程。

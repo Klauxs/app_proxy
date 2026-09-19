@@ -409,7 +409,7 @@ fn string_property(object: &IWbemClassObject, name: PCWSTR) -> Result<Option<Vec
     }
 }
 
-fn parse_arguments(command: &[u16]) -> Result<Option<Vec<OsString>>> {
+pub(crate) fn parse_arguments(command: &[u16]) -> Result<Option<Vec<OsString>>> {
     if command.is_empty() {
         return Ok(None);
     }

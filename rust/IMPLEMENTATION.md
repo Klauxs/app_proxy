@@ -47,6 +47,8 @@
 
 **review / commit 记录**
 
+- IFEO 只读入口准备：独立 review 通过，提交主题 `feat(rust): validate raw IFEO entry envelopes and context`。固定 debugger 前缀和 UUID 边界，原始 UTF-16 后缀与原生 argv 解析；普通 medium/session/非 sandbox 上下文，受保护规则/deployment 和真实 host/fileID 绑定，仅从登记目标打开 pin，派发前可再次核验。5 项专项独立复跑通过，全量 300 项通过、26 项 ignored，clippy/fmt/diff 通过。此 API 不证明内核触发，也不授予 spawn/continuation；host 模式、coordinator 转交、原始环境和应用级兼容仍待接入。
+
 - IFEO 注册与恢复平台层：独立审查及修复复审通过，提交主题 `feat(rust): persist owned IFEO registry rules and recovery`。注册只接受已登记、绑定代理且启用 Guard 的原版；固定受保护 host 与精确目标身份，跨 store 物理映像归属冲突拒绝。共享父项按 Windows Unicode 大小写规则分组，最后一个参与者解除后才恢复原始 UseFilter；Installing/Removing 仍参与归属。注册表事务在本机返回 6801，采用受保护单值 journal 发布、显式 flush 和逐项核对恢复。修复首记录发布窗口与无记录认领同名 filter 两项审查问题。全量 293 项通过、26 项 ignored；最后补数量上限回归，15 项专项及 clippy/fmt/diff 再次通过。未调用真实 HKLM 写入或 UAC，平台 API 暂不接入生产启用流程。
 
 - Guard 自动扫描与纠正触发：独立审查及增量复审通过，提交主题 `feat(rust): trigger guarded corrections from authorized scans`。合并事件/定时触发、公平有界实例队列、单扫描、授权与配置版本撤销、未知三次短重试后退避；同步持久接纳复用既有精确纠正执行。新增 6 项调度/状态/受控进程及 1 项双向协议测试，全量 280 项通过、26 项 ignored，clippy/fmt/diff 通过；最终提示与调度微调后 12 项监督、2 项 CLI 定向再次通过。修复旧 Ready 覆盖最新未知、秒级并列回执吞掉失败、未决状态覆盖失败诊断。协议 2.10 区分 starting/active/degraded/blocked；真实提权完整事件链路、IFEO 和登录任务待续。本批实际关闭的仅是隔离测试 EXE。
