@@ -408,7 +408,7 @@ impl Manifest {
                 }
             }
             if let WorkingDirectory::Explicit { path } = &instance.cwd {
-                absolute(path)?;
+                validate_working_directory(path)?;
             }
             self.validate_network(instance.network)?;
             if instance.guard.desired == Desired::Enabled
@@ -526,6 +526,7 @@ pub const MANAGED_ENV: &[&str] = &[
 ];
 pub fn validate_instance_input(args: &[String], env: &SavedEnvironment) -> Result<()> {
     for arg in args {
+        expand_placeholders(arg, |_| Ok(String::new()))?;
         // Match Chromium's Windows switch spelling before checking reserved names.
         let trimmed = arg.trim();
         let switch = trimmed
@@ -538,7 +539,6 @@ pub fn validate_instance_input(args: &[String], env: &SavedEnvironment) -> Resul
             .unwrap_or("")
             .to_ascii_lowercase();
         if arg.contains('\0')
-            || arg.contains("${")
             || trimmed == "--"
             || matches!(
                 key.as_str(),
@@ -581,6 +581,41 @@ pub fn validate_instance_input(args: &[String], env: &SavedEnvironment) -> Resul
         return Err(ValidationError("MANAGED_ENV_CONFLICT"));
     }
     Ok(())
+}
+
+pub(crate) fn expand_placeholders(
+    input: &str,
+    mut resolve: impl FnMut(&str) -> Result<String>,
+) -> Result<String> {
+    let mut output = String::new();
+    let mut rest = input;
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        let name_and_tail = &rest[start + 2..];
+        let end = name_and_tail
+            .find('}')
+            .ok_or(ValidationError("INVALID_PATH_VARIABLE"))?;
+        let name = &name_and_tail[..end];
+        if !matches!(name, "app_dir" | "instance_root" | "user_data" | "app_home") {
+            return Err(ValidationError("UNKNOWN_PATH_VARIABLE"));
+        }
+        output.push_str(&resolve(name)?);
+        rest = &name_and_tail[end + 1..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
+fn validate_working_directory(path: &Path) -> Result<()> {
+    let value = path
+        .to_str()
+        .ok_or(ValidationError("ABSOLUTE_UNICODE_PATH_REQUIRED"))?;
+    if value.contains('\0') {
+        return Err(ValidationError("ABSOLUTE_UNICODE_PATH_REQUIRED"));
+    }
+    // All four substitutions resolve to absolute paths, never shell fragments.
+    let substituted = expand_placeholders(value, |_| Ok(String::from("C:\\template-root")))?;
+    absolute(Path::new(&substituted))
 }
 
 fn entity(ids: &mut HashSet<Uuid>, id: Uuid, name: &str, revision: u64) -> Result<()> {

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod model;
+pub mod template;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
