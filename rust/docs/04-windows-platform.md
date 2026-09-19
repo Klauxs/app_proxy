@@ -74,6 +74,12 @@ request 消费采用独占 claim 文件/系统锁，helper 全程持有，确保
 
 每代 helper 与记录由管理员拥有，显式受保护 DACL 仅授予系统/管理员完全控制，普通 Users 只读/执行；不修补或覆盖陌生目录的 ACL。新 generation 和文件独占创建，内容同步后回读大小/hash/fileID/记录绑定，并保留验证句柄。目录、重解析点及文件硬链接异常拒绝。此阶段不切换任务或 IFEO；失败残留不作为有效安装，也不自动递归清除。任务注册事务必须在后续另行核验，不能用 generation 存在替代 Guard active。
 
+前台监听安装固定调用同发行目录的 host `guard-install --ticket <hex>`。ticket 为有界严格 JSON 的小写十六进制编码，仅含版本/store/普通 issuer 完整身份/UAC 前来源期望，不含写入位置或任意执行命令。ShellExecuteEx 使用固定 runas、NOASYNC、NOCLOSEPROCESS 及隐藏 helper 窗口；操作系统安全提示仍显示。只在交互式 Guard 启用流程中用户选择安装后调用，不从查询或后台循环发起。[ShellExecuteEx 标志契约](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)。
+
+提权侧在验证 issuer 与来源后持有受保护 store 的独占安装锁。`listener.json` 记录选定 generation，必须同步并回读后才注册任务；后续显式授权复用该 generation，精确来源不同、损坏记录及陌生任务均报错，不另选 action 覆盖。注册失败或回执丢失保留意图；普通侧仅以保护目录/内容与实际任务回读确认安装，不以 helper 退出码代替证据。此固定记录不表示运行就绪。
+
+UAC 等待放在独立前台线程；Ctrl+C 可以结束等待并让普通 issuer 退出，尚未开始的迟到 stage/register 会因 issuer 失效被拒绝；已经提交的注册仍可能完成，故结果为未知而非已回滚。helper 启动后的进程等待预算为 60 秒，超时只保留证据和来源 pin，不终止 helper、不自动再执行。此预算不包括用户在 Windows 授权界面的思考时间。实际 UAC 取消和提权安装端到端必须实机验证，普通令牌测试不能替代。
+
 **6. 命名管道协议边界**
 
 受保护 host 的 `event-listen --store UUID --generation UUID` 入口先核验提升权限、deployment 和自身映像，持有普通 coordinator 映像的身份/hash pin 后创建事件管道。在统一 30 秒截止前等待普通 coordinator 认证；陌生连接不会延长截止。只有认证通过才恢复/开启 ETW。每 250ms 发送提示或空心跳，满批次继续排空，结束标记在最后一批发送。管道断开/写入超时/查询错误时退出并停止自有 trace，用户应用不受影响。此入口没有接收控制命令、启动应用或终止应用的能力。

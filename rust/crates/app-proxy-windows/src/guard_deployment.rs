@@ -18,6 +18,7 @@ use uuid::Uuid;
 use windows_sys::Win32::Storage::FileSystem::*;
 
 mod event_journal;
+mod listener_install;
 mod security;
 
 const FORMAT: &str = "app-proxy-rust-guard-deployment";
@@ -90,6 +91,7 @@ pub struct Deployment {
     host_path: PathBuf,
     _host: File,
     _record: File,
+    _listener_record: Option<File>,
     _directories: Vec<OwnedHandle>,
 }
 impl Deployment {
@@ -173,6 +175,7 @@ impl Deployment {
             host_path,
             _host: host,
             _record: record_file,
+            _listener_record: None,
             _directories: directories,
         })
     }
@@ -214,16 +217,22 @@ pub fn stage(
     let source = Source::expected(&current.image_path, expected)?;
     issuer_alive(&issuer_handle)?;
     let (root, directories) = location(&current.user_sid, store_id, true)?;
+    let result = stage_source(store_id, source, &current.user_sid, root, directories)?;
+    issuer_alive(&issuer_handle)?;
+    Ok(result)
+}
+
+fn stage_source(
+    store_id: Uuid,
+    source: Source,
+    sid: &str,
+    root: PathBuf,
+    directories: Vec<OwnedHandle>,
+) -> Result<Deployment> {
     let generation = Uuid::new_v4();
     let destination = root.join(generation.to_string());
     let generation_pin = security::create_generation(&destination)?;
-    let record = copy_generation(
-        source,
-        &destination,
-        &current.user_sid,
-        store_id,
-        generation,
-    )?;
+    let record = copy_generation(source, &destination, sid, store_id, generation)?;
     let mut output = security::new_file(&destination.join(RECORD))?;
     let bytes = serde_json::to_vec(&record).map_err(|_| Error::Invalid("INVALID_GUARD_RECORD"))?;
     if bytes.len() as u64 > RECORD_LIMIT {
@@ -234,8 +243,7 @@ pub fn stage(
     drop(output);
     // No current-generation pointer or task is switched here. Only a complete,
     // re-read protected generation can be supplied to the integration transaction.
-    let result = Deployment::open_at(&root, directories, &current.user_sid, store_id, generation)?;
-    issuer_alive(&issuer_handle)?;
+    let result = Deployment::open_at(&root, directories, sid, store_id, generation)?;
     drop(generation_pin);
     Ok(result)
 }

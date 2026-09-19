@@ -28,14 +28,16 @@
 | HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和真实 sing-box TLS/管理集成，已接初始内核管理，应用启动/运行监控待实现 |
 | 订阅解析 | 待实现 | 六协议、URI/Base64/Clash/文本格式、兼容 fixtures、刷新保持选择 |
 | IFEO | 调试创建候选及普通创建前只读检查 | 普通 EXE 服务发现 Debugger 时拒绝误入；实际注册匹配/防递归/子进程/调用语义/恢复待实现，未管理原版不受干预 |
-| Guard/ETW | 待实现 | 默认范围、普通/提权分工、事件/扫描、身份未知、限流及未管理进程存活 |
+| Guard/ETW | 监听 host、授权安装、只读扫描与纠正服务已接入；自动监督待实现 | 已有能力各自验证；普通侧自动连接/补扫/纠正和真实提权链路仍未验收 |
 | 原生 ETW 进程事件平台层 | 已实现，独立 review 通过；实际 kernel provider 采集待授权验证 | 固定 provider/事件、TDH 命名属性、1024 项有界提示队列、丢失统计、会话归属及退出；默认 4 项及真实空会话控制测试通过，当前权限启用 provider 返回 Win32 5；未接入提权部署或事件管道 |
 | 单向事件管道平台层 | 已实现，独立 review 通过；真实提权两端集成待续 | 独立名称及只读 logon ACL、双向用户/session/logon/映像/权限核对、严格消息和断线补扫；每批 128 条，队列送完才报告结束；5 项管道及 5 项 ETW 默认测试通过，部署与自动 Guard 尚未连接 |
-| Guard 受保护 helper generation | 平台代码与独立 review 完成；真实提权部署待验收 | 自动 Program Files 目录、UAC 前源文件/父目录 pin 与独立身份/hash、同用户普通 issuer、管理员 owner/只读用户 ACL、不可变复制/回读；6 项默认测试通过；前台 UAC、任务与激活未接入 |
-| Guard 按需监听任务平台层 | 已实现，独立 review 通过；真实注册运行待验收 | 固定任务名/保护目录 host/UUID 参数，管理员 owner、用户只读运行；完整定义与 ACL 核验、只创建不覆盖冲突、当前 session RunEx、空闲核对删除；4 项内存 COM/只读服务测试通过，前台授权与 host 监听入口未接入 |
+| Guard 受保护 helper generation | 平台代码与独立 review 完成；真实提权部署待验收 | 自动 Program Files 目录、UAC 前源文件/父目录 pin 与独立身份/hash、同用户普通 issuer、管理员 owner/只读用户 ACL、不可变复制/回读；已接前台 UAC 固定安装入口，不表示实机已激活 |
+| Guard 按需监听任务平台层 | 已实现，独立 review 通过；真实注册运行待验收 | 固定任务/保护目录 host/UUID action，管理员 owner、用户只读运行；完整定义/ACL、只创建不覆盖、当前 session RunEx、空闲删除；前台安装与 event-listen 已接，真实 UAC 和普通侧启动监督待验收 |
+| Guard 生产监听与崩溃恢复 | 已实现，独立 review 通过；真实提权事件采集待验收 | 认证截止/心跳/断开退出，跨 generation 受保护 epoch journal 及原生空 trace 恢复；260 项全量与实机空 trace 检查通过 |
+| Guard 前台监听组件授权 | 已实现，独立 review 通过；真实 UAC 待验收 | 交互 guard enable 内询问安装，固定来源/hex ticket/issuer、protected 意图先于任务注册、相同部署复用、取消等待与未知保留；只读状态共享 3 秒预算；JSON/后台不提权 |
 | Guard 纠正执行服务 | 已实现，独立 review 通过；自动触发待接入 | 精确误启动主进程、持久一次性停止许可、全局限流、辅助残留等待及停止后代理失败禁止直连；9 项新增回归通过，不自动监听或注册 IFEO |
 | Guard 只读扫描 | 已实现，独立 review 通过；监听接入待续 | 登记实例归属、历史会话绑定保留、未决/歧义保守处理，目录不创建；扫描结束复核 revision/未决请求，超时解析线程不累积 |
-| Guard CLI / 授权状态边界 | 已实现，独立 review 通过；组件安装待续 | status/enable/disable、desired/实际/组件分离；只登记分身 IFEO 不适用，保存后未授权返回 requires_action/5，已有 IFEO 不静默停用；查询不会激活保护 |
+| Guard CLI / 授权状态边界 | 已实现，独立 review 通过；完整激活待续 | status/enable/disable、desired/实际/组件分离；只登记分身 IFEO 不适用，交互启用可授权安装监听组件；尚未就绪返回 requires_action/5，已有 IFEO 不静默停用；查询不会激活保护 |
 | 精确进程正常关闭 | 平台能力已实现，独立 review 通过 | 同用户/session/完整身份、限时 WM_CLOSE、1.5 秒等待及显式强制结束，3 项真实隐藏窗口测试通过；实例归属授权、辅助进程收尾及 Guard/CLI 接入待续 |
 | Guard 代理参数证据 | 平台能力已实现，独立 review 通过 | 目标主进程的匹配/不匹配/未知，支持 HTTP literal 地址及裸地址等价；其他实例与辅助不提供纠正依据；运行健康、Guard 动作和监听待续 |
 | 中文菜单/快捷方式/维护 | 待实现 | 端到端创建启动、改名/绑定/克隆/移除、保护授权、入口修复及保留数据卸载 |
@@ -106,3 +108,5 @@
 - Guard 按需监听任务平台层：独立审查与增量复审通过，提交主题 feat(rust): validate and manage fixed guard listener tasks。固定 task/action 与 UUID 参数、管理员 owner/用户读运行 ACL、SID 解析、V2/context/触发和生命周期核验、当前 session RunEx 与空闲删除回读；不覆盖未知任务、不强制停机。4 项默认新增测试通过，全量 252 项通过、24 项 ignored；后续 task 收紧和 maintenance 变异回归定向再通过，clippy/fmt/diff 通过。本机仅建立内存 COM definitions 和只读查询，没有注册/运行/删除任务或 UAC；event-listen/前台授权/登录任务仍待接入。
 
 - Guard 生产监听入口与崩溃恢复：独立审查及增量复审通过，提交主题 `feat(rust): run protected guard listeners with trace recovery`。host 接入固定 event-listen/store/generation，核验提升权限和受保护自身/普通 coordinator 映像；统一认证截止后才开启 ETW，心跳/完整排队结束/断开停机。受保护 store/session journal 跨 generation 独占写入，先持久化 epoch，恢复按旧 epoch 及查询返回 handle 二次核验，冲突保留。7 项新增平台测试、真实 host 参数及普通权限拒绝契约通过；全量 260 项通过、25 项 ignored，新增真实空 ETW 恢复项单独显式通过；clippy/fmt/diff 通过且无测试 trace 残留。尚未连接前台授权、普通侧监听监督和自动 Guard，不宣称保护已激活；没有 UAC、任务注册或用户应用操作。
+
+- Guard 前台监听组件授权安装：独立审查及修复复审通过，提交主题 `feat(rust): authorize guard listener installation from foreground`。交互 guard enable 内询问、固定 runas/hex ticket/源文件 pins 与 issuer、受保护安装锁/不可变 generation 意图先于注册、结果未知保留/精确部署复用、普通回读任务验证；JSON/非交互/后台不提权。修复旧扫描与核验串行超出 RPC 期限，改共享 3 秒绝对截止，慢双观察真实 pipe 回归通过。新增 installer/intent/host/RPC 7 项默认回归；全量 267 项通过、26 项 ignored，clippy/fmt/diff 通过；Windows PTY 暂不安装和提示阶段 Ctrl+C 通过，自有测试 coordinator 已退出。真实 UAC 期间取消、提权目录/任务写入及注册未知实机恢复仍未验证；监听监督、登录任务、自动 Guard、IFEO 与完整产品验收待续。

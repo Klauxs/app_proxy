@@ -6,6 +6,7 @@ use crate::{
 use app_proxy_core::{model::Desired, registry::ConfigAction};
 use clap::Subcommand;
 use serde::Serialize;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -31,7 +32,7 @@ fn component(value: ComponentState) -> &'static str {
     match value {
         ComponentState::NotApplicable => "不适用",
         ComponentState::NeedsAuthorization => "待授权安装",
-        ComponentState::Unverified => "登记存在，尚未核验",
+        ComponentState::Unverified => "组件待核验或等待监听",
     }
 }
 
@@ -71,7 +72,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         .await?;
         request_id = Some(request);
         receipt = Some(applied);
-        match coordinator::guard_status(root, id).await {
+        match coordinator::guard_status(root.clone(), id).await {
             Ok(current) => status = current,
             Err(_) => {
                 if json {
@@ -91,6 +92,74 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                     "配置回执已保存；保护状态暂未确认，请查询 guard status，不要重复配置请求。",
                 ));
             }
+        }
+    }
+    if desired == Some(Desired::Enabled)
+        && status.listener == ComponentState::NeedsAuthorization
+        && !json
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+    {
+        let mut foreground = crate::foreground::Foreground::new();
+        println!(
+            "缺少进程监听组件，需要 Windows 管理员授权，安装位置自动选择。\n1. 安装监听组件\n2. 暂不安装（保留实例配置）\n组件安装后还需完成监听连接和保护核验，当前不会接管或关闭应用。"
+        );
+        let answer = foreground.read_line().await?;
+        if answer.trim() == "1" {
+            foreground.check()?;
+            let catalog = coordinator::catalog(root.clone())
+                .await
+                .map_err(|e| fail(3, e.to_string()))?;
+            if catalog.revision != status.revision
+                || !catalog
+                    .instances
+                    .iter()
+                    .any(|i| i.id == id && i.guard == Desired::Enabled)
+            {
+                return Err(fail(5, "配置已变化，未发起授权；请重新查看 guard status。"));
+            }
+            let store = coordinator::status(root.clone())
+                .await
+                .map_err(|e| fail(3, e.to_string()))?
+                .store_id;
+            foreground.check()?;
+            println!("等待 Windows 授权及组件核验；取消 UAC 会保留当前实例配置。");
+            let (sender, result) = tokio::sync::oneshot::channel();
+            // A native consent/COM call cannot be cancelled by dropping an async
+            // future. A separate thread lets this foreground process exit and
+            // invalidate its issuer identity without waiting for Tokio shutdown.
+            std::thread::Builder::new()
+                .name("guard-authorize".into())
+                .spawn(move || {
+                    let _ =
+                        sender.send(app_proxy_windows::guard_install::authorize_listener(store));
+                })
+                .map_err(|_| fail(6, "未能启动授权流程。"))?;
+            let installed = tokio::select! {
+                biased;
+                _ = foreground.cancelled() => return Err(fail(6, "已停止等待授权。若 Windows 授权窗口仍在，请选择取消；已提交的安装结果未确认，请先查询 guard status，不要重复安装。")),
+                result = result => result.map_err(|_| fail(6, "组件安装结果不明，请先查询 guard status，不要重复安装。"))?,
+            };
+            match installed {
+                Ok(_) => {
+                    println!("监听组件已安装并核验；保护尚未生效，仍需连接监听和完成其余组件。")
+                }
+                Err(app_proxy_windows::Error::Invalid("GUARD_INSTALL_CANCELLED")) => {
+                    return Err(fail(5, "已取消 Windows 授权，实例配置保留。"));
+                }
+                Err(error) => {
+                    return Err(fail(
+                        6,
+                        format!(
+                            "监听组件安装未确认：{error}。请先查询 guard status；不会自动重试。"
+                        ),
+                    ));
+                }
+            }
+            foreground.check()?;
+            status = coordinator::guard_status(root.clone(), id)
+                .await
+                .map_err(|e| fail(6, e.to_string()))?;
         }
     }
     let requires_action = match status.phase {
@@ -141,11 +210,18 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 ),
                 GuardObservation::Blocked { code } => println!("无法确认进程状态：{code}。"),
             }
-        } else if let Some(code) = status.diagnostic {
-            println!("进程检查暂不可用：{code}。");
+        }
+        if let Some(code) = status.diagnostic {
+            if code == "GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED" {
+                println!("监听组件注册已核验，运行连接尚未确认。");
+            } else {
+                println!("保护核验尚未完成：{code}。");
+            }
         }
         if requires_action.is_some() {
-            println!("当前版本尚未接入组件授权安装；实例配置已保留，不会后台弹出 UAC。");
+            println!(
+                "实例配置已保留；监听组件可在交互式 guard enable 中授权安装，后台不会弹出 UAC。完整保护仍待组件就绪。"
+            );
         }
     }
     if desired.is_some() && requires_action.is_some() {

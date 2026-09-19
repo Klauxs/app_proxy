@@ -29,3 +29,14 @@ fn real_host_parses_fixed_task_action_but_refuses_ordinary_listener() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn real_host_refuses_ordinary_guard_installer_before_reading_ticket() {
+    app_proxy_windows::identity::assert_ordinary_user().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_app-proxy-host"))
+        .args(["guard-install", "--ticket", "not-an-authority"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ELEVATED_USER_REQUIRED"));
+}

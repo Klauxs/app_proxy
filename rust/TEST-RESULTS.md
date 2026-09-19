@@ -376,3 +376,17 @@ run 只供已核对普通 coordinator 使用，显式当前 session>0，空替�
 真正的提权 helper↔普通 coordinator 端到端、provider 采集、前台授权和自动 Guard 尚未完成；没有 UAC、任务注册/删除或用户应用操作。
 
 最终全量 workspace 260 项通过、25 项顶层 ignored（新增真实空 trace 恢复项已单独显式通过）；真实 host 契约也经独立复跑。clippy -D warnings、fmt/diff 通过，logman 只读检查没有本产品残留 ETW 会话。提交主题 `feat(rust): run protected guard listeners with trace recovery`。
+
+**Guard 前台监听组件授权安装（2026-09-20）**
+
+交互式 guard enable 发现组件缺失后可选择安装，目录自动选择；JSON、非交互、status 和后台核验没有 UAC 路径。固定 ShellExecuteEx runas 调用同发行 host，完整 issuer 身份和预先捕获的来源期望经严格有界 hex ticket 传递，不读取可写请求重新选择来源。普通 issuer/来源验证先于机器目录操作，受保护安装锁串行化同 store；不可变 listener.json 在任务注册前持久化选定 generation。结果不明时保留记录；下一次显式授权核对并复用相同部署，来源改变或外国任务冲突不覆盖。退出码不是安装证据，普通侧必须回读保护目录与真实 task。
+
+新增 3 项 installer 测试（严格参数/大小/危险字符往返、普通权限拒绝、真实自有 child 等待及退出码）、2 项 intent 记录测试（绑定/损坏/只读保持、缺失与访问失败区分）、1 项真实 host guard-install 普通令牌拒绝契约。测试发现文件缺失既可能返回原生 Win32 错误也可能为 std::io，已统一仅把 2/3 识别为未安装，不把访问拒绝、内容损坏或已登记 generation 丢失压成缺失。
+
+独立审查发现扫描和组件核验分别 5 秒会超过 RPC 帧 5 秒期限。现同时等待两项观察，共享 3 秒绝对截止，实际未返回的原生 worker 仍持其单槽；新增真实命名管道 RPC + 两个永不完成的观察夹具，3.06 秒内返回 metadata/超时诊断，独立复跑通过。登记核验诊断为运行未确认，不声称已证明 helper 没有运行。
+
+前台授权从 Tokio blocking worker 改为独立线程/oneshot，sticky Ctrl+C 可结束等待并返回 unknown，不能把丢弃 future 当作取消 Windows 操作。真实 Windows PTY 验证提示显示、选择 2 和提示阶段 Ctrl+C 均立即返回；只创建分身的 IFEO 仍不适用，配置 revision 和启用意图保留。测试使用从未执行的 fixture.exe，未启动用户应用；随后关闭测试实例 Guard，让其自有 coordinator 空闲退出。未选择安装选项，因此这些 PTY 结果不证明 UAC 对话框期间取消、真实管理员目录写入、任务 ACL 持久化、提权 helper 启动或注册未知后的实机恢复。
+
+独立审查及修复复审通过。真实提权安装、普通监听监督、登录任务、自动 Guard 和 IFEO 仍待完成，不能据本批宣称保护已激活。
+
+最终全量 workspace 267 项通过、26 项顶层 ignored；新增等待夹具 child 由父测试显式运行。clippy -D warnings、fmt/diff 通过。测试 coordinator PID 23544 已核对空闲退出；未保留运行的测试应用或提权 helper。提交主题 `feat(rust): authorize guard listener installation from foreground`。

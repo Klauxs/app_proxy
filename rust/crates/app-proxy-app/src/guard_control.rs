@@ -44,17 +44,30 @@ pub async fn status(
     id: Uuid,
     scan_allowed: bool,
 ) -> Result<GuardStatus> {
-    let scan = if scan_allowed {
-        Some(launch.observe_guard(id).await?)
-    } else {
-        None
-    };
     let manifest = configuration.snapshot()?;
     let instance = manifest
         .instances
         .iter()
         .find(|i| i.id == id)
         .ok_or(Error::Invalid("INSTANCE_NOT_FOUND"))?;
+    let enabled = instance.guard.desired == Desired::Enabled;
+    let (scan, mut listener, diagnostic) = observations(
+        async {
+            if scan_allowed {
+                launch.observe_guard(id).await.map(Some)
+            } else {
+                Ok(None)
+            }
+        },
+        async {
+            if enabled {
+                listener_component(manifest.store_id).await
+            } else {
+                (ComponentState::NotApplicable, None)
+            }
+        },
+    )
+    .await?;
     if scan
         .as_ref()
         .is_some_and(|s| s.revision != manifest.revision)
@@ -66,16 +79,12 @@ pub async fn status(
         .ifeo
         .iter()
         .any(|i| i.default_instance_id == id);
-    let enabled = instance.guard.desired == Desired::Enabled;
-    // No privileged installer is connected yet. Existing metadata is not live
-    // component evidence and must never upgrade these states to active.
-    let listener = if !enabled {
-        ComponentState::NotApplicable
-    } else if manifest.integrations.guard_login_task.is_some() {
-        ComponentState::Unverified
-    } else {
-        ComponentState::NeedsAuthorization
-    };
+    // A protected intent and registered task still do not prove live coverage.
+    if listener == ComponentState::NeedsAuthorization
+        && manifest.integrations.guard_login_task.is_some()
+    {
+        listener = ComponentState::Unverified;
+    }
     let ifeo = if registered_ifeo {
         ComponentState::Unverified
     } else if enabled && matches!(instance.data, InstanceData::Original {}) {
@@ -90,6 +99,9 @@ pub async fn status(
     } else {
         GuardPhase::Disabled
     };
+    if configuration.snapshot()?.revision != manifest.revision {
+        return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
+    }
     Ok(GuardStatus {
         instance_id: id,
         revision: manifest.revision,
@@ -101,9 +113,69 @@ pub async fn status(
         diagnostic: if !scan_allowed {
             Some("GUARD_SCAN_BUSY".into())
         } else {
-            None
+            diagnostic
         },
     })
+}
+
+/// Both observations share a deadline below the five-second RPC frame budget.
+/// Dropping their waits does not release permits owned by native workers.
+pub(crate) async fn observations(
+    scan: impl std::future::Future<Output = Result<Option<GuardScan>>>,
+    listener: impl std::future::Future<Output = (ComponentState, Option<String>)>,
+) -> Result<(Option<GuardScan>, ComponentState, Option<String>)> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (scan, listener) = tokio::join!(
+        tokio::time::timeout_at(deadline, scan),
+        tokio::time::timeout_at(deadline, listener),
+    );
+    let (scan, scan_note) = match scan {
+        Ok(result) => (result?, None),
+        Err(_) => (None, Some("GUARD_SCAN_TIMEOUT".into())),
+    };
+    let (listener, listener_note) = listener.unwrap_or_else(|_| {
+        (
+            ComponentState::Unverified,
+            Some("GUARD_LISTENER_CHECK_UNCONFIRMED".into()),
+        )
+    });
+    Ok((scan, listener, scan_note.or(listener_note)))
+}
+
+async fn listener_component(store: Uuid) -> (ComponentState, Option<String>) {
+    use app_proxy_windows::{guard_deployment::Deployment, guard_task};
+    use std::sync::{Arc, OnceLock};
+    static CHECK: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    let Ok(permit) = CHECK
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone()
+        .try_acquire_owned()
+    else {
+        return (
+            ComponentState::Unverified,
+            Some("GUARD_LISTENER_CHECK_BUSY".into()),
+        );
+    };
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let deployment = Deployment::listener(store)?;
+        let _coordinator = deployment.coordinator()?;
+        guard_task::verify_registered(&deployment)
+    });
+    match worker.await {
+        Ok(Ok(())) => (
+            ComponentState::Unverified,
+            Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED".into()),
+        ),
+        Ok(Err(Error::Invalid("GUARD_LISTENER_MISSING" | "GUARD_TASK_MISSING"))) => {
+            (ComponentState::NeedsAuthorization, None)
+        }
+        Ok(Err(error)) => (ComponentState::Unverified, Some(error.to_string())),
+        _ => (
+            ComponentState::Unverified,
+            Some("GUARD_LISTENER_CHECK_UNCONFIRMED".into()),
+        ),
+    }
 }
 
 #[cfg(test)]

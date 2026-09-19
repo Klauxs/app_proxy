@@ -413,6 +413,73 @@ async fn guard_status_busy_scan_leaves_metadata_and_other_requests_available() {
 }
 
 #[tokio::test]
+async fn guard_slow_observations_return_metadata_before_real_rpc_frame_deadline() {
+    use crate::guard_control::{self, ComponentState, GuardPhase, GuardStatus};
+    let fixture = Fixture::new();
+    let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+    let identity = fixture.shared.identity.clone();
+    let instance = fixture.instance;
+    let server = tokio::spawn(async move {
+        let mut connection = listener.accept().await.unwrap();
+        connection.receive::<Hello>().await.unwrap();
+        connection
+            .send(&Welcome::Ready {
+                hello: hello(identity.store_id, identity.session_id, Some(identity.epoch)),
+            })
+            .await
+            .unwrap();
+        let request: Request = connection.receive().await.unwrap();
+        assert!(
+            matches!(request.operation, Operation::GuardStatus { instance_id } if instance_id == instance)
+        );
+        // The actual production deadline aggregator sees two unresolved native
+        // observations. No fake short RPC timeout or elevated operation is used.
+        let (scan, listener, diagnostic) =
+            guard_control::observations(std::future::pending(), std::future::pending())
+                .await
+                .unwrap();
+        connection
+            .send(&Response {
+                request_id: request.request_id,
+                epoch: identity.epoch,
+                result: Reply::GuardStatus {
+                    status: Box::new(GuardStatus {
+                        instance_id: instance,
+                        revision: identity.revision,
+                        desired: Desired::Enabled,
+                        phase: GuardPhase::Blocked,
+                        listener,
+                        ifeo: ComponentState::NotApplicable,
+                        scan,
+                        diagnostic,
+                    }),
+                },
+            })
+            .await
+            .unwrap();
+    });
+    let before = tokio::time::Instant::now();
+    let result = fixture
+        .rpc(
+            Uuid::new_v4(),
+            Operation::GuardStatus {
+                instance_id: instance,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(before.elapsed() < Duration::from_secs(5));
+    let Reply::GuardStatus { status } = result else {
+        panic!("missing metadata")
+    };
+    assert_eq!(status.instance_id, instance);
+    assert!(status.scan.is_none());
+    assert!(status.listener == ComponentState::Unverified);
+    assert_eq!(status.diagnostic.as_deref(), Some("GUARD_SCAN_TIMEOUT"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn launch_client_rejects_old_minor_before_sending_operation() {
     for (minor, expected_revision) in [(6, None), (7, Some(1))] {
         let fixture = Fixture::new();

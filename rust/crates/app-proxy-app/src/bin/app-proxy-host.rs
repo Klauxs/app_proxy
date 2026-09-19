@@ -12,6 +12,10 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    GuardInstall {
+        #[arg(long)]
+        ticket: String,
+    },
     EventListen {
         #[arg(long)]
         store: uuid::Uuid,
@@ -36,6 +40,9 @@ enum Commands {
 
 fn main() {
     let result = match Cli::parse().command {
+        Commands::GuardInstall { ticket } => {
+            app_proxy_windows::guard_install::elevated(&ticket).map_err(Into::into)
+        }
         Commands::EventListen { store, generation } => {
             match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
