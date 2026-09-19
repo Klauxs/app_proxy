@@ -2,6 +2,7 @@
 
 pub mod config_transaction;
 pub mod core_process;
+pub mod core_requests;
 pub mod core_state;
 pub mod identity;
 pub mod installation;

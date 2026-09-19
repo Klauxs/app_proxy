@@ -1,5 +1,7 @@
 //! Authenticated coordinator RPC; configuration writes use durable request records.
 use crate::configuration::{CatalogPage, Configuration, catalog_page};
+use crate::core_control::CoreControl;
+use app_proxy_core::core_control::{CoreAction, CoreRequestStatus};
 use app_proxy_core::{
     model::Manifest,
     registry::{ConfigAction, ConfigRequest},
@@ -14,7 +16,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 1;
+const PROTOCOL_MINOR: u32 = 2;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -59,6 +61,13 @@ enum Operation {
     RequestStatus {
         request_id: Uuid,
     },
+    ControlCore {
+        action: CoreAction,
+    },
+    CoreRequestStatus {
+        request_id: Uuid,
+    },
+    CoreStatus {},
 }
 
 #[derive(Serialize, Deserialize)]
@@ -72,26 +81,53 @@ struct Response {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Status { status: Status },
-    Catalog { page: CatalogPage },
-    Configured { outcome: ConfigOutcome },
-    RequestStatus { status: Option<ConfigRequestStatus> },
-    Error { code: String },
+    Status {
+        status: Status,
+    },
+    Catalog {
+        page: CatalogPage,
+    },
+    Configured {
+        outcome: ConfigOutcome,
+    },
+    RequestStatus {
+        status: Option<ConfigRequestStatus>,
+    },
+    CoreRequestStatus {
+        status: Option<CoreRequestStatus>,
+    },
+    CoreStatus {
+        snapshot: crate::core_manager::CoreSnapshot,
+    },
+    Error {
+        code: String,
+    },
 }
 
 struct Shared {
     identity: Status,
-    configuration: Configuration,
+    configuration: Arc<Configuration>,
+    core: CoreControl,
 }
 
 impl Shared {
+    fn new(root: PathBuf, store: store::Store, identity: Status) -> Self {
+        let configuration = Arc::new(Configuration::new(store));
+        let core = CoreControl::new(root, configuration.clone(), identity.epoch);
+        Self {
+            identity,
+            configuration,
+            core,
+        }
+    }
     fn idle_allowed(&self) -> Result<bool> {
-        Ok(self
-            .configuration
-            .snapshot()?
-            .instances
-            .iter()
-            .all(|i| i.guard.desired != app_proxy_core::model::Desired::Enabled))
+        Ok(self.core.idle_allowed()?
+            && self
+                .configuration
+                .snapshot()?
+                .instances
+                .iter()
+                .all(|i| i.guard.desired != app_proxy_core::model::Desired::Enabled))
     }
     fn update(&self, manifest: &Manifest) -> Status {
         Status {
@@ -128,6 +164,13 @@ impl Shared {
             }
             Operation::RequestStatus { request_id } => Ok(Reply::RequestStatus {
                 status: self.configuration.request_status(request_id)?,
+            }),
+            Operation::CoreRequestStatus { request_id } => Ok(Reply::CoreRequestStatus {
+                status: self.core.request_status(request_id)?,
+            }),
+            Operation::ControlCore { .. } => Err(Error::Invalid("CORE_CONTROL_REQUIRES_ADMISSION")),
+            Operation::CoreStatus {} => Ok(Reply::CoreStatus {
+                snapshot: self.core.snapshot()?,
             }),
         }
     }
@@ -202,15 +245,8 @@ pub async fn serve(root: PathBuf) -> Result<()> {
         profiles: manifest.profiles.len(),
         phase: "bootstrap".into(),
     };
-    // Desired guards keep the owner alive, even while their implementation is not yet available.
-    let mut idle_allowed = !manifest
-        .instances
-        .iter()
-        .any(|i| i.guard.desired == app_proxy_core::model::Desired::Enabled);
-    let shared = Arc::new(Shared {
-        identity: snapshot,
-        configuration: Configuration::new(owned),
-    });
+    let shared = Arc::new(Shared::new(root, owned, snapshot));
+    let mut idle_allowed = shared.idle_allowed()?;
     let mut clients = tokio::task::JoinSet::new();
     let mut idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
     loop {
@@ -278,6 +314,42 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if let Operation::ControlCore { action } = request.operation {
+        let worker = shared.clone();
+        let admitted = tokio::task::spawn_blocking(move || worker.core.accept(request_id, &action))
+            .await
+            .map_err(|_| Error::Invalid("CORE_CONTROL_WORKER_FAILED"))?;
+        let (reply, execute) = match admitted {
+            Ok((status, execute)) => (
+                Reply::CoreRequestStatus {
+                    status: Some(status),
+                },
+                execute,
+            ),
+            Err(error) => (
+                Reply::Error {
+                    code: safe_error(error),
+                },
+                None,
+            ),
+        };
+        let sent = connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: reply,
+            })
+            .await;
+        // A lost ACK cannot cancel durable admission. Keep the handler registered
+        // until completion, but run synchronous Windows/store work off the reactor.
+        if let Some(job) = execute {
+            let runtime = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || runtime.block_on(shared.core.execute(job)))
+                .await
+                .map_err(|_| Error::Invalid("CORE_CONTROL_WORKER_FAILED"))??;
+        }
+        return sent;
+    }
     // Do not cancel accepted work when the client disconnects. The handler stays
     // registered until blocking preparation/commit completes, preventing idle exit.
     let result = tokio::task::spawn_blocking(move || shared.execute(request))
@@ -387,6 +459,43 @@ pub async fn request_status(
     .await?
     {
         Reply::RequestStatus { status } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+/// Keep this ID if the response is lost; query it rather than submitting anew.
+pub async fn control_core(
+    root: PathBuf,
+    request_id: Uuid,
+    action: CoreAction,
+) -> Result<CoreRequestStatus> {
+    match client_operation(root, request_id, Operation::ControlCore { action }).await? {
+        Reply::CoreRequestStatus {
+            status: Some(status),
+        } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn core_request_status(
+    root: PathBuf,
+    request_id: Uuid,
+) -> Result<Option<CoreRequestStatus>> {
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::CoreRequestStatus { request_id },
+    )
+    .await?
+    {
+        Reply::CoreRequestStatus { status } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn core_status(root: PathBuf) -> Result<crate::core_manager::CoreSnapshot> {
+    match client_operation(root, Uuid::new_v4(), Operation::CoreStatus {}).await? {
+        Reply::CoreStatus { snapshot } => Ok(snapshot),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
 }
@@ -532,13 +641,8 @@ mod tests {
             profiles: 0,
             phase: "bootstrap".into(),
         };
-        (
-            temp,
-            Arc::new(Shared {
-                identity: status,
-                configuration: Configuration::new(store),
-            }),
-        )
+        let shared = Arc::new(Shared::new(temp.path().join("store"), store, status));
+        (temp, shared)
     }
     fn policy() -> ipc::PeerPolicy {
         ipc::PeerPolicy::current(vec![identity::current().unwrap().image_file]).unwrap()
@@ -562,6 +666,172 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[tokio::test]
+    async fn core_lost_ack_still_completes_and_replay_cannot_change_action() {
+        use app_proxy_core::core_control::CoreOutcome;
+        let (_temp, shared) = snapshot();
+        let id = shared.identity.store_id;
+        let request_id = Uuid::new_v4();
+        let mut listener = ipc::Listener::bind(id, policy()).unwrap();
+        let owner = shared.clone();
+        let server = tokio::spawn(async move {
+            let _ = handle(listener.accept().await.unwrap(), owner.clone()).await;
+            (listener, owner)
+        });
+        let mut client = ipc::connect(id, &policy(), Duration::from_secs(1))
+            .await
+            .unwrap();
+        client
+            .send(&hello(id, shared.identity.session_id, None))
+            .await
+            .unwrap();
+        assert!(matches!(
+            client.receive::<Welcome>().await.unwrap(),
+            Welcome::Ready { .. }
+        ));
+        client
+            .send(&Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id,
+                operation: Operation::ControlCore {
+                    action: CoreAction::Stop {},
+                },
+            })
+            .await
+            .unwrap();
+        drop(client);
+        let (mut listener, owner) = server.await.unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                handle(listener.accept().await.unwrap(), owner.clone())
+                    .await
+                    .unwrap();
+            }
+        });
+        let response = rpc(
+            id,
+            &policy(),
+            Duration::from_secs(1),
+            Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id: Uuid::new_v4(),
+                operation: Operation::CoreRequestStatus { request_id },
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            response,
+            Reply::CoreRequestStatus {
+                status: Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Stopped {},
+                    ..
+                })
+            }
+        ));
+        let response = rpc(
+            id,
+            &policy(),
+            Duration::from_secs(1),
+            Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id,
+                operation: Operation::ControlCore {
+                    action: CoreAction::Stop {},
+                },
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            response,
+            Reply::CoreRequestStatus {
+                status: Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Stopped {},
+                    ..
+                })
+            }
+        ));
+        let profile = Uuid::new_v4();
+        let changed = rpc(
+            id,
+            &policy(),
+            Duration::from_secs(1),
+            Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id,
+                operation: Operation::ControlCore {
+                    action: CoreAction::Start {
+                        profiles: vec![profile],
+                        required: profile,
+                    },
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            changed,
+            Err(Error::Invalid("REQUEST_ID_CONFLICT"))
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_core_requests_receive_one_durable_result() {
+        let (_temp, shared) = snapshot();
+        let id = shared.identity.store_id;
+        let request_id = Uuid::new_v4();
+        let mut listener = ipc::Listener::bind(id, policy()).unwrap();
+        let owner = shared.clone();
+        let server = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for _ in 0..6 {
+                handlers.spawn(handle(listener.accept().await.unwrap(), owner.clone()));
+            }
+            while let Some(result) = handlers.join_next().await {
+                result.unwrap().unwrap();
+            }
+        });
+        let mut clients = tokio::task::JoinSet::new();
+        for _ in 0..6 {
+            clients.spawn(async move {
+                rpc(
+                    id,
+                    &policy(),
+                    Duration::from_secs(1),
+                    Request {
+                        protocol_major: PROTOCOL_MAJOR,
+                        request_id,
+                        operation: Operation::ControlCore {
+                            action: CoreAction::Stop {},
+                        },
+                    },
+                )
+                .await
+                .unwrap()
+            });
+        }
+        while let Some(response) = clients.join_next().await {
+            assert!(matches!(
+                response.unwrap(),
+                Reply::CoreRequestStatus {
+                    status: Some(
+                        CoreRequestStatus::Pending {} | CoreRequestStatus::Complete { .. }
+                    )
+                }
+            ));
+        }
+        server.await.unwrap();
+        assert!(matches!(
+            shared.core.request_status(request_id).unwrap(),
+            Some(CoreRequestStatus::Complete {
+                outcome: app_proxy_core::core_control::CoreOutcome::Stopped {},
+                ..
+            })
+        ));
+        assert!(shared.idle_allowed().unwrap());
     }
 
     #[test]

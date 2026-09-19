@@ -9,7 +9,7 @@
 | 配置模型 | 基础模型已实现，独立 review 通过 | 严格 JSON、引用/路径/Guard/IFEO 校验；13 项 core 测试；当前节点仅手动 HTTP/SOCKS5，订阅与其他协议后续实现 |
 | 配置存储 | 基础存储已实现，独立 review 通过 | 归属/ACL、revision、锁、原子替换/上一份备份、不可变秘密与坏文件拒绝；10 项 store 测试；恢复界面与运行 journal 待实现 |
 | IPC 传输 | 已实现，独立 review 通过 | 双向身份/普通权限/会话/映像验证、管道 ACL、1 MiB 帧与超时/取消；4 项真实管道 + 2 项帧测试 |
-| coordinator | 引导及配置写 RPC 已实现，独立 review 通过 | 单所有者、握手、status、配置编辑/请求查询；锁外安装检查、并发重放及丢响应恢复；CLI 跨进程写入已验证，运行任务恢复待实现 |
+| coordinator | 引导、配置写及 core 控制 RPC 已实现，独立 review 通过 | 单所有者、握手、配置与 core 请求去重/查询；丢应答继续执行，任务/内核/未决请求保活；CLI 跨进程与重启查询已验证，未知副作用核对待实现 |
 | 启动模板 | 纯合成已实现，独立 review 通过 | 原版/分身参数环境、直连/代理、秘密引用、路径变量；7 项模板测试；不表示代理就绪或可以启动 |
 | 实例数据目录 | 已实现，独立 review 通过 | store/LocalState 命名空间、归属/ACL/目录句柄、空白创建、保留数据；6 项目录测试 + 2 项模板子进程测试；真实包内访问待验证 |
 | 实例配置编辑 | 已实现，独立 review 通过 | 已接入 coordinator 与 CLI；7 项规则 + 4 项真实 CLI 写测试，物理去重、保留数据及列表脱敏；菜单及外部集成清理待实现 |
@@ -17,7 +17,7 @@
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
 | 实例启动 | 待实现 | 统一状态机、安装解析和已运行判断 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
-| sing-box 管理/一键安装 | 初始生命周期组件已实现，独立 review 通过；产品集成待续 | 自行启动/身份与双栈端口核验/共享重用/已记录进程恢复/显式停止已串联；coordinator RPC、启动许可、重配置确认/回滚、无身份启动核对、故障通知及安装/取消待实现 |
+| sing-box 管理/一键安装 | 初始生命周期及 coordinator/CLI 控制已实现，独立 review 通过；产品集成待续 | 自行启动/身份与双栈端口核验/共享重用/已记录进程恢复/显式停止已串联；启动许可、重配置确认/回滚、无身份启动核对、故障通知及安装/取消待实现 |
 | sing-box 配置生成 | 已实现，独立 review 通过 | 活动 profile 合并、固定入口→出口、末尾拒绝、HTTP/SOCKS5 认证及稳定配置；4 项规则测试和 1 项真实内核转发测试，已接入初始内核管理组件 |
 | sing-box 程序发现/检查 | 已实现，独立 review 通过 | 自动发现/真实 version、有界子进程输出及 check；CLI discover sing-box 已接入，安装及生产运行待实现 |
 | HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和真实 sing-box TLS/管理集成，已接初始内核管理，应用启动/运行监控待实现 |
@@ -49,3 +49,4 @@
 - sing-box 程序发现/检查：独立审查发现并修复版本字符串排序错误，跨位数回归及增量复审通过。提交主题 `feat(rust): discover and validate sing-box binaries`。4 项单测、扩展后的真实内核集成、全量 95 项测试及 clippy/fmt 通过。只查找程序并执行 version/check，未实现安装、运行管理或网络健康检查；同步文件 I/O 不受异步超时强制取消。
 - HTTPS 代理健康检查：独立审查及真实 sing-box TLS 增量复审通过。提交主题 `feat(rust): verify HTTPS connectivity through explicit proxies`。6 项新行为测试通过，全量 101 项通过（6 项顶层 ignored，其中两个真实内核测试分别显式运行，另三个为父测试调用的 helper）；clippy/fmt 通过。真实 core→HTTP 上游→TLS 夹具验证 204 与 core 退出后失败，不表示生产生命周期、目标应用代理或 Guard 已完成。
 - 共享 core 初始生命周期：独立审查及多轮增量复审通过。提交主题 `feat(rust): persist and supervise owned shared core processes`。4 项 generation/journal 契约、1 项原生双栈 PID 归属测试、真实 core 生命周期集成通过；全量 106 项通过，clippy/fmt 通过。修复探测配置竞态、profile 端口映射、恢复失败后丢失共享入口；尚无 coordinator 启动 RPC/启动许可、重配置回滚、无身份启动核对、持续通知及安装。
+- core 控制 RPC / CLI：独立审查和增量复审通过。提交主题 `feat(rust): coordinate durable shared core operations`。新增 11 项测试，全量 117 项通过、7 项顶层 ignored，clippy/fmt 通过。覆盖请求规范化、跨操作编号冲突、时钟回拨、终态保留/未决不清理、任务取消、回执占用、并发/丢 ACK 及真实 CLI 跨 host 重启。CLI 接入 start/stop/status/request；未决副作用不自动重放，历史结果与当前监听状态分开。尚无安装、重配置确认/回滚、持续健康通知或应用启动许可。

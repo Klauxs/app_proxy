@@ -109,7 +109,7 @@ impl std::fmt::Display for Failure {
     }
 }
 impl std::error::Error for Failure {}
-fn fail(code: i32, message: impl Into<String>) -> Failure {
+pub(crate) fn fail(code: i32, message: impl Into<String>) -> Failure {
     Failure {
         exit_code: code,
         message: message.into(),

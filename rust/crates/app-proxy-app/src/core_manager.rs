@@ -3,9 +3,12 @@
 use crate::{configuration::Configuration, proxy_health};
 use app_proxy_core::{ProcessIdentity, model::Endpoint};
 use app_proxy_windows::{
-    Error, Result, core_process::CoreProcess, core_state::CoreState, singbox_binary,
+    Error, Result,
+    core_process::CoreProcess,
+    core_state::{CoreProfile, CoreState},
+    singbox_binary,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -19,6 +22,23 @@ pub struct CoreManager {
 pub struct ReadyCore {
     pub generation: Uuid,
     pub process: ProcessIdentity,
+}
+
+/// Process/listener observation only; this is not a fresh proxy health check.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreSnapshot {
+    pub recorded: CoreState,
+    pub observed: CoreObserved,
+    pub profiles: Vec<CoreProfile>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreObserved {
+    Stopped,
+    Down,
+    Listening,
+    Indeterminate,
 }
 
 impl CoreManager {
@@ -269,6 +289,39 @@ impl CoreManager {
 
     pub fn state(&self) -> Result<CoreState> {
         self.configuration.lock()?.core_state()
+    }
+
+    pub fn snapshot(&self) -> Result<CoreSnapshot> {
+        let store = self.configuration.lock()?;
+        let recorded = store.core_state()?;
+        let mut profiles = Vec::new();
+        if let CoreState::Starting { generation }
+        | CoreState::Down { generation }
+        | CoreState::Running { generation, .. } = &recorded
+        {
+            profiles = store.open_core_generation(*generation)?.profiles().to_vec();
+        }
+        let observed = match &recorded {
+            CoreState::Stopped {} => CoreObserved::Stopped,
+            CoreState::Down { .. } => CoreObserved::Down,
+            CoreState::Starting { .. } => CoreObserved::Indeterminate,
+            CoreState::Running { process, .. } => match CoreProcess::recover(process) {
+                Ok(None) => CoreObserved::Down,
+                Ok(Some(core)) => {
+                    let endpoints: Vec<_> = profiles.iter().map(|p| p.endpoint.clone()).collect();
+                    match core.listeners_verified(&endpoints) {
+                        Ok(true) => CoreObserved::Listening,
+                        _ => CoreObserved::Indeterminate,
+                    }
+                }
+                Err(_) => CoreObserved::Indeterminate,
+            },
+        };
+        Ok(CoreSnapshot {
+            recorded,
+            observed,
+            profiles,
+        })
     }
 }
 

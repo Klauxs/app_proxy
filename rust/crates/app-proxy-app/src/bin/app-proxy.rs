@@ -14,6 +14,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 管理本工具拥有的共享 sing-box 进程
+    Core {
+        #[command(subcommand)]
+        command: app_proxy_app::core_cli::Command,
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// 管理实例登记；目前不启动应用或安装保护组件
     Instance {
         #[command(subcommand)]
@@ -94,6 +101,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     identity::assert_ordinary_user()?;
     let cli = Cli::parse();
     match cli.command {
+        Commands::Core { command, json } => {
+            let root = cli
+                .home
+                .map(Ok)
+                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            runtime.block_on(app_proxy_app::core_cli::run(root, command, json))?;
+            Ok(())
+        }
         Commands::Instance { command, json } => {
             let root = cli
                 .home

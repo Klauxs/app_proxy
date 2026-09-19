@@ -1,6 +1,6 @@
 **App Proxy Rust 版设计**
 
-状态：基础平台、配置模型/存储、本地管道、协调进程状态查询、启动模板、实例数据目录、实例配置编辑、配置请求恢复与安装解析已实现。2026-09-19 已建立三个 crate 和两个可执行入口，通过普通/调试进程创建测试及 Claude 包内 Rust helper 实测。尚未实现日常菜单、应用实例启动、代理管理或 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
+状态：基础平台、配置/存储、认证管道、协调进程、启动模板、实例数据/配置编辑、安装解析及共享 sing-box 初始生命周期已实现。2026-09-20 已接入 core 启动/停止/状态/请求查询 CLI。仍缺少一键安装、代理编辑菜单、应用实例启动与 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
 
 **构建与验证**
 
@@ -37,6 +37,17 @@ cargo fmt --all -- --check
 创建默认原版，必须选择 `--direct` 或 `--proxy <已登记代理ID>`；普通 EXE 使用 `--exe <绝对路径> --adapter codex|claude|chromium|environment`，只有已支持的 Codex/Claude 模板允许分身。应用位置和分身存储自动解析，不复制登录数据。移除只删除登记，保留数据；已有系统集成时先要求清理。每次写入前会输出请求编号，响应中断后查询原编号，不自动重新创建。首次登记应用和创建实例是两个请求，实例创建失败可能保留应用记录。列表为摘要，显示名最多 256 字符，不含参数、环境值和代理凭据；不是完整配置导出。代理创建、启动及 Guard 授权仍待后续实现。
 
 `discover sing-box` 自动探测 store 内完整版本目录、绝对 PATH、Scoop 和 WinGet Links 中的程序，执行 version 并输出位置/版本/来源，不创建 store，不接入外部服务。具体代理配置仍须执行 check；此命令不代表代理可用，也还没有接入安装提示。探测子进程每次限时 3 秒、总异步等待预算 20 秒；同步文件系统访问（例如网络盘）仍受 Windows I/O 超时约束。只接受稳定版本，Scoop 的转发 shim 不作为内核执行。
+
+共享内核的开发入口（需要已有代理配置和可用 sing-box 程序）：
+
+```powershell
+.\target\debug\app-proxy.exe core start <代理ID> [其他代理ID] --required <本次检查的代理ID>
+.\target\debug\app-proxy.exe core status --json
+.\target\debug\app-proxy.exe core stop
+.\target\debug\app-proxy.exe core request <请求ID> --json
+```
+
+`start` 默认检查第一个代理，使用保存的 HTTPS 健康目标与允许状态码；只创建本工具拥有的进程，支持共享入口。运行配置需要改变时返回需确认，尚未实现切换。`stop` 停止自有共享内核，保留应用。启动/停止先持久化请求再执行，客户端断开仍继续；终态保留 7 天，未决记录保留到后续维修处理。同编号只返回历史结果，不能将历史 Ready 当成当前健康。`status` 核验进程和端口归属，不执行网络请求。协调进程在保存有活动内核或未决请求时不空闲退出；未知启动结果不自动重放。该入口尚未包含应用启动许可、持续故障通知及安装提示。
 
 `probe package claude` 仅在已安装 Claude 的包身份下启动本产品测试 helper，验证回执和独立临时目录读写，不启动 Claude 界面或修改其登录数据。`probe process --debug-detach` 验证调试创建和脱离，**不代表真实 IFEO 注册或 Electron 子进程兼容性已经通过**。
 

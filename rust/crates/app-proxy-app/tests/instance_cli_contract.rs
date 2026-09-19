@@ -58,6 +58,61 @@ fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
     fs::write(&exe, b"fixture only, never executed").unwrap();
     (temp, root, exe)
 }
+
+#[test]
+fn core_cli_stop_receipt_survives_owner_restart_and_missing_profile_fails_safely() {
+    let (_temp, root, _) = setup();
+    let initial = ok(&root, &["core", "status", "--json"]);
+    let mut owner = Owner::capture(&root);
+    assert_eq!(initial["observed"], "stopped");
+    let stopped = ok(&root, &["core", "stop", "--json"]);
+    assert_eq!(stopped["result"]["outcome"]["outcome"], "stopped");
+    let request_id = stopped["request_id"].as_str().unwrap();
+    owner.stop();
+    let replay = ok(&root, &["core", "request", request_id, "--json"]);
+    owner = Owner::capture(&root);
+    assert_eq!(stopped, replay);
+    let profile = Uuid::new_v4().to_string();
+    let failed = cli(&root, &["core", "start", &profile, "--json"]);
+    assert_eq!(failed.status.code(), Some(3));
+    let failed: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(failed["result"]["outcome"]["outcome"], "failed");
+    assert_eq!(
+        ok(&root, &["core", "status", "--json"])["observed"],
+        "stopped"
+    );
+    owner.stop();
+}
+
+#[test]
+fn core_cli_interrupted_request_stays_unknown_across_restart_without_execution() {
+    use app_proxy_core::core_control::CoreAction;
+    let (_temp, root, _) = setup();
+    let mut store = Store::create(&root).unwrap();
+    let id = Uuid::new_v4();
+    store
+        .begin_core_request(id, Uuid::new_v4(), &CoreAction::Stop {})
+        .unwrap();
+    drop(store);
+    let queried = cli(&root, &["core", "request", &id.to_string(), "--json"]);
+    let mut owner = Owner::capture(&root);
+    assert_eq!(queried.status.code(), Some(6));
+    let first: Value = serde_json::from_slice(&queried.stdout).unwrap();
+    assert_eq!(first["result"]["status"], "indeterminate");
+    assert_eq!(
+        ok(&root, &["core", "status", "--json"])["observed"],
+        "stopped"
+    );
+    owner.stop();
+    let queried = cli(&root, &["core", "request", &id.to_string(), "--json"]);
+    owner = Owner::capture(&root);
+    assert_eq!(queried.status.code(), Some(6));
+    assert_eq!(
+        first,
+        serde_json::from_slice::<Value>(&queried.stdout).unwrap()
+    );
+    owner.stop();
+}
 fn create(root: &Path, exe: &Path, extra: &[&str]) -> Value {
     let mut args = vec![
         "instance",

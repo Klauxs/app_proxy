@@ -73,6 +73,9 @@ impl Store {
         if request.request_id.is_nil() {
             return Err(Error::Invalid("INVALID_REQUEST_ID"));
         }
+        if self.core_request_status(request.request_id)?.is_some() {
+            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
+        }
         let digest = digest_bytes(&store::encode(request, REQUEST_LIMIT)?);
         self.recover_config_requests()?;
         let header = self.load()?;
@@ -96,6 +99,9 @@ impl Store {
         request: &ConfigRequest,
         rejection: Option<&'static str>,
     ) -> Result<ConfigOutcome> {
+        if self.core_request_status(request.request_id)?.is_some() {
+            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
+        }
         if rejection.is_some_and(|code| {
             code.is_empty()
                 || code.len() > 96

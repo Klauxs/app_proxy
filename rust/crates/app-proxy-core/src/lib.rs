@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod core_control;
 pub mod model;
 pub mod registry;
 pub mod singbox;
