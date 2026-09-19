@@ -26,6 +26,7 @@ pub struct LaunchEngine {
     resources: ResourceRegistry,
     epoch: Uuid,
     active: Mutex<HashSet<Uuid>>,
+    completed: tokio::sync::Notify,
     #[cfg(test)]
     before_dispatch: Mutex<Option<Arc<tokio::sync::Notify>>>,
     #[cfg(test)]
@@ -40,7 +41,7 @@ impl LaunchEngine {
         Self::with_resources(configuration, manager, epoch, ResourceRegistry::open()?)
     }
 
-    fn with_resources(
+    pub(crate) fn with_resources(
         configuration: Arc<Configuration>,
         manager: Arc<CoreManager>,
         epoch: Uuid,
@@ -56,6 +57,7 @@ impl LaunchEngine {
             resources,
             epoch,
             active: Mutex::new(HashSet::new()),
+            completed: tokio::sync::Notify::new(),
             #[cfg(test)]
             before_dispatch: Mutex::new(None),
             #[cfg(test)]
@@ -90,6 +92,14 @@ impl LaunchEngine {
                     && !prior.session_exited
                     && !store.observe_launch_exit(prior.id)?
                 {
+                    let session = identity::current()?.session_id;
+                    if prior
+                        .binding
+                        .as_ref()
+                        .is_some_and(|b| b.session_id != session)
+                    {
+                        return Err(Error::Invalid("INSTANCE_RUNNING_IN_OTHER_SESSION"));
+                    }
                     let current = dependency_digest(&store.load()?, request.instance_id)?;
                     if prior
                         .binding
@@ -162,6 +172,32 @@ impl LaunchEngine {
 
     pub fn cancel(&self, request: Uuid) -> Result<LaunchAttempt> {
         self.configuration.lock()?.request_launch_cancel(request)
+    }
+
+    pub(crate) async fn completed(&self) {
+        self.completed.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_dispatch(&self, gate: Arc<tokio::sync::Notify>) {
+        *self.before_dispatch.lock().unwrap() = Some(gate);
+    }
+
+    /// Reconcile idle attempts and observe exact exits; never create or stop an
+    /// application from coordinator maintenance.
+    pub(crate) fn refresh_sessions(&self) -> Result<()> {
+        let ids: Vec<_> = self
+            .configuration
+            .lock()?
+            .launch_attempts()?
+            .into_iter()
+            .filter(|a| a.reserves_instance() || a.resource_pending)
+            .map(|a| a.id)
+            .collect();
+        for id in ids {
+            self.status(id)?;
+        }
+        Ok(())
     }
 
     fn reconcile(
@@ -478,6 +514,7 @@ impl Drop for Job {
         if let Ok(mut active) = self.engine.active.lock() {
             active.remove(&self.id);
         }
+        self.engine.completed.notify_one();
     }
 }
 

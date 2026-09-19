@@ -246,12 +246,22 @@ pub fn terminate_exact(expected: &ProcessIdentity) -> Result<()> {
 /// Read-only observation: false means this exact process has exited, including
 /// PID reuse. Access denied or unreadable identity is an error, never absence.
 pub fn is_running_exact(expected: &ProcessIdentity) -> Result<bool> {
+    observe_exact(expected, false)
+}
+
+/// Only protected historical receipts may use this read-only path. Ordinary
+/// creation, termination and public observation retain their session boundary.
+pub(crate) fn is_recorded_process_running(expected: &ProcessIdentity) -> Result<bool> {
+    observe_exact(expected, true)
+}
+
+fn observe_exact(expected: &ProcessIdentity, historical: bool) -> Result<bool> {
     identity::assert_ordinary_user()?;
     let caller = identity::current()?;
     if expected.pid == 0
         || expected.creation_time == 0
         || expected.user_sid != caller.user_sid
-        || expected.session_id != caller.session_id
+        || (!historical && expected.session_id != caller.session_id)
     {
         return Err(Error::IdentityMismatch);
     }

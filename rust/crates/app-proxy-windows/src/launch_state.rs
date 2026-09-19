@@ -424,7 +424,7 @@ impl Store {
         if attempt.session_exited {
             return Ok(true);
         }
-        if process::is_running_exact(process)? {
+        if process::is_recorded_process_running(process)? {
             return Ok(false);
         }
         attempt.session_exited = true;

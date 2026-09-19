@@ -10,7 +10,7 @@ use std::{
 use uuid::Uuid;
 
 pub(crate) struct CoreControl {
-    manager: CoreManager,
+    manager: Arc<CoreManager>,
     configuration: Arc<Configuration>,
     epoch: Uuid,
     active: Arc<Mutex<HashMap<Uuid, ActiveOperation>>>,
@@ -20,12 +20,16 @@ pub(crate) struct CoreControl {
 impl CoreControl {
     pub fn new(root: PathBuf, configuration: Arc<Configuration>, epoch: Uuid) -> Self {
         Self {
-            manager: CoreManager::new(root, configuration.clone()),
+            manager: Arc::new(CoreManager::new(root, configuration.clone())),
             installer: crate::core_installer::CoreInstaller::new(configuration.clone()),
             configuration,
             epoch,
             active: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn manager(&self) -> Arc<CoreManager> {
+        self.manager.clone()
     }
 
     // The caller must execute every newly admitted action, even if its ACK fails.

@@ -430,6 +430,93 @@ fn recovered_reserved_claim_rejects_old_dispatch_after_owner_changes() {
 }
 
 #[test]
+fn protected_historical_session_recovery_is_read_only_and_keeps_live_identity_mismatch_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry = ResourceRegistry::open_at(&temp.path().join("resources")).unwrap();
+    let resource = current_resource();
+    let (mut store, owner) = ready_store(&temp.path().join("store"), &resource, Uuid::new_v4());
+    let mut reservation = registry.acquire(resource).unwrap();
+    reservation.reserve(owner).unwrap();
+    let dispatch = store
+        .dispatch_launch(owner.attempt_id, owner.epoch)
+        .unwrap();
+    drop(reservation.authorize_spawn(dispatch).unwrap());
+    let mut recorded = identity::current().unwrap();
+    reservation.confirm(owner, recorded.clone()).unwrap();
+    let historical_session = recorded.session_id.wrapping_add(1);
+    // Model a historical journal using protected fixture writes. Keep a live PID
+    // and its creation time first: a mismatched session is NOT proof of exit.
+    let mut claim = reservation.claim().unwrap().clone();
+    claim.session_id = historical_session;
+    recorded.session_id = historical_session;
+    claim.phase = ResourcePhase::Confirmed {
+        process: recorded.clone(),
+    };
+    store::replace_protected(
+        &registry.root,
+        &registry.sid,
+        &reservation.name,
+        &store::encode(&claim, LIMIT).unwrap(),
+        LIMIT,
+    )
+    .unwrap();
+    let path = store.root().join("state/launch.json");
+    let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    journal["attempts"][0]["binding"]["session_id"] = historical_session.into();
+    store
+        .replace_bounded(
+            "state/launch.json",
+            &serde_json::to_vec(&journal).unwrap(),
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    drop(reservation);
+    registry
+        .reconcile_launch(&mut store, owner.attempt_id)
+        .unwrap();
+    assert!(matches!(
+        store.observe_launch_exit(owner.attempt_id),
+        Err(Error::IdentityMismatch)
+    ));
+    assert!(
+        !store
+            .launch_request(owner.attempt_id)
+            .unwrap()
+            .unwrap()
+            .session_exited
+    );
+    assert!(matches!(
+        process::is_running_exact(&recorded),
+        Err(Error::IdentityMismatch)
+    ));
+    assert!(matches!(
+        process::terminate_exact(&recorded),
+        Err(Error::IdentityMismatch)
+    ));
+    let mut foreign_resource = current_resource();
+    foreign_resource.session_id = historical_session;
+    assert!(matches!(
+        registry.acquire(foreign_resource),
+        Err(Error::IdentityMismatch)
+    ));
+
+    // A different creation time is positive PID-reuse evidence, still without
+    // requesting termination rights or considering the current live process ours.
+    let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    journal["attempts"][0]["phase"]["process"]["creation_time"] =
+        recorded.creation_time.saturating_sub(1).into();
+    store
+        .replace_bounded(
+            "state/launch.json",
+            &serde_json::to_vec(&journal).unwrap(),
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    assert!(store.observe_launch_exit(owner.attempt_id).unwrap());
+    assert!(process::is_running_exact(&identity::current().unwrap()).unwrap());
+}
+
+#[test]
 #[ignore = "native subprocess fixture used by resource reservation tests"]
 fn resource_child() {
     let root = PathBuf::from(std::env::var_os("APP_PROXY_RESOURCE_TEST_ROOT").unwrap());

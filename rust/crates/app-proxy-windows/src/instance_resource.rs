@@ -226,10 +226,18 @@ impl ResourceRegistry {
     }
 
     pub fn acquire(&self, resource: InstanceResource) -> Result<ResourceReservation> {
+        self.acquire_checked(resource, false)
+    }
+
+    fn acquire_checked(
+        &self,
+        resource: InstanceResource,
+        historical: bool,
+    ) -> Result<ResourceReservation> {
         let caller = identity::current()?;
         if self.sid != resource.user_sid
             || self.sid != caller.user_sid
-            || resource.session_id != caller.session_id
+            || (!historical && resource.session_id != caller.session_id)
         {
             return Err(Error::IdentityMismatch);
         }
@@ -288,7 +296,9 @@ impl ResourceRegistry {
             image: binding.image,
             installation_image: None,
         };
-        let mut reservation = self.acquire(resource)?;
+        // Kept private to this protected-store recovery path. No caller receives
+        // a cross-session reservation from which it could request a new spawn.
+        let mut reservation = self.acquire_checked(resource, true)?;
         let expected = ResourceOwner {
             store_id: header.store_id,
             attempt_id: attempt.id,

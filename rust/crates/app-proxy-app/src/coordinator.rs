@@ -2,6 +2,7 @@
 use crate::configuration::{CatalogPage, Configuration, catalog_page};
 use crate::core_control::CoreControl;
 use app_proxy_core::core_control::{CoreAction, CoreRequestStatus};
+use app_proxy_core::launch::{LaunchAttempt, LaunchOrigin, LaunchRequest};
 use app_proxy_core::{
     model::Manifest,
     registry::{ConfigAction, ConfigRequest},
@@ -19,9 +20,12 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 6;
+const PROTOCOL_MINOR: u32 = 7;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
+
+#[cfg(test)]
+mod launch_tests;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +75,16 @@ enum Operation {
         request_id: Uuid,
     },
     CoreStatus {},
+    Launch {
+        instance_id: Uuid,
+        origin: LaunchOrigin,
+    },
+    LaunchStatus {
+        request_id: Uuid,
+    },
+    CancelLaunch {
+        request_id: Uuid,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,6 +116,9 @@ enum Reply {
     CoreStatus {
         snapshot: crate::core_manager::CoreSnapshot,
     },
+    LaunchStatus {
+        attempt: Option<LaunchAttempt>,
+    },
     Error {
         code: String,
     },
@@ -111,23 +128,47 @@ struct Shared {
     identity: Status,
     configuration: Arc<Configuration>,
     core: CoreControl,
+    launch: Arc<crate::launch_engine::LaunchEngine>,
     jobs: AtomicUsize,
     job_finished: tokio::sync::Notify,
 }
 
 impl Shared {
-    fn new(root: PathBuf, store: store::Store, identity: Status) -> Self {
+    fn new(root: PathBuf, store: store::Store, identity: Status) -> Result<Self> {
         let configuration = Arc::new(Configuration::new(store));
+        #[cfg(test)]
+        let resources = app_proxy_windows::instance_resource::ResourceRegistry::for_test_at(
+            &root.join("test-resources"),
+        )?;
         let core = CoreControl::new(root, configuration.clone(), identity.epoch);
-        Self {
+        #[cfg(not(test))]
+        let launch = crate::launch_engine::LaunchEngine::new(
+            configuration.clone(),
+            core.manager(),
+            identity.epoch,
+        )?;
+        #[cfg(test)]
+        let launch = crate::launch_engine::LaunchEngine::with_resources(
+            configuration.clone(),
+            core.manager(),
+            identity.epoch,
+            resources,
+        )?;
+        Ok(Self {
             identity,
             configuration,
             core,
+            launch,
             jobs: AtomicUsize::new(0),
             job_finished: tokio::sync::Notify::new(),
-        }
+        })
     }
     fn idle_allowed(&self) -> Result<bool> {
+        // A temporarily unreadable completion record must not tear down the
+        // coordinator or its owned proxy while application state is unresolved.
+        if self.launch.refresh_sessions().is_err() {
+            return Ok(false);
+        }
         Ok(self.jobs.load(Ordering::SeqCst) == 0
             && self.core.idle_allowed()?
             && self
@@ -179,6 +220,13 @@ impl Shared {
             Operation::ControlCore { .. } => Err(Error::Invalid("CORE_CONTROL_REQUIRES_ADMISSION")),
             Operation::CoreStatus {} => Ok(Reply::CoreStatus {
                 snapshot: self.core.snapshot()?,
+            }),
+            Operation::Launch { .. } => Err(Error::Invalid("LAUNCH_REQUIRES_ADMISSION")),
+            Operation::LaunchStatus { request_id } => Ok(Reply::LaunchStatus {
+                attempt: self.launch.status(request_id)?,
+            }),
+            Operation::CancelLaunch { request_id } => Ok(Reply::LaunchStatus {
+                attempt: Some(self.launch.cancel(request_id)?),
             }),
         }
     }
@@ -253,7 +301,7 @@ pub async fn serve(root: PathBuf) -> Result<()> {
         profiles: manifest.profiles.len(),
         phase: "bootstrap".into(),
     };
-    let shared = Arc::new(Shared::new(root, owned, snapshot));
+    let shared = Arc::new(Shared::new(root, owned, snapshot)?);
     serve_connections(listener, shared, IDLE_TIMEOUT).await
 }
 
@@ -265,6 +313,8 @@ async fn serve_connections(
     let mut idle_allowed = shared.idle_allowed()?;
     let mut clients = tokio::task::JoinSet::new();
     let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
+    let mut maintenance = tokio::time::interval(Duration::from_secs(5));
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             accepted = listener.accept(), if clients.len() < MAX_CLIENTS => {
@@ -293,6 +343,18 @@ async fn serve_connections(
                 idle_allowed = tokio::task::spawn_blocking(move || owner.idle_allowed()).await
                     .map_err(|_| Error::Invalid("CORE_CONTROL_WORKER_FAILED"))??;
                 idle_deadline = tokio::time::Instant::now() + idle_timeout;
+            },
+            _ = shared.launch.completed() => {
+                let owner = shared.clone();
+                idle_allowed = tokio::task::spawn_blocking(move || owner.idle_allowed()).await
+                    .map_err(|_| Error::Invalid("LAUNCH_WORKER_FAILED"))??;
+                idle_deadline = tokio::time::Instant::now() + idle_timeout;
+            },
+            _ = maintenance.tick(), if !idle_allowed && clients.is_empty() => {
+                let owner = shared.clone();
+                idle_allowed = tokio::task::spawn_blocking(move || owner.idle_allowed()).await
+                    .map_err(|_| Error::Invalid("LAUNCH_WORKER_FAILED"))??;
+                if idle_allowed { idle_deadline = tokio::time::Instant::now() + idle_timeout; }
             },
             _ = tokio::time::sleep_until(idle_deadline), if idle_allowed && clients.is_empty() => break,
         }
@@ -336,6 +398,39 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if let Operation::Launch {
+        instance_id,
+        origin,
+    } = request.operation
+    {
+        let engine = shared.launch.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let admitted = tokio::task::spawn_blocking(move || {
+            runtime.block_on(engine.submit(LaunchRequest {
+                request_id,
+                instance_id,
+                origin,
+            }))
+        })
+        .await
+        .map_err(|_| Error::Invalid("LAUNCH_WORKER_FAILED"))?;
+        // The engine owns accepted work before this ACK; a failed send cannot
+        // discard it or consume a connection slot during proxy preparation.
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: match admitted {
+                    Ok(attempt) => Reply::LaunchStatus {
+                        attempt: Some(attempt),
+                    },
+                    Err(error) => Reply::Error {
+                        code: safe_error(error),
+                    },
+                },
+            })
+            .await;
+    }
     if let Operation::ControlCore { action } = request.operation {
         let worker = shared.clone();
         let admitted = tokio::task::spawn_blocking(move || worker.core.accept(request_id, &action))
@@ -440,6 +535,13 @@ async fn rpc(
     {
         return Err(Error::Invalid("IPC_SERVER_HELLO_MISMATCH"));
     }
+    if matches!(
+        &request.operation,
+        Operation::Launch { .. } | Operation::LaunchStatus { .. } | Operation::CancelLaunch { .. }
+    ) && server.protocol_minor < 7
+    {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     let request_id = request.request_id;
     connection.send(&request).await?;
     let response: Response = connection.receive().await?;
@@ -461,6 +563,11 @@ async fn rpc(
             "CONFIG_REQUEST_PENDING" => "CONFIG_REQUEST_PENDING",
             "CATALOG_CHANGED" => "CATALOG_CHANGED",
             "CATALOG_ENTRY_TOO_LARGE" => "CATALOG_ENTRY_TOO_LARGE",
+            "LAUNCH_ATTEMPT_NOT_FOUND" => "LAUNCH_ATTEMPT_NOT_FOUND",
+            "LAUNCH_OPERATION_LIMIT" => "LAUNCH_OPERATION_LIMIT",
+            "INSTANCE_NOT_FOUND" => "INSTANCE_NOT_FOUND",
+            "INSTANCE_RUNNING_WITH_OTHER_CONFIG" => "INSTANCE_RUNNING_WITH_OTHER_CONFIG",
+            "INSTANCE_RUNNING_IN_OTHER_SESSION" => "INSTANCE_RUNNING_IN_OTHER_SESSION",
             _ => "COORDINATOR_OPERATION_FAILED",
         }));
     }
@@ -529,6 +636,42 @@ pub async fn core_request_status(
 pub async fn core_status(root: PathBuf) -> Result<crate::core_manager::CoreSnapshot> {
     match client_operation(root, Uuid::new_v4(), Operation::CoreStatus {}).await? {
         Reply::CoreStatus { snapshot } => Ok(snapshot),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+/// Keep the request ID across transport failures. Submission acknowledges the
+/// durable attempt; only its queried phase describes the launch result.
+pub async fn launch(root: PathBuf, request: LaunchRequest) -> Result<LaunchAttempt> {
+    match client_operation(
+        root,
+        request.request_id,
+        Operation::Launch {
+            instance_id: request.instance_id,
+            origin: request.origin,
+        },
+    )
+    .await?
+    {
+        Reply::LaunchStatus {
+            attempt: Some(attempt),
+        } => Ok(attempt),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn launch_status(root: PathBuf, request_id: Uuid) -> Result<Option<LaunchAttempt>> {
+    match client_operation(root, Uuid::new_v4(), Operation::LaunchStatus { request_id }).await? {
+        Reply::LaunchStatus { attempt } => Ok(attempt),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn cancel_launch(root: PathBuf, request_id: Uuid) -> Result<LaunchAttempt> {
+    match client_operation(root, Uuid::new_v4(), Operation::CancelLaunch { request_id }).await? {
+        Reply::LaunchStatus {
+            attempt: Some(attempt),
+        } => Ok(attempt),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
 }
@@ -674,7 +817,7 @@ mod tests {
             profiles: 0,
             phase: "bootstrap".into(),
         };
-        let shared = Arc::new(Shared::new(temp.path().join("store"), store, status));
+        let shared = Arc::new(Shared::new(temp.path().join("store"), store, status).unwrap());
         (temp, shared)
     }
     fn policy() -> ipc::PeerPolicy {

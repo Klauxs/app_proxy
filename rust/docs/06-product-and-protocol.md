@@ -67,6 +67,8 @@ IFEO 解除注册成功并回读确认后才删除对应 host；解除失败则�
 
 客户端取消订阅事件不取消任务。配置编辑用 expected_revision；冲突响应携带当前 revision 和冲突实体 ID，不回显完整配置或秘密。程序启动参数等敏感 payload 不写 access log。
 
+当前 Rust coordinator 协议为 2.7，增加启动、启动请求查询及显式取消。新启动请求只包含已登记实例 ID 和来源，回执不含参数、环境值或凭据；接纳 ACK 不表示创建成功，客户端查询持久 attempt 阶段。客户端发送这三种操作前要求服务端 minor 至少为 7，旧服务端不会接收不支持的副作用请求。普通 EXE RPC 已实现，中文启动流程及其他平台分支继续按本章设计接入。
+
 **4. 事件及证据**
 
 事件字段为 `protocol_major, sequence, at, attempt_id, instance_id, type, stage?, elapsed_ms?, result?`。sequence 在一个 attempt 内递增；诊断日志滚动不影响持久化 attempt 状态。客户端接收不到全部事件时主动拉取快照；慢客户端不阻塞启动，事件缓冲达到上限发送 resync_required。
