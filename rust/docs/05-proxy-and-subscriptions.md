@@ -90,6 +90,12 @@ HTTP 客户端按用途创建：代理健康/出口请求显式指定 profile；
 
 特殊兼容点单独建 fixture：URI 凭据中的字面 `%XX` 不被无条件二次解码；节点名/查询字段按各格式规则处理；ALPN 块列表不能变成额外节点；Base64 的 padding/URL-safe 差异；IPv6 地址；国家旗帜及地区归类；重复名称；VMess JSON；非法端口及空必需字段。
 
+URI/Base64 适配与 typed Node 现已实现：六协议、标准/URL-safe Base64、有无 padding、VMess 严格 JSON、IPv6/IDN、名称地区推断、重名拒绝。输入最大 8 MiB、单行 64 KiB、最多 4096 个有效或不支持条目；诊断仅含解码后来源行号和固定错误类别。原始 URI 凭据只百分号解码一次，Base64 解出的 Shadowsocks 密码和 VMess JSON 字段不再百分号解码；节点名中的加号按 fragment 字面保留。节点、协议与 TLS/transport 类型没有 Debug/Serialize，不直接写入 manifest。
+
+允许的扩展包括 TLS SNI/证书验证开关/ALPN/uTLS、Reality、VLESS Vision、VMess 加密/alter-id、Hysteria2 salamander/带宽，以及 WebSocket、HTTP、gRPC、HTTPUpgrade、QUIC。只从已验证类型生成单个 outbound，不能注入任意 JSON。Reality 公钥输出规范化为 URL-safe 无 padding，SS2022 每个密钥输出标准带 padding Base64；ChaCha20 的 SS2022 多密钥链拒绝，AES 可用。字段以 [sing-box 出口文档](https://sing-box.sagernet.org/configuration/outbound/)、[TLS](https://sing-box.sagernet.org/configuration/shared/tls/)、[传输](https://sing-box.sagernet.org/configuration/shared/v2ray-transport/) 为依据，并用本机固定 1.14.1 实测 check。
+
+未知参数、重复参数/别名、未知 VMess JSON 字段及无法保持含义的组合让该节点不可选。当前明确拒绝 TCP 的 HTTP 伪装（不能等价替换为 TLS 下的 HTTP/2）、无 TLS 的 h2、QUIC 上的 uTLS/Reality、AnyTLS/Hysteria2/SS 的 V2Ray transport，以及尚未映射的 SS plugin 等扩展。显式 http 在无 TLS 下为 HTTP/1，有 TLS 下为 HTTP/2，与 [1.14.1 内核实现](https://github.com/SagerNet/sing-box/blob/v1.14.1/transport/v2rayhttp/client.go) 一致。上述限制不能当作已完成其他订阅格式或全部扩展；Clash/文本适配、秘密持久化、刷新提交和 CLI 集成仍待续。
+
 刷新先锁外下载/解析，再对 source revision 做 compare-and-swap。按节点名保留选中项；重名拒绝；报告新增和删除；若刷新清空选择则保留旧配置。source 已变化就丢弃旧响应，不能写回覆盖。导入成功不等于节点实网可用，需生成配置 check 和对应探测。
 
 **7. 可复用的测试经验**

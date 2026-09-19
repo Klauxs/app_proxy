@@ -5,6 +5,7 @@ pub mod launch;
 pub mod model;
 pub mod registry;
 pub mod singbox;
+pub mod subscription;
 pub mod template;
 
 use serde::{Deserialize, Serialize};

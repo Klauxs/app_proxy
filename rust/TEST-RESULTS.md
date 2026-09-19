@@ -2,6 +2,16 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：六协议 URI/Base64 节点与 outbound**
+
+core 新增内存中的 Node/Protocol/Tls/Reality/Transport 类型和 URI 列表适配，覆盖 AnyTLS、VLESS、VMess、Shadowsocks、Trojan、Hysteria2；不实现 Debug/Serialize，不修改既有 manifest。原始 URI 仅一次百分号解码，Base64 Shadowsocks 凭据与 VMess JSON 保持字面值；输入/行/条目有界，重复名字拒绝，来源行号和固定错误类别不泄漏输入。未知连接字段和不支持的 TLS/transport 组合不能进入可选节点；outbound 编译重新验证并只输出允许字段。
+
+12 项核心专项和独立复跑通过：六协议及四种 Base64 envelope、三种 SS URI、凭据/名称/path 单次解码、IPv6/IDN/端口/必需字段、重复查询键/别名/JSON 键、未知和冲突参数、TLS/Reality/多传输字段、VMess 严格整数与选项、名称地区/重名/脱敏行号、输入/行/数量限制、输出密钥规范化/协议组合、修改后重验证。独立审查推动修复 Reality 与 SS2022 输出编码不符合内核要求、SS2022 ChaCha20 错误接受 AES 专有的多密钥链、TCP HTTP 伪装被改成 HTTP/2、无 TLS 的 h2 被降为 HTTP/1 四处问题，增量复审通过。
+
+新增真实内核契约测试单独显式通过并经独立复跑：以固定已验证 sing-box 1.14.1 执行 `check -c stdin`，16 个合成配置包含六协议、Reality 带 padding 公钥、SS2022 三种算法 URL-safe 无 padding 密钥、WebSocket/gRPC/HTTP/HTTPUpgrade/QUIC 与 AES 多密钥链。没有启动代理服务、访问上游、写用户配置或使用用户凭据。测试进程有隐藏窗口/超时/kill_on_drop。此证据只证明内核接受配置，不证明协议实际转发或真实节点连通性。
+
+最终全量 workspace **323 项通过、0 失败、28 项顶层 ignored**，日志 `.tools/subscription-uri-final-tests.log`；新增真实内核 check 项已单独显式通过。workspace clippy -D warnings、fmt/diff 通过。Clash YAML、各客户端文本格式、持久化秘密分存、刷新/选择保持和 CLI 仍待实现；不能据本批称完整订阅功能已交付。
+
 **2026-09-20：订阅下载传输层**
 
 新增传输 API，明确直连或指定回环 HTTP proxy，忽略系统和环境代理；固定 UA 次序、15 秒请求/120 秒总体预算、5 次重定向并禁止 HTTPS 降级。URL 和正文只在内存中使用，错误不包含 URL、凭据、头或响应内容。原始和解压后正文分别限制 8 MiB，严格 UTF-8；支持 gzip/br/deflate（zlib）/zstd。调用方尚须核验自有 ManagedCore 入口、选择来源并按 revision 提交，不代表订阅解析或生产导入流程已接入。
