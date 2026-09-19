@@ -13,6 +13,7 @@
 | 启动模板 | 纯合成已实现，独立 review 通过 | 原版/分身参数环境、直连/代理、秘密引用、路径变量；7 项模板测试；不表示代理就绪或可以启动 |
 | 实例数据目录 | 已实现，独立 review 通过 | store/LocalState 命名空间、归属/ACL/目录句柄、空白创建、保留数据；6 项目录测试 + 2 项模板子进程测试；真实包内访问待验证 |
 | 实例配置编辑 | 已实现，独立 review 通过 | 创建/克隆/改名/绑定/移除的纯配置规则，7 项测试；coordinator 写接口、物理安装去重和外部集成清理待接入 |
+| 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；仅纯配置事务，待接入 IPC |
 | 实例启动 | 待实现 | 统一状态机、安装解析和已运行判断 |
 | sing-box 管理/一键安装 | 待实现 | 自行启动、多个入口/出口共享进程、安装/取消、CONNECT/TLS、配置切换恢复 |
 | 订阅解析 | 待实现 | 六协议、URI/Base64/Clash/文本格式、兼容 fixtures、刷新保持选择 |
@@ -35,3 +36,4 @@
 - 启动模板：独立审查通过，20 项 core 测试（7 项新增模板行为）和 clippy 通过。提交主题 `feat(rust): compile instance launch arguments and environment`。原版清除分身变量，分身生成独立目录参数；已知路径变量只展开一次。目录归属、继承环境总量、代理就绪和实际应用隔离仍需平台验证。
 - 实例数据目录：独立审查通过，6 项目录/包命名空间夹具及 2 项真实模板子进程测试通过，clippy 通过。提交主题 `feat(rust): prepare owned isolated instance directories`。默认目录使用 Windows Known Folder；原版零创建、陌生目录拒绝、改名复用、移除保留。包夹具不证明真实 MSIX 可访问，子进程回执不证明 Codex/Claude 隔离或网络代理已经生效。
 - 实例配置编辑：独立审查通过，7 项新增行为测试及 core clippy 通过。提交主题 `feat(rust): add instance configuration editing rules`。默认原版；只创建分身不登记原版/IFEO；克隆分配新目录；移除保留数据，已有外部集成时要求先清理。此批仅纯配置规则，不含运行态操作或用户界面。
+- 配置请求恢复/去重：独立审查发现并修复完成记录超前于还原后配置的误报；复审通过，8 项事务测试及 workspace clippy 通过。提交主题 `feat(rust): recover durable configuration requests`。全量测试此前 68 项通过，后续修复与新增 2 项回归已在事务套件通过。保护目录内先记录 intent，提交 manifest，再记录回执；不覆盖外部副作用及启动会话恢复。

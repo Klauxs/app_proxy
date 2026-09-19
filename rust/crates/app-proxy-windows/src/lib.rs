@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+pub mod config_transaction;
 pub mod identity;
 pub mod instance_data;
 pub mod ipc;

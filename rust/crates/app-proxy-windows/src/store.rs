@@ -177,13 +177,14 @@ impl Store {
         security::verify(lock.as_raw_handle(), &sid, false)?;
         lock.try_lock()
             .map_err(|_| Error::Invalid("STORE_ALREADY_OWNED"))?;
-        let store = Self {
+        let mut store = Self {
             root: root.to_owned(),
             owner,
             _directories: directories,
             _lock: lock,
         };
         store.load()?;
+        store.recover_config_requests()?;
         Ok(store)
     }
 
@@ -198,7 +199,16 @@ impl Store {
     }
 
     /// Consumes caller's snapshot. The saved revision is always assigned here.
-    pub fn commit(&mut self, expected_revision: u64, mut manifest: Manifest) -> Result<u64> {
+    pub fn commit(&mut self, expected_revision: u64, manifest: Manifest) -> Result<u64> {
+        self.recover_config_requests()?;
+        self.commit_snapshot(expected_revision, manifest)
+    }
+
+    pub(crate) fn commit_snapshot(
+        &mut self,
+        expected_revision: u64,
+        mut manifest: Manifest,
+    ) -> Result<u64> {
         let previous = self.load()?;
         if previous.revision != expected_revision || manifest.revision != expected_revision {
             return Err(Error::Invalid("STALE_MANIFEST_REVISION"));
@@ -252,7 +262,7 @@ impl Store {
         Ok(secret.value)
     }
 
-    fn validate(&self, manifest: &Manifest) -> Result<()> {
+    pub(crate) fn validate(&self, manifest: &Manifest) -> Result<()> {
         manifest.validate().map_err(|e| Error::Invalid(e.0))?;
         if manifest.store_id != self.owner.store_id || manifest.owner_sid != self.owner.owner_sid {
             return Err(Error::Invalid("MANIFEST_OWNER_MISMATCH"));
@@ -264,10 +274,19 @@ impl Store {
     }
 
     fn replace(&self, relative: &str, bytes: &[u8]) -> Result<()> {
+        self.replace_bounded(relative, bytes, MANIFEST_LIMIT)
+    }
+
+    pub(crate) fn replace_bounded(&self, relative: &str, bytes: &[u8], limit: usize) -> Result<()> {
+        app_proxy_core::model::safe_relative(Path::new(relative))
+            .map_err(|e| Error::Invalid(e.0))?;
+        if bytes.len() > limit {
+            return Err(Error::Invalid("STORE_FILE_TOO_LARGE"));
+        }
         let destination = self.root.join(relative);
         if destination.try_exists()? {
             // Refuse an untrusted/reparse destination instead of replacing it silently.
-            read_protected(&destination, &self.owner.owner_sid, MANIFEST_LIMIT)?;
+            read_protected(&destination, &self.owner.owner_sid, limit)?;
         }
         let parent = destination
             .parent()
