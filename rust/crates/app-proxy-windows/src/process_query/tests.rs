@@ -117,6 +117,24 @@ impl Drop for Child {
 }
 
 #[tokio::test]
+async fn older_package_image_with_same_name_is_never_treated_as_vacant() {
+    let _query = QUERY_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let current = identity::current().unwrap();
+    let name = current.image_path.file_name().unwrap().to_owned();
+    let newer = temp.path().join(&name);
+    std::fs::copy(&current.image_path, &newer).unwrap();
+    let new_image = identity::file_identity(&newer).unwrap();
+    assert_ne!(new_image, current.image_file);
+    let package = candidates_for(new_image.clone(), name.clone(), true)
+        .await
+        .unwrap();
+    assert!(package.iter().any(|p| p == &current));
+    let plain = candidates_for(new_image, name, false).await.unwrap();
+    assert!(!plain.iter().any(|p| p == &current));
+}
+
+#[tokio::test]
 async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
     let _query = QUERY_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();

@@ -251,3 +251,13 @@ helper 与撤销共用独占文件锁，覆盖最终能力核对、Consuming、�
 8 项新增测试通过：撤销后重开/重放、过期与错包、gate 排他及 Consuming 不重试、nonce/物理目录绑定、真实夹具进程一次创建与晚取消、时钟回拨/旧发行者、request/state 实际占用写失败、创建后 child 校验或回执写失败保留未知。审查方独立复跑全部 8 项通过。包上下文在这些新测试中通过私有测试调用注入，子进程为真实普通 EXE；没有启动用户 Codex/Claude，也不把这些证据称为真实 MSIX 应用验收。生产 bridge/host/LaunchEngine 接入及真实包运行验证仍待下一批。
 
 最终全量 workspace 201 项通过、19 项顶层 ignored；clippy -D warnings、fmt 和 diff 检查通过。
+
+**MSIX 生产执行链与恢复（2026-09-20）**
+
+CLI/RPC 共用的 LaunchEngine 现已为 MSIX 发布一次性请求，经现有 PowerShell bridge 在指定包内启动 app-proxy-host package-child。桥接完成不当作创建证据；只接受绑定原 dispatch 的 Created / NotCreated 回执。取消、22 秒等待截止和 owner 恢复通过同一请求 gate 撤销尚未消费的能力；Consuming、目录丢失或无法核对保持未知，不重放创建、不终止应用。
+
+真实 Claude 包的文件系统虚拟化会隐藏默认 LocalAppData 下的外部 store。实测失败后，将请求放到该包 LocalState/AppProxyRust/<store UUID>/state，helper 只校验共享命名空间的受保护归属标记，不再打开外部 store。生产 coordinator 仍将回执与原 journal 的 store/attempt/epoch/nonce/binding 完整核对。未修改应用 LocalState 的 ACL 或采用其已有数据。
+
+新增默认测试覆盖命名空间归属与复用、旧包同名映像候选、Pending/Created/Consuming/missing 的恢复以及同 attempt UUID 跨 store 回执拒绝。全量 workspace 205 项通过、20 项顶层 ignored；审查方独立复跑相关 15 项通过，clippy -D warnings、fmt/diff 通过。真实 Claude 生产 helper 的过期请求集成另行通过（24.13 秒），确认共享 NotCreated 回执及资源释放；测试在唯一临时 store 命名空间内执行并清理。没有通过该测试启动 Claude 应用，也未写 IFEO。
+
+上述真实包测试验证 helper 激活与回执共享，不证明实际 Codex/Claude 应用启动、分身隔离或网络代理。旧版本目前按相同映像名称保守纳入候选，未核对的候选阻止启动；精确跨版本包识别及真实应用端到端验收仍待完成。

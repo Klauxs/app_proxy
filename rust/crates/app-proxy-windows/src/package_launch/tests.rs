@@ -3,6 +3,42 @@ use crate::instance_resource::ResourceOwner;
 use app_proxy_core::launch::LaunchNetwork;
 use uuid::Uuid;
 
+pub(crate) fn publish_for_dispatch(store: &Store, permit: AuthorizedSpawn<'_>) -> PackageTicket {
+    let fixture = Fixture::new(0);
+    let mut request: Request = store::decode(
+        &store::read_protected(
+            &fixture.ticket.request_path(),
+            &fixture.ticket.request.owner_sid,
+            LIMIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    request.context = permit.context();
+    request.binding = permit.binding().clone();
+    request.cwd = store.root().to_owned();
+    assert_eq!(
+        request.context.owner.store_id,
+        store.load().unwrap().store_id
+    );
+    publish(permit.package_request().unwrap().to_owned(), request).unwrap()
+}
+
+pub(crate) fn complete_fixture(ticket: &PackageTicket, created: bool) {
+    if created {
+        consume(
+            &ticket.request_path(),
+            Some("Fixture_publisher"),
+            Some("Fixture_1_x64__publisher"),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    } else {
+        let _gate = ticket.gate().unwrap();
+        ticket.write(Phase::Consuming {}).unwrap();
+    }
+}
+
 struct Fixture {
     ticket: PackageTicket,
     _store: Store,

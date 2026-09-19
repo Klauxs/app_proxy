@@ -4,12 +4,12 @@ try {
     [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
     [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
     $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
-    if ($request.operation -notin @('discover', 'probe')) { throw 'INVALID_OPERATION' }
+    if ($request.operation -notin @('discover', 'probe', 'launch')) { throw 'INVALID_OPERATION' }
     $known = @{
         'Claude_pzs8sxrjxfjjc' = 'Claude'
         'OpenAI.Codex_2p2nqsd0c76g0' = 'App'
     }
-    if ($request.operation -eq 'probe' -and $known[$request.family_name] -ne $request.app_id) { throw 'PACKAGE_NOT_FULL_TRUST' }
+    if ($request.operation -ne 'discover' -and $known[$request.family_name] -ne $request.app_id) { throw 'PACKAGE_NOT_FULL_TRUST' }
     if ([string]::IsNullOrEmpty($request.family_name) -or $request.family_name.LastIndexOf('_') -lt 1) { throw 'APP_NOT_INSTALLED' }
     $name = $request.family_name.Substring(0, $request.family_name.LastIndexOf('_'))
     $stage = 'package_query'
@@ -41,7 +41,8 @@ try {
             if (-not [IO.Path]::IsPathRooted($value) -or $value.Contains('"') -or $value.Contains([char]0)) { throw 'INVALID_PATH' }
         }
         if ([IO.Path]::GetFileName($request.helper) -ne 'app-proxy-host.exe') { throw 'INVALID_HELPER' }
-        $arguments = 'probe-child --request "' + $request.request + '"'
+        $entry = if ($request.operation -eq 'launch') { 'package-child' } else { 'probe-child' }
+        $arguments = $entry + ' --request "' + $request.request + '"'
         $stage = 'activation'
         Invoke-CommandInDesktopPackage -PackageFamilyName $request.family_name -AppId $request.app_id -Command $request.helper -Args $arguments -PreventBreakaway -ErrorAction Stop | Out-Null
         $result = @{ accepted = $true }

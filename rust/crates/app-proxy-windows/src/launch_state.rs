@@ -55,6 +55,8 @@ pub struct LaunchDispatch {
     context: DispatchIdentity,
     binding: LaunchBinding,
     _owner: std::sync::Arc<std::fs::File>,
+    _package: Option<crate::instance_data::PackageControlRoot>,
+    package_request: Option<std::path::PathBuf>,
 }
 impl LaunchDispatch {
     pub(crate) fn context(&self) -> DispatchIdentity {
@@ -62,6 +64,9 @@ impl LaunchDispatch {
     }
     pub(crate) fn binding(&self) -> &LaunchBinding {
         &self.binding
+    }
+    pub(crate) fn package_request(&self) -> Option<&std::path::Path> {
+        self.package_request.as_deref()
     }
 }
 
@@ -163,6 +168,7 @@ impl Store {
             return Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"));
         }
         let attempt = existing.cloned().unwrap_or(LaunchAttempt {
+            package_request: None,
             id: request.request_id,
             instance_id: request.instance_id,
             origin: request.origin,
@@ -261,6 +267,25 @@ impl Store {
     }
 
     pub fn dispatch_launch(&mut self, id: Uuid, epoch: Uuid) -> Result<LaunchDispatch> {
+        self.dispatch_launch_kind(id, epoch, None)
+    }
+
+    pub fn dispatch_package_launch(
+        &mut self,
+        id: Uuid,
+        epoch: Uuid,
+        package: &crate::package::Package,
+    ) -> Result<LaunchDispatch> {
+        let package = self.prepare_package_control(package)?;
+        self.dispatch_launch_kind(id, epoch, Some(package))
+    }
+
+    fn dispatch_launch_kind(
+        &mut self,
+        id: Uuid,
+        epoch: Uuid,
+        package: Option<crate::instance_data::PackageControlRoot>,
+    ) -> Result<LaunchDispatch> {
         let mut journal = self.read_launch_journal()?;
         let store_id = journal.store_id;
         let attempt = attempt_mut(&mut journal, id, epoch, &LaunchPhase::ReadyToSpawn {})?;
@@ -276,6 +301,10 @@ impl Store {
         }
         let dispatch_id = Uuid::new_v4();
         attempt.dispatch_id = Some(dispatch_id);
+        let package_request = package
+            .as_ref()
+            .map(|p| p.root.join(format!("package-{id}")));
+        attempt.package_request = package_request.clone();
         attempt.resource_pending = true;
         attempt.phase = LaunchPhase::SpawnRequested {};
         let binding = attempt.binding.clone().expect("validated ready binding");
@@ -291,6 +320,8 @@ impl Store {
             },
             binding,
             _owner: self.owner_lease(),
+            _package: package,
+            package_request,
         })
     }
 
@@ -552,6 +583,13 @@ impl Store {
         for a in &journal.attempts {
             if a.dispatch_id.is_some_and(|id| id.is_nil())
                 || (a.phase.before_spawn() && a.dispatch_id.is_some())
+                || (a.package_request.is_some() && a.dispatch_id.is_none())
+                || a.package_request.as_ref().is_some_and(|path| {
+                    !path.is_absolute()
+                        || path.file_name()
+                            != Some(std::ffi::OsStr::new(&format!("package-{}", a.id)))
+                        || path.to_str().is_none_or(|s| s.contains('\0'))
+                })
             {
                 return Err(invalid());
             }

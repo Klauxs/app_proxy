@@ -31,6 +31,11 @@ pub struct PreparedData {
     _directories: Vec<OwnedHandle>,
 }
 
+pub(crate) struct PackageControlRoot {
+    pub root: PathBuf,
+    _directories: Vec<OwnedHandle>,
+}
+
 impl PreparedData {
     /// Physical directory identity, independent of path spelling. Preparation
     /// keeps this directory pinned against replacement while the key is used.
@@ -53,6 +58,55 @@ impl PreparedData {
 }
 
 impl Store {
+    /// Helper requests need the same shared LocalState as isolated package data.
+    /// Only our marked namespace is created; the application's directory is not adopted.
+    pub(crate) fn prepare_package_control(&self, package: &Package) -> Result<PackageControlRoot> {
+        self.prepare_package_control_with(package, local_app_data)
+    }
+
+    fn prepare_package_control_with(
+        &self,
+        package: &Package,
+        local_folder: impl FnOnce() -> Result<PathBuf>,
+    ) -> Result<PackageControlRoot> {
+        let manifest = self.load()?;
+        let mut handles = vec![security::directory(self.root(), false)?];
+        let base = if package.isolated_storage {
+            app_proxy_core::model::safe_relative(Path::new(&package.family_name))
+                .map_err(|e| Error::Invalid(e.0))?;
+            if Path::new(&package.family_name).components().count() != 1 {
+                return Err(Error::Invalid("INVALID_PACKAGE_LOCATOR"));
+            }
+            let local = local_folder()?
+                .join("Packages")
+                .join(&package.family_name)
+                .join("LocalState");
+            handles.push(security::directory(&local, false)?);
+            let container = local.join("AppProxyRust");
+            let mut owner = DataOwner {
+                format: "app-proxy-rust-data".into(),
+                schema_version: 1,
+                owner_sid: manifest.owner_sid.clone(),
+                store_id: None,
+                instance_id: None,
+                package_family: Some(package.family_name.clone()),
+            };
+            handles.push(claim(&container, &owner)?);
+            let base = container.join(manifest.store_id.to_string());
+            owner.store_id = Some(manifest.store_id);
+            handles.push(claim(&base, &owner)?);
+            base
+        } else {
+            self.root().to_owned()
+        };
+        let state = base.join("state");
+        handles.push(directory(&state, &manifest.owner_sid)?);
+        Ok(PackageControlRoot {
+            root: state,
+            _directories: handles,
+        })
+    }
+
     pub fn prepare_instance_data(
         &self,
         instance_id: Uuid,
@@ -160,6 +214,45 @@ impl Store {
     }
 }
 
+pub(crate) fn verify_package_control(
+    base: &Path,
+    store_id: Uuid,
+    sid: &str,
+    family: &str,
+) -> Result<()> {
+    let container = base
+        .parent()
+        .ok_or(Error::Invalid("PACKAGE_CONTROL_PATH_INVALID"))?;
+    let local = container
+        .parent()
+        .ok_or(Error::Invalid("PACKAGE_CONTROL_PATH_INVALID"))?;
+    if base.file_name() != Some(std::ffi::OsStr::new(&store_id.to_string()))
+        || container.file_name() != Some(std::ffi::OsStr::new("AppProxyRust"))
+        || local.file_name() != Some(std::ffi::OsStr::new("LocalState"))
+        || local.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new(family))
+    {
+        return Err(Error::Invalid("PACKAGE_CONTROL_PATH_INVALID"));
+    }
+    for (path, id) in [(container, None), (base, Some(store_id))] {
+        let handle = security::directory(path, false)?;
+        security::verify(handle.as_raw_handle(), sid, true)?;
+        let actual: DataOwner =
+            store::decode(&store::read_protected(&path.join(MARKER), sid, 4096)?)?;
+        let expected = DataOwner {
+            format: "app-proxy-rust-data".into(),
+            schema_version: 1,
+            owner_sid: sid.into(),
+            store_id: id,
+            instance_id: None,
+            package_family: Some(family.into()),
+        };
+        if actual != expected {
+            return Err(Error::Invalid("PACKAGE_CONTROL_OWNER_MISMATCH"));
+        }
+    }
+    Ok(())
+}
+
 fn directory(path: &Path, sid: &str) -> Result<OwnedHandle> {
     if !path.try_exists()? {
         security::no_reparse(
@@ -238,6 +331,62 @@ pub fn local_app_data() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use app_proxy_core::model::Manifest;
+
+    #[test]
+    fn package_control_namespaces_are_shared_marked_and_separate_between_stores() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("local");
+        std::fs::create_dir_all(local.join("Packages/Fixture_publisher/LocalState")).unwrap();
+        let package = Package {
+            family_name: "Fixture_publisher".into(),
+            full_name: "Fixture_1_x64__publisher".into(),
+            app_id: "App".into(),
+            exe: std::env::current_exe().unwrap(),
+            isolated_storage: true,
+        };
+        let first = Store::create(&temp.path().join("first")).unwrap();
+        let second = Store::create(&temp.path().join("second")).unwrap();
+        let a = first
+            .prepare_package_control_with(&package, || Ok(local.clone()))
+            .unwrap();
+        let b = second
+            .prepare_package_control_with(&package, || Ok(local.clone()))
+            .unwrap();
+        assert_ne!(a.root, b.root);
+        let header = first.load().unwrap();
+        verify_package_control(
+            a.root.parent().unwrap(),
+            header.store_id,
+            &header.owner_sid,
+            &package.family_name,
+        )
+        .unwrap();
+        assert!(
+            verify_package_control(
+                b.root.parent().unwrap(),
+                header.store_id,
+                &header.owner_sid,
+                &package.family_name
+            )
+            .is_err()
+        );
+        let again = first
+            .prepare_package_control_with(&package, || Ok(local.clone()))
+            .unwrap();
+        assert_eq!(a.root, again.root);
+        drop(again);
+        drop(a);
+        let foreign = local
+            .join("Packages/Fixture_publisher/LocalState/AppProxyRust")
+            .join(header.store_id.to_string())
+            .join(MARKER);
+        std::fs::write(&foreign, b"{}").unwrap();
+        assert!(
+            first
+                .prepare_package_control_with(&package, || Ok(local))
+                .is_err()
+        );
+    }
 
     fn populated(root: &Path) -> (Store, Uuid) {
         let mut store = Store::create(root).unwrap();

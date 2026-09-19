@@ -21,6 +21,131 @@ fn owner() -> ResourceOwner {
     }
 }
 
+#[test]
+fn package_recovery_revokes_pending_recovers_receipts_and_preserves_uncertainty() {
+    use crate::package_launch::{
+        PackageOutcome,
+        tests::{complete_fixture, publish_for_dispatch},
+    };
+    for mode in ["pending", "created", "consuming", "missing"] {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = ResourceRegistry::open_at(&temp.path().join("resources")).unwrap();
+        let resource = current_resource();
+        let (mut store, owner) = ready_store(&temp.path().join("store"), &resource, Uuid::new_v4());
+        let mut reservation = registry.acquire(resource).unwrap();
+        reservation.reserve(owner).unwrap();
+        let package = crate::package::Package {
+            family_name: "Fixture_publisher".into(),
+            full_name: "Fixture_1_x64__publisher".into(),
+            app_id: "App".into(),
+            exe: std::env::current_exe().unwrap(),
+            isolated_storage: false,
+        };
+        let dispatch = store
+            .dispatch_package_launch(owner.attempt_id, owner.epoch, &package)
+            .unwrap();
+        let permit = reservation.authorize_spawn(dispatch).unwrap();
+        let ticket = if mode == "missing" {
+            drop(permit);
+            None
+        } else {
+            Some(publish_for_dispatch(&store, permit))
+        };
+        let mut child = None;
+        if mode == "created" || mode == "consuming" {
+            complete_fixture(ticket.as_ref().unwrap(), mode == "created");
+            if let PackageOutcome::Created(identity) = ticket.as_ref().unwrap().outcome().unwrap() {
+                child = Some(identity);
+            }
+        }
+        drop(ticket);
+        drop(reservation);
+        drop(store);
+        let mut reopened = Store::open(&temp.path().join("store")).unwrap();
+        reopened.recover_launches(Uuid::new_v4()).unwrap();
+        registry
+            .reconcile_launch(&mut reopened, owner.attempt_id)
+            .unwrap();
+        let result = reopened.launch_request(owner.attempt_id).unwrap().unwrap();
+        match mode {
+            "pending" => {
+                assert!(
+                    matches!(result.phase, LaunchPhase::Failed { code } if code == "APPLICATION_NOT_CREATED")
+                );
+                assert!(!result.resource_pending);
+                assert!(matches!(
+                    reopened
+                        .package_launch_ticket(owner.attempt_id)
+                        .unwrap()
+                        .unwrap()
+                        .outcome()
+                        .unwrap(),
+                    PackageOutcome::NotCreated(_)
+                ));
+            }
+            "created" => {
+                let child = child.unwrap();
+                assert!(
+                    matches!(result.phase, LaunchPhase::Confirmed { process } if process == child)
+                );
+                assert!(process::is_running_exact(&child).unwrap());
+                process::terminate_exact(&child).unwrap();
+            }
+            _ => assert!(matches!(result.phase, LaunchPhase::Indeterminate {})),
+        }
+    }
+}
+
+#[test]
+fn package_recovery_rejects_another_stores_receipt_with_the_same_attempt_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let attempt = Uuid::new_v4();
+    let resource = current_resource();
+    let package = crate::package::Package {
+        family_name: "Fixture_publisher".into(),
+        full_name: "Fixture_1_x64__publisher".into(),
+        app_id: "App".into(),
+        exe: std::env::current_exe().unwrap(),
+        isolated_storage: false,
+    };
+    let mut fixtures = Vec::new();
+    for name in ["a", "b"] {
+        let (mut store, owner) = ready_store(&temp.path().join(name), &resource, attempt);
+        let registry =
+            ResourceRegistry::open_at(&temp.path().join(format!("resources-{name}"))).unwrap();
+        let mut reservation = registry.acquire(current_resource()).unwrap();
+        reservation.reserve(owner).unwrap();
+        let dispatch = store
+            .dispatch_package_launch(attempt, owner.epoch, &package)
+            .unwrap();
+        let permit = reservation.authorize_spawn(dispatch).unwrap();
+        let ticket = crate::package_launch::tests::publish_for_dispatch(&store, permit);
+        fixtures.push((store, reservation, ticket));
+    }
+    let foreign_path = fixtures[1]
+        .0
+        .launch_request(attempt)
+        .unwrap()
+        .unwrap()
+        .package_request;
+    let store = &mut fixtures[0].0;
+    let path = store.root().join("state/launch.json");
+    let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    journal["attempts"][0]["package_request"] = serde_json::to_value(foreign_path).unwrap();
+    store
+        .replace_bounded(
+            "state/launch.json",
+            &serde_json::to_vec(&journal).unwrap(),
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    assert!(store.package_launch_ticket(attempt).is_err());
+    assert!(matches!(
+        fixtures[1].2.outcome().unwrap(),
+        crate::package_launch::PackageOutcome::Pending
+    ));
+}
+
 fn ready_store(
     root: &Path,
     resource: &InstanceResource,

@@ -109,13 +109,21 @@ pub async fn application_candidates(
     application: &crate::installation::ResolvedApplication,
 ) -> Result<Vec<ProcessIdentity>> {
     identity::assert_ordinary_user()?;
-    let caller = identity::current()?;
     let image = application.image().clone();
     let name = application
         .executable()
         .file_name()
         .ok_or(Error::Invalid("EXE_REQUIRED"))?
         .to_owned();
+    candidates_for(image, name, application.package().is_some()).await
+}
+
+async fn candidates_for(
+    image: app_proxy_core::FileIdentity,
+    name: OsString,
+    package: bool,
+) -> Result<Vec<ProcessIdentity>> {
+    let caller = identity::current()?;
     query_with(&QUERY_BUSY, QUERY_BUDGET, move |deadline| {
         let mut candidates = Vec::new();
         for hint in snapshot()? {
@@ -126,7 +134,12 @@ pub async fn application_candidates(
                 Ok(process)
                     if process.user_sid == caller.user_sid
                         && process.session_id == caller.session_id
-                        && process.image_file == image =>
+                        && (process.image_file == image
+                            || (package
+                                && process
+                                    .image_path
+                                    .file_name()
+                                    .is_some_and(|n| n.eq_ignore_ascii_case(&name)))) =>
                 {
                     candidates.push(process)
                 }

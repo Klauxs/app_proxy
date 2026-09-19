@@ -334,6 +334,9 @@ pub struct AuthorizedSpawn<'a> {
     dispatch: crate::launch_state::LaunchDispatch,
 }
 impl AuthorizedSpawn<'_> {
+    pub(crate) fn package_request(&self) -> Option<&Path> {
+        self.dispatch.package_request()
+    }
     pub(crate) fn context(&self) -> crate::launch_state::DispatchIdentity {
         self.dispatch.context()
     }
@@ -498,6 +501,30 @@ impl ResourceReservation {
             && attempt.dispatch_id != claim.dispatch_id
         {
             return Err(Error::Invalid("RESOURCE_LAUNCH_BINDING_MISMATCH"));
+        }
+        if matches!(claim.phase, ResourcePhase::SpawnRequested {})
+            && matches!(
+                attempt.phase,
+                LaunchPhase::SpawnRequested {}
+                    | LaunchPhase::AwaitingIdentity {}
+                    | LaunchPhase::Indeterminate {}
+            )
+            && let Some(ticket) = store.package_launch_ticket(attempt.id)?
+        {
+            // The caller holds the physical resource lock: no original worker
+            // can still publish/activate a helper. Revocation shares the helper's
+            // gate, and never converts Consuming or a missing receipt to failure.
+            match ticket.revoke()? {
+                crate::package_launch::PackageOutcome::Created(process) => {
+                    self.confirm(claim.owner, process)?;
+                    return self.reconcile(store);
+                }
+                crate::package_launch::PackageOutcome::NotCreated(evidence) => {
+                    store.fail_launch_not_created(attempt.id, attempt.epoch, &evidence)?;
+                    return self.reconcile(store);
+                }
+                _ => {}
+            }
         }
         match (&claim.phase, &attempt.phase) {
             (ResourcePhase::Confirmed { process }, phase) => {

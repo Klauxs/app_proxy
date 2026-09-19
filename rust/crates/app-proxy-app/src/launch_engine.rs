@@ -224,7 +224,7 @@ impl LaunchEngine {
         {
             match self.resources.reconcile_launch(store, attempt.id) {
                 // A timed-out worker may still hold the lock and finish its write.
-                Err(Error::Invalid("INSTANCE_RESOURCE_BUSY")) => Ok(()),
+                Err(Error::Invalid("INSTANCE_RESOURCE_BUSY" | "PACKAGE_REQUEST_BUSY")) => Ok(()),
                 other => other,
             }
         } else {
@@ -321,11 +321,6 @@ impl LaunchEngine {
         };
         let (app, instance) = entries(&snapshot, instance_id)?;
         let digest = dependency_digest(&snapshot, instance_id)?;
-        // Package activation and IFEO interception use this engine too, once their
-        // verified platform dispatch is available; do not directly spawn a package.
-        if matches!(app.locator, ApplicationLocator::Msix { .. }) {
-            return Err(Error::Invalid("MSIX_LAUNCH_NOT_IMPLEMENTED"));
-        }
         let locator = app.locator.clone();
         let application = tokio::task::spawn_blocking(move || installation::resolve(&locator))
             .await
@@ -465,7 +460,11 @@ impl LaunchEngine {
             if dependency_digest(&store.load()?, instance_id)? != digest {
                 return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
             }
-            store.dispatch_launch(id, self.epoch)?
+            if let Some(package) = application.package() {
+                store.dispatch_package_launch(id, self.epoch, package)?
+            } else {
+                store.dispatch_launch(id, self.epoch)?
+            }
         };
         let mut reservation = reservation.take().unwrap();
         let configuration = self.configuration.clone();
@@ -479,9 +478,14 @@ impl LaunchEngine {
             mode: CreationMode::Normal,
         };
         tokio::task::spawn_blocking(move || {
-            let _pins = (application, data);
+            let _data = data;
             let spawned = match reservation.authorize_spawn(dispatch) {
-                Ok(permit) => process::spawn_for_attempt(permit, spec),
+                Ok(permit) if application.package().is_some() => {
+                    spawn_package(&configuration, id, owner.epoch, permit, &application, spec)
+                }
+                Ok(permit) => {
+                    process::spawn_for_attempt(permit, spec).map(|started| started.identity)
+                }
                 Err(error) => Err(error),
             };
             #[cfg(test)]
@@ -489,11 +493,11 @@ impl LaunchEngine {
                 hook();
             }
             match spawned {
-                Ok(started) => {
-                    reservation.confirm(owner, started.identity.clone())?;
+                Ok(identity) => {
+                    reservation.confirm(owner, identity.clone())?;
                     configuration
                         .lock()?
-                        .confirm_launch(id, owner.epoch, started.identity)?;
+                        .confirm_launch(id, owner.epoch, identity)?;
                     reservation.reconcile(&mut *configuration.lock()?)?;
                     Ok(())
                 }
@@ -510,6 +514,78 @@ impl LaunchEngine {
         .await
         .map_err(|_| Error::Invalid("LAUNCH_CREATION_INTERRUPTED"))??;
         Ok(())
+    }
+}
+
+fn spawn_package(
+    configuration: &Configuration,
+    id: Uuid,
+    epoch: Uuid,
+    permit: app_proxy_windows::instance_resource::AuthorizedSpawn<'_>,
+    application: &installation::ResolvedApplication,
+    spec: SpawnSpec,
+) -> std::result::Result<app_proxy_core::ProcessIdentity, SpawnFailure> {
+    use app_proxy_windows::package_launch::PackageOutcome;
+    let unknown = |error| SpawnFailure::Indeterminate { error };
+    let helper = std::env::current_exe()
+        .map_err(|e| unknown(e.into()))?
+        .with_file_name("app-proxy-host.exe");
+    let ticket = configuration
+        .lock()
+        .map_err(unknown)?
+        .prepare_package_launch(permit, application, &helper, spec)?;
+    let started = std::time::Instant::now();
+    let cancelled = || -> Result<bool> {
+        Ok(configuration
+            .lock()?
+            .launch_request(id)?
+            .ok_or(Error::Invalid("LAUNCH_ATTEMPT_NOT_FOUND"))?
+            .cancel_requested)
+    };
+    let already_cancelled = cancelled().map_err(unknown)?;
+    if !already_cancelled {
+        configuration
+            .lock()
+            .map_err(unknown)?
+            .advance_launch(
+                id,
+                epoch,
+                &LaunchPhase::SpawnRequested {},
+                LaunchPhase::AwaitingIdentity {},
+            )
+            .map_err(unknown)?;
+        // Even an activation error may have started a helper. Only the gate and
+        // its durable receipt can resolve that uncertainty.
+        let _ = app_proxy_windows::package::activate_launch(
+            application.package().unwrap(),
+            &helper,
+            &ticket.request_path(),
+        );
+    }
+    loop {
+        let ending = cancelled().map_err(unknown)? || started.elapsed() >= Duration::from_secs(22);
+        let outcome = if ending {
+            ticket.revoke()
+        } else {
+            ticket.outcome()
+        };
+        match outcome {
+            Ok(PackageOutcome::Created(process)) => return Ok(process),
+            Ok(PackageOutcome::NotCreated(evidence)) => {
+                return Err(SpawnFailure::NotCreated {
+                    evidence,
+                    error: Error::Invalid("PACKAGE_APPLICATION_NOT_CREATED"),
+                });
+            }
+            Ok(PackageOutcome::Pending | PackageOutcome::Indeterminate)
+            | Err(Error::Invalid("PACKAGE_REQUEST_BUSY"))
+                if !ending => {}
+            Ok(_) | Err(Error::Invalid("PACKAGE_REQUEST_BUSY")) => {
+                return Err(unknown(Error::Invalid("PACKAGE_RESULT_UNKNOWN")));
+            }
+            Err(error) => return Err(unknown(error)),
+        }
+        std::thread::sleep(Duration::from_millis(30));
     }
 }
 

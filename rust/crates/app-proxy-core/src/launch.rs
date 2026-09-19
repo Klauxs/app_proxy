@@ -97,6 +97,10 @@ pub struct LaunchAttempt {
     /// fixed at first admission and cannot be loosened by request replays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
+    /// Set atomically with dispatch, so recovery can distinguish unpublished
+    /// package capability from an ordinary CreateProcess result that was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_request: Option<PathBuf>,
 }
 impl LaunchAttempt {
     pub fn reserves_instance(&self) -> bool {

@@ -12,6 +12,10 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    PackageChild {
+        #[arg(long)]
+        request: PathBuf,
+    },
     Serve {
         #[arg(long)]
         home: PathBuf,
@@ -26,6 +30,9 @@ enum Commands {
 
 fn main() {
     let result = match Cli::parse().command {
+        Commands::PackageChild { request } => {
+            app_proxy_windows::package_launch::run_helper(&request).map_err(Into::into)
+        }
         Commands::ProbeChild { request, args } => app_proxy_app::probe::child(&request, args),
         Commands::Serve { home } => match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -38,7 +45,8 @@ fn main() {
             Err(error) => Err(error.into()),
         },
     };
-    if result.is_err() {
+    if let Err(error) = result {
+        eprintln!("{error}");
         std::process::exit(1);
     }
 }

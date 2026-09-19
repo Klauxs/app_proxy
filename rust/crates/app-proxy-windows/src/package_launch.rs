@@ -97,10 +97,12 @@ impl Store {
         spec: SpawnSpec,
     ) -> std::result::Result<PackageTicket, SpawnFailure> {
         let context = permit.context();
-        let root = self
-            .root()
-            .join("state")
-            .join(format!("package-{}", context.owner.attempt_id));
+        let root = permit
+            .package_request()
+            .ok_or(SpawnFailure::Indeterminate {
+                error: Error::Invalid("PACKAGE_DISPATCH_REQUIRED"),
+            })?
+            .to_owned();
         let result = (|| {
             let package = application
                 .package()
@@ -114,7 +116,11 @@ impl Store {
             {
                 return Err(Error::Invalid("PACKAGE_LAUNCH_BINDING_MISMATCH"));
             }
-            application.verify_current()?;
+            // The engine/activation bridge resolve the current package outside
+            // the store lock; this short publication check keeps the pinned image.
+            if identity::file_identity(application.executable())? != *application.image() {
+                return Err(Error::Invalid("LAUNCH_EXECUTABLE_CHANGED"));
+            }
             crate::ifeo::ensure_plain_creation(&spec.exe)?;
             let helper_image = identity::file_identity(helper)?;
             crate::ifeo::ensure_plain_creation(helper)?;
@@ -151,14 +157,13 @@ impl Store {
         let Some(attempt) = self.launch_request(attempt)? else {
             return Ok(None);
         };
-        let root = self
-            .root()
-            .join("state")
-            .join(format!("package-{}", attempt.id));
+        let Some(root) = &attempt.package_request else {
+            return Ok(None);
+        };
         if !root.try_exists()? {
             return Ok(None);
         }
-        let ticket = PackageTicket::open(&root)?;
+        let ticket = PackageTicket::open(root)?;
         if ticket.request.context.owner.store_id != self.load()?.store_id
             || ticket.request.context.owner.attempt_id != attempt.id
             || ticket.request.context.owner.epoch != attempt.epoch
@@ -560,21 +565,27 @@ fn parents(root: &Path, request: &Request) -> Result<Vec<OwnedHandle>> {
     let state = root
         .parent()
         .ok_or(Error::Invalid("INVALID_PACKAGE_REQUEST_PATH"))?;
-    let home = state
+    let base = state
         .parent()
         .ok_or(Error::Invalid("INVALID_PACKAGE_REQUEST_PATH"))?;
     if state.file_name() != Some(std::ffi::OsStr::new("state")) {
         return Err(Error::Invalid("INVALID_PACKAGE_REQUEST_PATH"));
     }
     let handles = vec![
-        security::directory(home, false)?,
+        security::directory(base, false)?,
         security::directory(state, false)?,
     ];
-    let descriptor = store::describe(home)?;
-    if descriptor.store_id != request.context.owner.store_id
-        || descriptor.owner_sid != request.owner_sid
-    {
-        return Err(Error::Invalid("PACKAGE_LAUNCH_BINDING_MISMATCH"));
+    match store::describe(base) {
+        Ok(descriptor)
+            if descriptor.store_id == request.context.owner.store_id
+                && descriptor.owner_sid == request.owner_sid => {}
+        Ok(_) => return Err(Error::Invalid("PACKAGE_LAUNCH_BINDING_MISMATCH")),
+        Err(_) => crate::instance_data::verify_package_control(
+            base,
+            request.context.owner.store_id,
+            &request.owner_sid,
+            &request.family,
+        )?,
     }
     for handle in &handles {
         security::verify(handle.as_raw_handle(), &request.owner_sid, false)?;
@@ -583,4 +594,4 @@ fn parents(root: &Path, request: &Request) -> Result<Vec<OwnedHandle>> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

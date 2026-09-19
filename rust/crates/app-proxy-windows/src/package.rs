@@ -41,6 +41,16 @@ pub fn resolve(family: &str, app_id: &str) -> Result<Package> {
 
 /// Activates only our bounded probe helper; not a general package launch service.
 pub fn activate_probe(package: &Package, helper: &Path, request: &Path) -> Result<()> {
+    activate(package, helper, request, "probe")
+}
+
+/// The fixed host entry consumes a protected one-use request; bridge success
+/// only acknowledges activation and is never an application creation receipt.
+pub fn activate_launch(package: &Package, helper: &Path, request: &Path) -> Result<()> {
+    activate(package, helper, request, "launch")
+}
+
+fn activate(package: &Package, helper: &Path, request: &Path, operation: &str) -> Result<()> {
     let helper = helper
         .to_str()
         .ok_or(Error::Invalid("NON_UNICODE_HELPER"))?;
@@ -48,7 +58,7 @@ pub fn activate_probe(package: &Package, helper: &Path, request: &Path) -> Resul
         .to_str()
         .ok_or(Error::Invalid("NON_UNICODE_REQUEST"))?;
     let _: serde_json::Value = bridge(&serde_json::json!({
-        "operation":"probe", "family_name":package.family_name, "app_id":package.app_id,
+        "operation":operation, "family_name":package.family_name, "app_id":package.app_id,
         "expected_full_name":package.full_name, "helper":helper, "request":request,
     }))?;
     Ok(())
