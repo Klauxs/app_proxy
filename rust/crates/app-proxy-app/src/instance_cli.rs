@@ -172,7 +172,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 print(&catalog)?;
             } else {
                 println!(
-                    "配置版本 {}；以下为登记信息，运行状态未检查，保护功能尚未实现。",
+                    "配置版本 {}；以下为登记信息，运行及保护实际状态未检查，可使用 guard status 查询。",
                     catalog.revision
                 );
                 for instance in &catalog.instances {
@@ -364,14 +364,57 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Remove { id } => ConfigAction::RemoveInstance { instance_id: id },
         Command::Request { .. } => unreachable!(),
     };
+    let check_guard = matches!(
+        &action,
+        ConfigAction::CreateInstance { .. }
+            | ConfigAction::CloneInstance { .. }
+            | ConfigAction::BindInstance { .. }
+    );
     let (request_id, receipt) = submit(&root, catalog.revision, action, json).await?;
+    let mut protection = None;
+    if check_guard {
+        match coordinator::guard_status(root.clone(), receipt.entity_id).await {
+            Ok(status) if status.desired == Desired::Enabled => {
+                let requires_action = if status.phase == crate::guard_control::GuardPhase::Blocked {
+                    "verify_guard_integrations"
+                } else {
+                    "authorize_guard_components"
+                };
+                if json {
+                    print(
+                        &serde_json::json!({"request_id":request_id,"receipt":receipt,"application_started":false,
+                        "protection":status,"requires_action":requires_action}),
+                    )?;
+                } else {
+                    println!(
+                        "实例 {} 已保存。Guard 已按配置开启，但组件尚未授权或核验，保护未生效。当前版本尚未接入前台组件安装；可用 guard status 查询。",
+                        receipt.entity_id
+                    );
+                }
+                return Err(fail(5, "实例已保存；保护需要前台组件授权或核验。"));
+            }
+            Ok(status) => protection = Some(status),
+            Err(_) => {
+                if json {
+                    print(
+                        &serde_json::json!({"request_id":request_id,"receipt":receipt,"application_started":false,
+                        "protection":"unknown","requires_action":"query_guard_status"}),
+                    )?;
+                }
+                return Err(fail(
+                    6,
+                    "实例配置已保存；保护状态暂未确认，请查询 guard status，不要重复创建。",
+                ));
+            }
+        }
+    }
     if json {
         print(
-            &serde_json::json!({"request_id":request_id,"receipt":receipt,"application_started":false,"protection":"not_implemented"}),
+            &serde_json::json!({"request_id":request_id,"receipt":receipt,"application_started":false,"protection":protection}),
         )
     } else {
         println!(
-            "配置已保存：实例 {}，版本 {}。未启动应用；保护功能尚未实现。",
+            "配置已保存：实例 {}，版本 {}。应用未启动；保护实际状态可使用 guard status 查询。",
             receipt.entity_id, receipt.revision
         );
         Ok(())

@@ -1,19 +1,20 @@
 //! Read-only per-instance scan. A correction is a hint, never stop authority;
 //! submit_guard repeats attribution, configuration and resource checks.
 use super::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuardScan {
     pub instance_id: Uuid,
     pub revision: u64,
     pub observation: GuardObservation,
 }
 
-#[derive(Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuardObservation {
-    Disabled,
+    Disabled {},
     Pending {
         attempt_id: Uuid,
     },
@@ -21,7 +22,7 @@ pub enum GuardObservation {
         process: app_proxy_core::ProcessIdentity,
         network: LaunchNetwork,
     },
-    Absent,
+    Absent {},
     Compliant {
         process: app_proxy_core::ProcessIdentity,
     },
@@ -29,7 +30,7 @@ pub enum GuardObservation {
         target: GuardTarget,
     },
     Blocked {
-        code: &'static str,
+        code: String,
     },
 }
 
@@ -40,7 +41,7 @@ impl LaunchEngine {
         let snapshot = self.configuration.snapshot()?;
         let (application, instance) = entries(&snapshot, instance_id)?;
         let observation = if instance.guard.desired != Desired::Enabled {
-            GuardObservation::Disabled
+            GuardObservation::Disabled {}
         } else {
             match tokio::time::timeout(
                 Duration::from_secs(5),
@@ -49,12 +50,12 @@ impl LaunchEngine {
             .await
             {
                 Ok(Ok(observation)) => observation,
-                Ok(Err(Error::Invalid(code))) => GuardObservation::Blocked { code },
+                Ok(Err(Error::Invalid(code))) => GuardObservation::Blocked { code: code.into() },
                 Ok(Err(_)) => GuardObservation::Blocked {
-                    code: "GUARD_OBSERVATION_FAILED",
+                    code: "GUARD_OBSERVATION_FAILED".into(),
                 },
                 Err(_) => GuardObservation::Blocked {
-                    code: "GUARD_SCAN_TIMEOUT",
+                    code: "GUARD_SCAN_TIMEOUT".into(),
                 },
             }
         };
@@ -67,7 +68,7 @@ impl LaunchEngine {
         let store = self.configuration.lock()?;
         let observation = if store.load()?.revision != snapshot.revision {
             GuardObservation::Blocked {
-                code: "LAUNCH_CONFIG_CHANGED",
+                code: "LAUNCH_CONFIG_CHANGED".into(),
             }
         } else if matches!(observation, GuardObservation::Correction { .. }) {
             if let Some(attempt) = store
@@ -122,7 +123,7 @@ impl LaunchEngine {
             });
         }
         let NetworkBinding::Profile { profile_id } = instance.network else {
-            return Ok(GuardObservation::Disabled);
+            return Ok(GuardObservation::Disabled {});
         };
         let endpoint = snapshot
             .profiles
@@ -152,7 +153,7 @@ impl LaunchEngine {
         let candidates =
             query_when_ready(|| process_query::application_candidates(&resolved)).await?;
         if candidates.is_empty() {
-            return Ok(GuardObservation::Absent);
+            return Ok(GuardObservation::Absent {});
         }
         let data = {
             let store = self.configuration.lock()?;
@@ -198,7 +199,7 @@ impl LaunchEngine {
                 ProxyArguments::Unknown => Err(Error::Invalid("GUARD_PROXY_ARGUMENTS_UNKNOWN")),
             },
             None if auxiliary => Err(Error::Invalid("GUARD_AUXILIARY_STILL_RUNNING")),
-            None => Ok(GuardObservation::Absent),
+            None => Ok(GuardObservation::Absent {}),
         }
     }
 }

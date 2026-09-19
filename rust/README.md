@@ -20,7 +20,7 @@ cargo fmt --all -- --check
 
 本机 Rust 安装在项目 `.tools` 内，未修改系统 PATH；可使用 `./scripts/cargo.ps1 build --workspace --locked`。传递 Cargo 的 `-p` 或 `--` 等参数时用数组，避免 PowerShell 参数绑定冲突，例如 `./scripts/cargo.ps1 -CargoArgs @('clippy','--workspace','--all-targets','--locked','--','-D','warnings')`。
 
-`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑和应用启动均有持久请求记录，支持去重与查询。开发版 IPC 为 2.8，CLI 与 host 必须成套使用。
+`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑和应用启动均有持久请求记录，支持去重与查询。开发版 IPC 为 2.9，CLI 与 host 必须成套使用。
 
 实例配置命令已可使用（仅保存配置，不启动应用或启用保护）：
 
@@ -52,6 +52,18 @@ cargo fmt --all -- --check
 Guard 纠正执行服务已实现并通过测试：只针对已登记且归属明确的误启动主进程，先关闭再准备代理；失败保持关闭，已正确使用代理的应用不因网络故障被关闭。自动监控、Guard 授权和 IFEO 尚未接入，当前 CLI 启动不代表这些保护已生效。
 
 内部只读扫描已能排除未管理原版、识别参数合规及误启动，并保留运行会话的历史绑定。扫描不创建分身目录，不自行启用保护或关闭进程；未决启动、多个主进程或身份不明时阻止纠正建议。
+
+Guard 配置与诊断入口：
+
+```powershell
+.\target\debug\app-proxy.exe guard status <实例ID> --json
+.\target\debug\app-proxy.exe guard enable <实例ID> --json
+.\target\debug\app-proxy.exe guard disable <实例ID> --json
+```
+
+`status` 同时返回启用意图、实际状态、监听/IFEO 组件状态和只读进程观察。当前尚未接入提权组件部署，因此启用后显示 `needs_authorization`；已有集成登记仅显示 `unverified/blocked`，不会仅凭配置声明保护已生效。只管理分身时 IFEO 为 `not_applicable`。扫描繁忙时照常返回组件状态，并以 `GUARD_SCAN_BUSY` 表示本次没有新的进程观察。
+
+`enable/disable` 使用持久配置请求，未改变目标状态时不重复提交。启用意图保存后若组件未完成，输出 `requires_action` 并返回退出码 5；已有 IFEO 登记时停用返回 `INTEGRATION_CLEANUP_REQUIRED` 并保留配置。Codex/Claude 代理实例创建、克隆及绑定也会在保存成功后明确报告这项待处理状态，不因退出码 5 重复创建实例。状态查询成功本身返回 0，不代表保护 active。若保存后的状态查询失败，会保留原请求回执并返回 6。组件安装、前台 UAC、ETW 和自动纠正触发仍待接入。
 
 手动代理配置入口（HTTP/SOCKS5；本地入口自动分配）：
 

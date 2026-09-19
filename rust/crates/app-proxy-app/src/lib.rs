@@ -9,6 +9,8 @@ mod core_installer;
 pub mod core_manager;
 mod core_reconfigure;
 mod foreground;
+pub mod guard_cli;
+pub mod guard_control;
 pub mod instance_cli;
 pub mod launch_cli;
 pub mod launch_engine;

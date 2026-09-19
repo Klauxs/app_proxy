@@ -16,6 +16,13 @@ struct Cli {
 enum Commands {
     /// 启动已登记实例，或查询/取消原启动请求
     Launch(app_proxy_app::launch_cli::Command),
+    /// 查看或配置实例保护；授权组件未完成时会明确提示
+    Guard {
+        #[command(subcommand)]
+        command: app_proxy_app::guard_cli::Command,
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// 创建、查看和编辑手动代理配置
     Proxy {
         #[command(subcommand)]
@@ -110,6 +117,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     identity::assert_ordinary_user()?;
     let cli = Cli::parse();
     match cli.command {
+        Commands::Guard { command, json } => {
+            let root = cli
+                .home
+                .map(Ok)
+                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            runtime.block_on(app_proxy_app::guard_cli::run(root, command, json))?;
+            Ok(())
+        }
         Commands::Launch(command) => {
             let root = cli
                 .home
@@ -172,7 +191,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 print(&status)
             } else {
                 println!(
-                    "协调进程已连接；配置版本 {}，应用 {}，实例 {}，代理 {}。\n可使用 launch 启动普通 EXE；MSIX、Guard/IFEO 和日常菜单仍在实现中。",
+                    "协调进程已连接；配置版本 {}，应用 {}，实例 {}，代理 {}。\n可使用 launch 启动已登记实例，guard status 查看保护状态；保护组件授权和日常菜单仍在实现中。",
                     status.revision, status.applications, status.instances, status.profiles
                 );
                 Ok(())

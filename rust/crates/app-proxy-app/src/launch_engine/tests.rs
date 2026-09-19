@@ -715,7 +715,7 @@ async fn guard_scan_distinguishes_original_compliant_and_misconfigured_without_s
             .await
             .unwrap();
         match (isolated, matching, scan.observation) {
-            (false, _, GuardObservation::Absent) => {}
+            (false, _, GuardObservation::Absent {}) => {}
             (true, true, GuardObservation::Compliant { process }) => {
                 assert_eq!(process, child.0.identity)
             }
@@ -755,7 +755,7 @@ async fn guard_scan_does_not_prepare_missing_data_and_pending_launches_are_defer
             .await
             .unwrap()
             .observation,
-        GuardObservation::Absent
+        GuardObservation::Absent {}
     ));
     assert!(!data.exists());
     let request = fixture.request();
@@ -818,9 +818,7 @@ async fn guard_scan_refuses_ambiguous_multiple_mains_and_disabled_instances() {
             .await
             .unwrap()
             .observation,
-        GuardObservation::Blocked {
-            code: "GUARD_MULTIPLE_MAIN_PROCESSES"
-        }
+        GuardObservation::Blocked { code } if code == "GUARD_MULTIPLE_MAIN_PROCESSES"
     ));
     fixture.edit(|m| m.instances[0].guard.desired = Desired::Disabled);
     assert!(matches!(
@@ -830,7 +828,7 @@ async fn guard_scan_refuses_ambiguous_multiple_mains_and_disabled_instances() {
             .await
             .unwrap()
             .observation,
-        GuardObservation::Disabled
+        GuardObservation::Disabled {}
     ));
     assert!(process::is_running_exact(&first.0.identity).unwrap());
     assert!(process::is_running_exact(&second.0.identity).unwrap());
@@ -863,9 +861,7 @@ async fn guard_scan_rechecks_edits_and_new_pending_work_before_returning_a_corre
         if edit {
             assert!(matches!(
                 scan.observation,
-                GuardObservation::Blocked {
-                    code: "LAUNCH_CONFIG_CHANGED"
-                }
+                GuardObservation::Blocked { code } if code == "LAUNCH_CONFIG_CHANGED"
             ));
         } else {
             assert!(matches!(scan.observation, GuardObservation::Pending { .. }));
@@ -898,21 +894,15 @@ async fn guard_scan_timeout_cannot_accumulate_detached_resolvers() {
         .unwrap();
     assert!(matches!(
         fixture.engine.observe_guard(id).await.unwrap().observation,
-        GuardObservation::Blocked {
-            code: "GUARD_RESOLUTION_BUSY"
-        }
+        GuardObservation::Blocked { code } if code == "GUARD_RESOLUTION_BUSY"
     ));
     assert!(matches!(
         scan.await.unwrap().observation,
-        GuardObservation::Blocked {
-            code: "GUARD_SCAN_TIMEOUT"
-        }
+        GuardObservation::Blocked { code } if code == "GUARD_SCAN_TIMEOUT"
     ));
     assert!(matches!(
         fixture.engine.observe_guard(id).await.unwrap().observation,
-        GuardObservation::Blocked {
-            code: "GUARD_RESOLUTION_BUSY"
-        }
+        GuardObservation::Blocked { code } if code == "GUARD_RESOLUTION_BUSY"
     ));
     *fixture.engine.before_guard_resolution.lock().unwrap() = None;
     release_tx.send(()).unwrap();
@@ -923,7 +913,7 @@ async fn guard_scan_timeout_cannot_accumulate_detached_resolvers() {
     }
     assert!(matches!(
         fixture.engine.observe_guard(id).await.unwrap().observation,
-        GuardObservation::Absent
+        GuardObservation::Absent {}
     ));
 }
 

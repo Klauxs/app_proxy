@@ -303,6 +303,116 @@ async fn launch_wait_does_not_hold_rpc_slots_and_cancellation_releases_idle_owne
 }
 
 #[tokio::test]
+async fn guard_status_client_rejects_old_minor_before_sending_operation() {
+    let fixture = Fixture::new();
+    let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+    let status = fixture.shared.identity.clone();
+    let server = tokio::spawn(async move {
+        let mut connection = listener.accept().await.unwrap();
+        connection.receive::<Hello>().await.unwrap();
+        let mut greeting = hello(status.store_id, status.session_id, Some(status.epoch));
+        greeting.protocol_minor = 8;
+        connection
+            .send(&Welcome::Ready { hello: greeting })
+            .await
+            .unwrap();
+        assert!(connection.receive::<Request>().await.is_err());
+    });
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::GuardStatus {
+                    instance_id: fixture.instance
+                }
+            )
+            .await,
+        Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+    ));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn guard_status_busy_scan_leaves_metadata_and_other_requests_available() {
+    let fixture = Fixture::new();
+    let held = fixture
+        .shared
+        .guard_queries
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let server = fixture.server();
+    let mut queries = tokio::task::JoinSet::new();
+    for _ in 0..MAX_CLIENTS * 2 {
+        let store_id = fixture.shared.identity.store_id;
+        let instance_id = fixture.instance;
+        queries.spawn(async move {
+            rpc(
+                store_id,
+                &policy(),
+                Duration::from_secs(3),
+                Request {
+                    protocol_major: PROTOCOL_MAJOR,
+                    request_id: Uuid::new_v4(),
+                    operation: Operation::GuardStatus { instance_id },
+                },
+            )
+            .await
+            .unwrap()
+        });
+    }
+    while let Some(reply) = queries.join_next().await {
+        let Reply::GuardStatus { status } = reply.unwrap() else {
+            panic!("missing guard status")
+        };
+        assert!(status.scan.is_none());
+        assert_eq!(status.diagnostic.as_deref(), Some("GUARD_SCAN_BUSY"));
+        assert!(status.phase == crate::guard_control::GuardPhase::Disabled);
+    }
+    assert!(matches!(
+        fixture
+            .rpc(Uuid::new_v4(), Operation::Status {})
+            .await
+            .unwrap(),
+        Reply::Status { .. }
+    ));
+    drop(held);
+    let Reply::GuardStatus { status } = fixture
+        .rpc(
+            Uuid::new_v4(),
+            Operation::GuardStatus {
+                instance_id: fixture.instance,
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("missing status")
+    };
+    assert!(status.diagnostic.is_none());
+    assert!(matches!(
+        status.scan.unwrap().observation,
+        crate::launch_engine::GuardObservation::Disabled {}
+    ));
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        fixture
+            .shared
+            .configuration
+            .lock()
+            .unwrap()
+            .launch_attempts()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn launch_client_rejects_old_minor_before_sending_operation() {
     for (minor, expected_revision) in [(6, None), (7, Some(1))] {
         let fixture = Fixture::new();

@@ -60,6 +60,157 @@ fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 #[test]
+fn guard_cli_keeps_clone_only_scope_and_reports_authorization_until_components_exist() {
+    let (_temp, root, exe) = setup();
+    let mut owner = Owner::capture(&root);
+    let proxy = ok(
+        &root,
+        &[
+            "proxy",
+            "create",
+            "--name",
+            "guard profile",
+            "--protocol",
+            "http",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "1",
+            "--json",
+        ],
+    );
+    let profile = proxy["receipt"]["entity_id"].as_str().unwrap();
+    let created = cli(
+        &root,
+        &[
+            "instance",
+            "create",
+            "--exe",
+            exe.to_str().unwrap(),
+            "--adapter",
+            "codex",
+            "--data",
+            "isolated",
+            "--proxy",
+            profile,
+            "--json",
+        ],
+    );
+    assert_eq!(
+        created.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let id = created["receipt"]["entity_id"].as_str().unwrap();
+    assert_eq!(created["requires_action"], "authorize_guard_components");
+    assert_eq!(created["protection"]["phase"], "needs_authorization");
+    assert_eq!(created["protection"]["ifeo"], "not_applicable");
+    assert_eq!(
+        created["protection"]["scan"]["observation"]["state"],
+        "absent"
+    );
+    let status = ok(&root, &["guard", "status", id, "--json"]);
+    assert_eq!(status["status"]["desired"], "enabled");
+    assert_eq!(status["status"]["listener"], "needs_authorization");
+    assert!(status["request_id"].is_null());
+    let disabled = ok(&root, &["guard", "disable", id, "--json"]);
+    assert_eq!(disabled["status"]["phase"], "disabled");
+    let disabled_again = ok(&root, &["guard", "disable", id, "--json"]);
+    assert!(disabled_again["request_id"].is_null());
+    assert_eq!(
+        disabled_again["status"]["revision"],
+        disabled["status"]["revision"]
+    );
+    let enabled = cli(&root, &["guard", "enable", id, "--json"]);
+    assert_eq!(enabled.status.code(), Some(5));
+    let enabled: Value = serde_json::from_slice(&enabled.stdout).unwrap();
+    let request = enabled["request_id"].as_str().unwrap();
+    let receipt = ok(&root, &["instance", "request", request, "--json"]);
+    assert_eq!(receipt["result"]["outcome"]["receipt"]["entity_id"], id);
+    owner.stop();
+    let store = Store::open(&root).unwrap();
+    let manifest = store.load().unwrap();
+    assert_eq!(manifest.instances.len(), 1);
+    assert!(matches!(
+        manifest.instances[0].data,
+        InstanceData::Isolated { .. }
+    ));
+    assert!(manifest.integrations.ifeo.is_empty());
+    assert!(manifest.integrations.guard_login_task.is_none());
+    assert!(store.launch_attempts().unwrap().is_empty());
+    assert!(!root.join("instances").exists());
+}
+
+#[test]
+fn guard_cli_requires_ifeo_for_original_and_never_claims_manifest_registration_is_active() {
+    let (_temp, root, exe) = setup();
+    let created = create(&root, &exe, &[]);
+    let id = created["receipt"]["entity_id"].as_str().unwrap();
+    let mut owner = Owner::capture(&root);
+    let enable_direct = cli(&root, &["guard", "enable", id, "--json"]);
+    assert_eq!(enable_direct.status.code(), Some(2));
+    let proxy = ok(
+        &root,
+        &[
+            "proxy",
+            "create",
+            "--name",
+            "guard",
+            "--protocol",
+            "http",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "1",
+            "--json",
+        ],
+    );
+    let profile = proxy["receipt"]["entity_id"].as_str().unwrap();
+    ok(
+        &root,
+        &["instance", "bind", id, "--proxy", profile, "--json"],
+    );
+    let enabled = cli(&root, &["guard", "enable", id, "--json"]);
+    assert_eq!(enabled.status.code(), Some(5));
+    let enabled: Value = serde_json::from_slice(&enabled.stdout).unwrap();
+    assert_eq!(enabled["status"]["ifeo"], "needs_authorization");
+    owner.stop();
+    let mut store = Store::open(&root).unwrap();
+    let mut manifest = store.load().unwrap();
+    manifest.integrations.ifeo.push(IfeoRegistration {
+        id: Uuid::new_v4(),
+        revision: 1,
+        application_id: manifest.applications[0].id,
+        default_instance_id: id.parse().unwrap(),
+        desired: Desired::Enabled,
+        owner_sid: manifest.owner_sid.clone(),
+        store_id: manifest.store_id,
+        installed_target: InstalledTarget {
+            path: exe.clone(),
+            file_identity: identity::file_identity(&exe).unwrap(),
+            package_full_name: None,
+        },
+        registration_generation: Uuid::new_v4(),
+    });
+    store.commit(manifest.revision, manifest).unwrap();
+    drop(store);
+    owner = Owner::capture(&root);
+    let status = ok(&root, &["guard", "status", id, "--json"]);
+    assert_eq!(status["status"]["phase"], "blocked");
+    assert_eq!(status["status"]["ifeo"], "unverified");
+    let disabled = cli(&root, &["guard", "disable", id, "--json"]);
+    assert_eq!(disabled.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&disabled.stdout).contains("INTEGRATION_CLEANUP_REQUIRED"));
+    assert_eq!(
+        ok(&root, &["guard", "status", id, "--json"])["status"]["desired"],
+        "enabled"
+    );
+    owner.stop();
+}
+
+#[test]
 fn proxy_cli_edits_credentials_keeps_endpoint_and_redacts_all_output() {
     use std::{io::Write, process::Stdio};
     let (_temp, root, _) = setup();

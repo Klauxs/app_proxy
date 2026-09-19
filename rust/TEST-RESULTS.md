@@ -306,3 +306,15 @@ LaunchEngine 新增内部 Guard 纠正入口，普通请求的 origin 标签不�
 6 项真实夹具扫描回归覆盖：未管理原版、合规/误启动；没有进程时不创建目录；未决启动；已确认直连会话切换代理后的历史绑定保留；多个 main 和禁用；最终配置/新请求竞争；解析线程超时后仍占单槽与恢复。2 项目录回归覆盖本地和 LocalState 未创建命名空间、缺子目录、既有目录 pin 与 owner 保留。独立审查全部复跑通过。全量 workspace 227 项通过、21 项顶层 ignored，clippy -D warnings、fmt/diff 通过。
 
 本批没有自动启用监听或发起停止，没有代理健康检查或系统注册变更。扫描证据并不表示 Guard active；授权/组件状态、周期扫描/ETW、用户界面和 IFEO 接入仍待实现。
+
+**Guard CLI 与授权状态（2026-09-20）**
+
+新增 guard status/enable/disable 和 GuardStatus RPC（开发版 2.9）。状态分别提供 desired、disabled/needs_authorization/blocked、监听和 IFEO 组件、只读扫描。没有安装验证证据时不产生 active；旧 manifest 中的任务/IFEO 登记只标记 unverified。只管理分身时 IFEO 不适用。查询只读且不会触发 UAC、注册或停止应用。
+
+启停复用持久化 BindInstance 事务和现有回执查询，不改变目标状态时不增加 revision。直接网络不允许开启 Guard，已有 IFEO 登记不能只关闭配置。组件尚未就绪时 enable 保留配置回执、返回 requires_action/5；status 查询本身成功返回 0。实例创建/克隆/绑定后也检查保护状态，默认启用 Guard 的代理实例保存成功但尚未完成授权时返回 5；若后续状态查询失败保留已提交回执并返回 6，不把已保存配置描述成未执行。保护诊断不会自动升级为纠正动作。
+
+昂贵状态扫描在 coordinator 内最多一个；繁忙时其他查询即时返回配置/组件状态及 GUARD_SCAN_BUSY，避免占满所有 RPC 槽。新客户端连接旧 minor 8 时在发送 GuardStatus 前拒绝。GuardScan 新增 Deserialize；独立 review 发现 serde tagged unit 变体忽略额外字段，已将 Disabled/Absent 改为空结构体变体，JSON 形状不变且未知字段拒绝。
+
+新增 2 项真实 CLI、2 项 RPC 和 1 项严格 JSON 回归；独立复跑 17 项 Guard 相关测试通过。CLI 验证只分身范围、缺授权回执、重复禁用不改 revision、直连拒绝、原版 IFEO 需求、伪造的配置登记不产生 active、未清理 IFEO 时禁止禁用；仅写临时 store 元数据，没有系统 IFEO 或 UAC 操作。全量 workspace 232 项通过、21 项顶层 ignored；最后输出文本/状态字段调整后全部 10 项 CLI 契约再次通过，clippy -D warnings、fmt/diff 通过。
+
+组件授权部署、后台监听、ETW、定时扫描纠正与 IFEO 注册执行仍未接入。本次入口明确暴露待完成状态，不能作为这些功能已完成的证据。

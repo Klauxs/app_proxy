@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 8;
+const PROTOCOL_MINOR: u32 = 9;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -87,6 +87,9 @@ enum Operation {
     CancelLaunch {
         request_id: Uuid,
     },
+    GuardStatus {
+        instance_id: Uuid,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -121,6 +124,9 @@ enum Reply {
     LaunchStatus {
         attempt: Option<LaunchAttempt>,
     },
+    GuardStatus {
+        status: Box<crate::guard_control::GuardStatus>,
+    },
     Error {
         code: String,
     },
@@ -131,6 +137,7 @@ struct Shared {
     configuration: Arc<Configuration>,
     core: CoreControl,
     launch: Arc<crate::launch_engine::LaunchEngine>,
+    guard_queries: Arc<tokio::sync::Semaphore>,
     jobs: AtomicUsize,
     job_finished: tokio::sync::Notify,
 }
@@ -161,6 +168,7 @@ impl Shared {
             configuration,
             core,
             launch,
+            guard_queries: Arc::new(tokio::sync::Semaphore::new(1)),
             jobs: AtomicUsize::new(0),
             job_finished: tokio::sync::Notify::new(),
         })
@@ -224,6 +232,9 @@ impl Shared {
                 snapshot: self.core.snapshot()?,
             }),
             Operation::Launch { .. } => Err(Error::Invalid("LAUNCH_REQUIRES_ADMISSION")),
+            Operation::GuardStatus { .. } => {
+                Err(Error::Invalid("GUARD_STATUS_REQUIRES_ASYNC_QUERY"))
+            }
             Operation::LaunchStatus { request_id } => Ok(Reply::LaunchStatus {
                 attempt: self.launch.status(request_id)?,
             }),
@@ -400,6 +411,36 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if let Operation::GuardStatus { instance_id } = request.operation {
+        let permit = shared.guard_queries.clone().try_acquire_owned().ok();
+        let runtime = tokio::runtime::Handle::current();
+        let result = tokio::task::spawn_blocking(move || {
+            let scan_allowed = permit.is_some();
+            let _permit = permit;
+            runtime.block_on(crate::guard_control::status(
+                &shared.configuration,
+                &shared.launch,
+                instance_id,
+                scan_allowed,
+            ))
+        })
+        .await
+        .map_err(|_| Error::Invalid("GUARD_STATUS_WORKER_FAILED"))?;
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: match result {
+                    Ok(status) => Reply::GuardStatus {
+                        status: Box::new(status),
+                    },
+                    Err(error) => Reply::Error {
+                        code: safe_error(error),
+                    },
+                },
+            })
+            .await;
+    }
     if let Operation::Launch {
         instance_id,
         origin,
@@ -558,6 +599,9 @@ async fn rpc(
     {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
+    if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 9 {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     let request_id = request.request_id;
     connection.send(&request).await?;
     let response: Response = connection.receive().await?;
@@ -699,6 +743,23 @@ pub async fn cancel_launch(root: PathBuf, request_id: Uuid) -> Result<LaunchAtte
         Reply::LaunchStatus {
             attempt: Some(attempt),
         } => Ok(attempt),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn guard_status(
+    root: PathBuf,
+    instance_id: Uuid,
+) -> Result<crate::guard_control::GuardStatus> {
+    match client_operation(root, Uuid::new_v4(), Operation::GuardStatus { instance_id }).await? {
+        Reply::GuardStatus { status }
+            if status.instance_id == instance_id
+                && status.scan.as_ref().is_none_or(|s| {
+                    s.instance_id == instance_id && s.revision == status.revision
+                }) =>
+        {
+            Ok(*status)
+        }
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
 }

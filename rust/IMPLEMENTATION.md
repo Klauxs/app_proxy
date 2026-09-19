@@ -31,6 +31,7 @@
 | Guard/ETW | 待实现 | 默认范围、普通/提权分工、事件/扫描、身份未知、限流及未管理进程存活 |
 | Guard 纠正执行服务 | 已实现，独立 review 通过；自动触发待接入 | 精确误启动主进程、持久一次性停止许可、全局限流、辅助残留等待及停止后代理失败禁止直连；9 项新增回归通过，不自动监听或注册 IFEO |
 | Guard 只读扫描 | 已实现，独立 review 通过；监听接入待续 | 登记实例归属、历史会话绑定保留、未决/歧义保守处理，目录不创建；扫描结束复核 revision/未决请求，超时解析线程不累积 |
+| Guard CLI / 授权状态边界 | 已实现，独立 review 通过；组件安装待续 | status/enable/disable、desired/实际/组件分离；只登记分身 IFEO 不适用，保存后未授权返回 requires_action/5，已有 IFEO 不静默停用；查询不会激活保护 |
 | 精确进程正常关闭 | 平台能力已实现，独立 review 通过 | 同用户/session/完整身份、限时 WM_CLOSE、1.5 秒等待及显式强制结束，3 项真实隐藏窗口测试通过；实例归属授权、辅助进程收尾及 Guard/CLI 接入待续 |
 | Guard 代理参数证据 | 平台能力已实现，独立 review 通过 | 目标主进程的匹配/不匹配/未知，支持 HTTP literal 地址及裸地址等价；其他实例与辅助不提供纠正依据；运行健康、Guard 动作和监听待续 |
 | 中文菜单/快捷方式/维护 | 待实现 | 端到端创建启动、改名/绑定/克隆/移除、保护授权、入口修复及保留数据卸载 |
@@ -89,3 +90,5 @@
 - Guard 纠正执行服务：独立 review 及增量复审通过，提交主题 `feat(rust): execute guarded instance correction with durable stop intent`。新增内部入口、一次性持久停止授权、跨 store 物理限流、精确关闭和辅助残留等待；代理失败不直连。停止前后取消/配置变更、迟到 worker、回执丢失恢复均有真实夹具回归。全量 219 项通过、21 项顶层 ignored；最终内存布局与测试锁作用域修订后 clippy 和 Guard 定向测试通过。尚未启用自动扫描/ETW/IFEO，无用户应用被关闭。
 
 - Guard 只读实例扫描：独立 review 及增量复审通过，提交主题 `feat(rust): scan guarded instances without disturbing managed sessions`。扫描保留 Confirmed 的历史网络绑定，排除未管理原版，未决/身份未知/多个主进程不输出纠正目标；完成后再次检查配置 revision 和新未决请求。新增只打开既有分身目录的接口，不创建或认领 store/LocalState 数据。独立复跑 6 项扫描和 2 项目录测试通过；全量 227 项通过、21 项顶层 ignored，clippy/fmt/diff 通过。解析工作线程持有单槽直到实际返回，5 秒扫描超时不会堆积后台解析。尚未接自动监听、授权、ETW 或 IFEO。
+
+- Guard CLI 与授权状态边界：独立 review 及 JSON 严格性修复复审通过，提交主题 `feat(rust): expose guard configuration and authorization status`。新增 status/enable/disable、2.9 RPC、单槽观察及旧 host 拒绝；保留配置回执，组件未授权返回 requires_action/5，现有 IFEO 不允许静默停用。只分身 IFEO 不适用、manifest 登记不视为实际 active。新增 5 项回归，全量 232 项通过、21 项 ignored；输出调整后 10 项 CLI 契约再次通过，独立复跑 17 项 Guard 测试通过，clippy/fmt/diff 通过。没有安装特权组件或自动监听/纠正。
