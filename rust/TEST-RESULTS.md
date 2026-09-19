@@ -175,3 +175,14 @@ journal 区分 Prepared、Switching、Committing、Committed、Restoring、Resto
 真实 CLI→host 集成验证 JSON 预览后退出码 5 且原内核存活、改名后拒绝旧确认、显式执行失败后旧配置保留/内核 Down、重复恢复终态不重新创建进程、无永久未决回执。两项真实集成显式运行通过，独立 reviewer 也分别复跑通过。全量 workspace 145 项通过、11 项顶层 ignored，clippy/fmt 通过；未启动用户 Codex/Claude 或写 IFEO。
 
 当前重配置支持已有运行 profile 的手动上游编辑。活动集合扩容/移除、无身份 Starting 的进一步进程核对、应用启动许可及持续故障监控仍待实现；`core status` 显示最近计划/阶段，`core recover-update` 只执行已有 journal 支持的核对。不会以这些组件证据宣称整套代理/应用/Guard 完成。
+
+
+**共享 core 代理集合扩容（2026-09-20）**
+
+`core start` 请求包含当前共享内核缺少的代理时，创建原集合与请求集合的并集配置。候选通过原程序 `check` 后展示旧入口中断影响、新增入口及已保存实例绑定；默认返回，显式确认或 `--apply-to-running` 才切换。已有子集复用同一个精确进程。扩容保持旧端口，保存的 manifest 和 revision 不变；新增出口检查失败时恢复旧集合，原集合内至少一条路由可用且全部入口 PID 确认才报告恢复成功。
+
+3 项新增平台测试覆盖集合约束、预览零切换、丢失准备应答恢复、提交 intent 重开、manifest 不变、禁止夹带配置改动/删除旧入口，以及上一批 Rust schema 1 编辑 journal/Prepared 回执读取后继续扩容。新 journal schema 2 区分编辑与扩容；schema 1 仅接受编辑。并无旧 TS 数据迁移。
+
+真实 sing-box 1.14.1 扩容集成通过：先仅启动 A，再请求 B，准备时 A 保持原进程、B 未监听；B 探测失败恢复 A；再次确认扩容后 A/B 均转发，分别请求 A 或 B 均复用同一进程。既有真实更新/回滚/中断恢复集成也通过。真实 CLI 集成覆盖编辑与扩容两路：JSON 默认只预览，配置变更使旧确认失效，扩容 `--apply-to-running` 进入应用流程，失败输出旧配置保留及代理故障，并可查询/恢复终态而不重放进程创建。
+
+独立审查与增量复审通过；审查方另行跑通 9 项平台测试及真实 core/CLI 测试。最终全量 workspace 148 项通过，12 项顶层 ignored；上述三项真实集成显式执行通过，clippy `-D warnings`、fmt 和 diff 检查通过。全部使用隔离临时 store 与测试代理；未启动真实 Codex/Claude、未修改 IFEO。实例启动、活动集合移除、未知 Starting 核对及 Guard 仍待后续实现。

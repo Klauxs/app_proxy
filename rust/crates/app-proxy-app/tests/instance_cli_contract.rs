@@ -267,6 +267,11 @@ fn proxy_cli_assigns_distinct_ports_and_rejects_removal_while_bound() {
 #[test]
 #[ignore = "requires APP_PROXY_TEST_SING_BOX; CLI confirmation with an isolated real core"]
 fn proxy_cli_previews_exact_impact_rejects_stale_confirmation_and_reports_restore_failure() {
+    preview_case(false);
+    preview_case(true);
+}
+
+fn preview_case(expanding: bool) {
     use app_proxy_windows::{core_process::CoreProcess, core_state::CoreState, singbox_binary};
     struct OwnedCore(CoreProcess);
     impl Drop for OwnedCore {
@@ -356,24 +361,56 @@ fn proxy_cli_previews_exact_impact_rejects_stale_confirmation_and_reports_restor
     let mut owner = Owner::capture(&root);
     let id = profile.to_string();
     let port = upstream_port.to_string();
-    let args = [
-        "proxy",
-        "update",
-        &id,
-        "--protocol",
-        "socks5",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        &port,
-        "--no-auth",
-        "--json",
-    ];
+    let added = if expanding {
+        Some(
+            ok(
+                &root,
+                &[
+                    "proxy",
+                    "create",
+                    "--name",
+                    "added",
+                    "--protocol",
+                    "http",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    &port,
+                    "--json",
+                ],
+            )["receipt"]["entity_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let args = if let Some(added) = &added {
+        vec!["core", "start", added.as_str(), "--json"]
+    } else {
+        vec![
+            "proxy",
+            "update",
+            &id,
+            "--protocol",
+            "socks5",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port,
+            "--no-auth",
+            "--json",
+        ]
+    };
     let preview = cli(&root, &args);
     assert_eq!(preview.status.code(), Some(5));
     let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
     let impact = &preview["result"]["outcome"]["impact"];
     assert_eq!(impact["affected_profiles"], serde_json::json!([profile]));
+    if let Some(added) = &added {
+        assert_eq!(impact["added_profiles"], serde_json::json!([added]));
+    }
     assert!(core.0.is_running().unwrap());
     assert_eq!(
         ok(&root, &["proxy", "show", &id, "--json"])["profiles"][0]["protocol"],
@@ -400,7 +437,13 @@ fn proxy_cli_previews_exact_impact_rejects_stale_confirmation_and_reports_restor
     let plan = preview["result"]["outcome"]["impact"]["plan_id"]
         .as_str()
         .unwrap();
-    let applied = cli(&root, &["core", "apply-update", plan, "--json"]);
+    let applied = if expanding {
+        let mut args = args.clone();
+        args.push("--apply-to-running");
+        cli(&root, &args)
+    } else {
+        cli(&root, &["core", "apply-update", plan, "--json"])
+    };
     assert_eq!(
         applied.status.code(),
         Some(3),
@@ -413,12 +456,14 @@ fn proxy_cli_previews_exact_impact_rejects_stale_confirmation_and_reports_restor
         serde_json::json!({"outcome":"restored","core_down":true})
     );
     assert!(!core.0.is_running().unwrap());
-    assert_eq!(ok(&root, &["core", "status", "--json"])["observed"], "down");
+    let snapshot = ok(&root, &["core", "status", "--json"]);
+    assert_eq!(snapshot["observed"], "down");
     assert_eq!(
         ok(&root, &["proxy", "show", &id, "--json"])["profiles"][0]["protocol"],
         "http"
     );
     // A recovery query of a terminal plan is idempotent and cannot respawn it.
+    let plan = snapshot["update"]["impact"]["plan_id"].as_str().unwrap();
     let recovered = cli(&root, &["core", "recover-update", plan, "--json"]);
     assert_eq!(recovered.status.code(), Some(3));
     assert_eq!(

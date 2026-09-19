@@ -21,6 +21,27 @@ impl CoreManager {
     pub(crate) async fn prepare_update(&self, request: &ConfigRequest) -> Result<UpdateImpact> {
         let _gate = self.gate.lock().await;
         let plan = self.configuration.lock()?.prepare_core_update(request)?;
+        self.check_and_publish_update(plan).await
+    }
+
+    pub(crate) async fn prepare_expand(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        profiles: &[Uuid],
+        required: Uuid,
+    ) -> Result<UpdateImpact> {
+        let _gate = self.gate.lock().await;
+        let plan = self.configuration.lock()?.prepare_core_expansion(
+            id,
+            expected_revision,
+            profiles,
+            required,
+        )?;
+        self.check_and_publish_update(plan).await
+    }
+
+    async fn check_and_publish_update(&self, plan: CoreUpdate) -> Result<UpdateImpact> {
         let CoreState::Running { ref process, .. } = plan.previous else {
             unreachable!()
         };
@@ -224,12 +245,13 @@ impl CoreManager {
             // Restore the shared process if at least one old route still works;
             // a previously broken unrelated route must not take every app down.
             let mut ordered = endpoints.clone();
-            let changed = candidate
+            if let Some(changed) = candidate
                 .profiles()
                 .iter()
                 .position(|p| p.id == plan.profile_id)
-                .ok_or(Error::Invalid("PROFILE_NOT_ACTIVE"))?;
-            ordered.swap(0, changed);
+            {
+                ordered.swap(0, changed);
+            }
             let healthy = any_old_route_healthy(&ordered, probe).await;
             if !healthy {
                 return Err(Error::Invalid("CORE_PROXY_HEALTH_FAILED"));

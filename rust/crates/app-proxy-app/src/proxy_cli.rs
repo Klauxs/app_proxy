@@ -255,65 +255,15 @@ async fn update_running(
     apply: bool,
     json: bool,
 ) -> Result<(), Failure> {
-    use app_proxy_core::core_control::{CoreAction, CoreOutcome, CoreRequestStatus};
-    use std::io::Write;
-    let (request_id, status, _) = crate::core_cli::submit(
-        root.clone(),
-        CoreAction::PrepareUpdate {
+    crate::core_cli::prepare_and_apply(
+        root,
+        app_proxy_core::core_control::CoreAction::PrepareUpdate {
             expected_revision: revision,
             profile_id,
             node,
         },
+        apply,
         json,
     )
-    .await;
-    let Some(CoreRequestStatus::Complete {
-        outcome: CoreOutcome::Prepared { ref impact },
-        ..
-    }) = status
-    else {
-        crate::core_cli::output(request_id, &status, json)?;
-        return crate::core_cli::outcome(status);
-    };
-    let plan_id = impact.plan_id;
-    if json {
-        if !apply {
-            crate::core_cli::output(request_id, &status, true)?;
-        }
-    } else {
-        println!("计划 {plan_id}：候选检查通过；将重启共享代理。以下代理的连接会短暂中断：");
-        for id in &impact.affected_profiles {
-            println!("  代理 {id}");
-        }
-        println!("使用这些代理的已登记实例（不代表正在运行）：");
-        for id in &impact.bound_instances {
-            println!("  实例 {id}");
-        }
-        println!("应用进程保留；切换失败会尝试恢复旧代理。");
-    }
-    let confirmed = if apply {
-        true
-    } else if !json && io::stdin().is_terminal() && io::stderr().is_terminal() {
-        eprint!("1. 应用变更  2. 返回（默认）\n请选择 [1/2]：");
-        io::stderr()
-            .flush()
-            .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
-        let mut answer = String::new();
-        io::stdin()
-            .read_line(&mut answer)
-            .map_err(|_| fail(10, "PROMPT_READ_FAILED"))?;
-        answer.trim() == "1"
-    } else {
-        false
-    };
-    if !confirmed {
-        return Err(fail(
-            5,
-            format!("配置未切换；确认此计划可运行 core apply-update {plan_id}。"),
-        ));
-    }
-    let (id, status, _) =
-        crate::core_cli::submit(root, CoreAction::ApplyUpdate { plan_id }, json).await;
-    crate::core_cli::output(id, &status, json)?;
-    crate::core_cli::outcome(status)
+    .await
 }

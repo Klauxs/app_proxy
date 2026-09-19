@@ -19,6 +19,11 @@ pub enum CoreAction {
         profile_id: Uuid,
         node: crate::registry::ManualProxyInput,
     },
+    PrepareExpand {
+        expected_revision: u64,
+        profiles: Vec<Uuid>,
+        required: Uuid,
+    },
     ApplyUpdate {
         plan_id: Uuid,
     },
@@ -29,6 +34,13 @@ pub enum CoreAction {
 impl CoreAction {
     pub fn normalize(&mut self) -> Result<(), ValidationError> {
         if matches!(self, Self::PrepareUpdate { expected_revision, profile_id, .. } if *expected_revision == 0 || profile_id.is_nil())
+            || matches!(
+                self,
+                Self::PrepareExpand {
+                    expected_revision: 0,
+                    ..
+                }
+            )
             || matches!(self, Self::ApplyUpdate { plan_id } | Self::RecoverUpdate { plan_id } if plan_id.is_nil())
         {
             return Err(ValidationError("INVALID_CORE_REQUEST"));
@@ -38,7 +50,11 @@ impl CoreAction {
         {
             return Err(ValidationError("INVALID_REQUEST_ID"));
         }
-        if let Self::Start { profiles, required } = self {
+        if let Self::Start { profiles, required }
+        | Self::PrepareExpand {
+            profiles, required, ..
+        } = self
+        {
             if profiles.is_empty()
                 || profiles.len() > 1024
                 || required.is_nil()
@@ -94,7 +110,10 @@ pub struct UpdateImpact {
     pub plan_id: Uuid,
     pub manifest_revision: u64,
     pub previous_generation: Uuid,
+    /// The profile whose health is required, including a newly added profile.
     pub changed_profile: Uuid,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_profiles: Vec<Uuid>,
     pub affected_profiles: Vec<Uuid>,
     /// Configured bindings, not evidence that these applications are running.
     pub bound_instances: Vec<Uuid>,

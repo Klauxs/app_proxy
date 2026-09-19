@@ -22,6 +22,9 @@ pub enum Command {
         /// 本次必须通过健康检查的代理，默认第一个
         #[arg(long)]
         required: Option<Uuid>,
+        /// 同意新增入口时重启共享代理，保留现有入口及应用进程
+        #[arg(long)]
+        apply_to_running: bool,
     },
     /// 停止本工具拥有的共享代理；不会关闭应用
     Stop,
@@ -138,6 +141,7 @@ pub(crate) fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> 
 }
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
+    let mut apply = false;
     let action = match command {
         Command::Status => {
             let snapshot = coordinator::core_status(root)
@@ -199,7 +203,12 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Cancel { id } => CoreAction::CancelInstall { request_id: id },
         Command::ApplyUpdate { id } => CoreAction::ApplyUpdate { plan_id: id },
         Command::RecoverUpdate { id } => CoreAction::RecoverUpdate { plan_id: id },
-        Command::Start { profiles, required } => {
+        Command::Start {
+            profiles,
+            required,
+            apply_to_running,
+        } => {
+            apply = apply_to_running;
             let required = required
                 .or_else(|| profiles.first().copied())
                 .ok_or_else(|| fail(2, "PROFILE_REQUIRED"))?;
@@ -247,9 +256,27 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         }
         // Only the still-active client resumes a definitively failed start.
         // Completing installation alone never starts a core or an application.
-        let resumed = submit(root, action, false).await;
+        let resumed = submit(root.clone(), action.clone(), false).await;
         id = resumed.0;
         status = resumed.1;
+    }
+    if matches!(&status, Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == "CORE_RECONFIGURE_REQUIRES_CONFIRMATION")
+        && let CoreAction::Start { profiles, required } = action
+    {
+        let catalog = coordinator::catalog(root.clone())
+            .await
+            .map_err(|e| fail(3, e.to_string()))?;
+        return prepare_and_apply(
+            root,
+            CoreAction::PrepareExpand {
+                expected_revision: catalog.revision,
+                profiles,
+                required,
+            },
+            apply,
+            json,
+        )
+        .await;
     }
     output(id, &status, json)?;
     outcome(status)
@@ -348,4 +375,64 @@ pub(crate) async fn submit(
             .flatten();
     }
     (id, status, interrupted)
+}
+
+pub(crate) async fn prepare_and_apply(
+    root: PathBuf,
+    action: CoreAction,
+    apply: bool,
+    json: bool,
+) -> Result<(), Failure> {
+    let (request_id, status, _) = submit(root.clone(), action, json).await;
+    let Some(CoreRequestStatus::Complete {
+        outcome: CoreOutcome::Prepared { ref impact },
+        ..
+    }) = status
+    else {
+        output(request_id, &status, json)?;
+        return outcome(status);
+    };
+    let plan_id = impact.plan_id;
+    if json {
+        if !apply {
+            output(request_id, &status, true)?;
+        }
+    } else {
+        println!("计划 {plan_id}：候选检查通过；将重启共享代理。以下代理的连接会短暂中断：");
+        for id in &impact.affected_profiles {
+            println!("  代理 {id}");
+        }
+        for id in &impact.added_profiles {
+            println!("  新增代理 {id}");
+        }
+        println!("使用这些代理的已登记实例（不代表正在运行）：");
+        for id in &impact.bound_instances {
+            println!("  实例 {id}");
+        }
+        println!("应用进程保留；切换失败会尝试恢复旧代理。");
+    }
+    let confirmed = if apply {
+        true
+    } else if !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        eprint!("1. 应用变更  2. 返回（默认）\n请选择 [1/2]：");
+        std::io::stderr()
+            .flush()
+            .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|_| fail(10, "PROMPT_READ_FAILED"))?;
+        answer.trim() == "1"
+    } else {
+        false
+    };
+    if !confirmed {
+        return Err(fail(
+            5,
+            format!("配置未切换；确认此计划可运行 core apply-update {plan_id}。"),
+        ));
+    }
+    let (id, status, _) = submit(root, CoreAction::ApplyUpdate { plan_id }, json).await;
+    output(id, &status, json)?;
+    outcome(status)
 }

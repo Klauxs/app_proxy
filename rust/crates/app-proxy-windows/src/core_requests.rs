@@ -350,9 +350,15 @@ fn validate_outcome(outcome: &CoreOutcome, owner: &str) -> Result<()> {
                 || impact.manifest_revision == 0
                 || impact.previous_generation.is_nil()
                 || impact.changed_profile.is_nil()
+                || impact.added_profiles.iter().any(Uuid::is_nil)
+                || impact
+                    .added_profiles
+                    .iter()
+                    .any(|p| impact.affected_profiles.contains(p))
                 || impact.affected_profiles.iter().any(Uuid::is_nil)
                 || impact.bound_instances.iter().any(Uuid::is_nil)
-                || !impact.affected_profiles.contains(&impact.changed_profile) =>
+                || !(impact.affected_profiles.contains(&impact.changed_profile)
+                    || impact.added_profiles.contains(&impact.changed_profile)) =>
         {
             return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
         }

@@ -15,7 +15,8 @@
 | 实例配置编辑 | 已实现，独立 review 通过 | 已接入 coordinator 与 CLI；7 项规则 + 4 项真实 CLI 写测试，物理去重、保留数据及列表脱敏；菜单及外部集成清理待实现 |
 | 实例 CLI / 列表摘要 | 已实现，独立 review 通过 | create/list/clone/rename/bind/remove/request，按 revision 和字节预算分页；尚无启动/保护授权操作 |
 | 手动代理配置 / CLI | 已实现，独立 review 通过 | HTTP/SOCKS5 create/list/show/update/rename/remove/request；自动入口、认证分存与脱敏、引用及活动 generation 保护；运行中更新已接确认/回滚，交互菜单待实现 |
-| 共享 core 手动上游重配置 | 已实现，独立 review 通过 | 检查候选、影响预览/具体计划确认、原程序切换、失败回滚、持久化阶段/回执恢复；活动集合增减、未知 Starting 的完整核对及未来应用启动许可仍待续 |
+| 共享 core 手动上游重配置 | 已实现，独立 review 通过 | 检查候选、影响预览/具体计划确认、原程序切换、失败回滚、持久化阶段/回执恢复；活动集合移除、未知 Starting 的完整核对及未来应用启动许可仍待续 |
+| 共享 core 代理集合扩容 | 已实现，独立 review 通过 | 原集合并入新增入口、影响预览与明确确认、不改 manifest、失败恢复旧集合、已有子集复用同进程；真实 core/CLI 测试通过 |
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
 | 实例启动 | 待实现 | 统一状态机、安装解析和已运行判断 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
@@ -56,3 +57,5 @@
 - 手动代理配置 / CLI：独立审查与修复复审通过，提交主题 `feat(rust): manage manual proxy profiles and protected credentials`。新增 4 项编辑/认证规则、5 项秘密/事务/运行保护、2 项真实 CLI 测试；全量 137 项通过、9 项顶层 ignored，clippy/fmt 通过，两项真实 sing-box TLS/生命周期集成另行通过。审查发现并修复 pending 配置在旧内核启动后恢复提交的竞态，以及保存阶段遗漏协议认证限制。改名不重启，更新保持 ID/端口，移除检查实例/下载引用；密码独立原子存储，请求回执不含原文。当前活动 generation 编辑返回需重配置，具体影响确认与回滚仍待接入；不表示应用启动或 Guard 完成。
 
 - 共享 core 手动上游重配置：独立审查和增量复审通过，提交主题 `feat(rust): confirm and recover shared core proxy updates`。候选与当前 manifest 分离，确认前检查原程序及配置，具体计划绑定 revision/原 generation/进程；切换期间阻止普通生命周期及配置写入。候选验证修改出口，回滚以旧集合至少一个可用为成功、所有入口核对 PID，最多 4 个并发且每出口获得探测机会。6 项平台 journal、1 项服务恢复、1 项并发探测默认回归新增；全量 145 项通过、11 项顶层 ignored；两项新真实 core/CLI 集成另行通过，clippy/fmt 通过。修复无副作用 busy 请求永久未决、恢复回执摘要未绑定及过期原回执使恢复请求挂起；新增准备回执恢复、计划状态查询。未知 Starting 不盲目重放，活动集合增减/应用启动许可/持续监控未完成。
+
+- 共享 core 代理集合扩容：独立审查、格式修复复审及 CLI 确认入口增量复审通过；提交主题 `feat(rust): confirm and recover shared core profile expansion`。新集合为原集合与本次请求的并集，已存在子集复用同进程；准备不重启，确认绑定精确计划，失败恢复旧集合，扩容不修改 manifest/revision。新增 3 项平台约束/恢复/既有 Rust 记录读取回归和真实 core 扩容测试；真实 CLI 测试同时覆盖编辑及扩容，含默认仅预览、陈旧计划拒绝、显式应用与恢复回执。全量 148 项通过、12 项顶层 ignored；真实扩容、既有更新/回滚和 CLI 三项集成显式通过，clippy/fmt/diff 检查通过。仅兼容本 Rust 上一批 journal/回执，不导入旧 TS 数据。活动集合移除、应用启动许可、完整未知结果核对及持续通知仍待实现。

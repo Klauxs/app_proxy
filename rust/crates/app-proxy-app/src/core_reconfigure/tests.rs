@@ -463,3 +463,138 @@ async fn real_shared_core_update_checks_confirmation_switches_rolls_back_and_rec
     );
     manager.stop().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX; real owned core in an isolated store"]
+async fn real_shared_core_expansion_preserves_routes_reuses_subsets_and_rolls_back() {
+    let binary =
+        PathBuf::from(std::env::var_os("APP_PROXY_TEST_SING_BOX").expect("validation binary"));
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let mut store = Store::create(&root).unwrap();
+    let installed = root.join("bin/sing-box/1.14.1");
+    fs::create_dir_all(&installed).unwrap();
+    for name in ["sing-box.exe", "libcronet.dll"] {
+        fs::copy(binary.parent().unwrap().join(name), installed.join(name)).unwrap();
+    }
+    let first = upstream("first").await;
+    let mut profiles = Vec::new();
+    let mut endpoints = Vec::new();
+    let mut reservations = Vec::new();
+    for n in 0..2 {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Endpoint {
+            host: "127.0.0.1".parse().unwrap(),
+            port: socket.local_addr().unwrap().port(),
+        };
+        reservations.push(socket);
+        let id = Uuid::new_v4();
+        profiles.push(id);
+        endpoints.push(endpoint.clone());
+        store
+            .apply_config(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: store.load().unwrap().revision,
+                action: ConfigAction::CreateManualProfile {
+                    profile_id: id,
+                    name: format!("proxy {n}"),
+                    endpoint,
+                    node: input(first.port),
+                },
+            })
+            .unwrap();
+    }
+    drop(reservations);
+    let configuration = Arc::new(Configuration::new(store));
+    let _cleanup = Cleanup(configuration.clone());
+    let manager = CoreManager::new(root.clone(), configuration.clone());
+
+    let ready = manager
+        .ensure_with(&profiles[..1], profiles[0], |e| async {
+            via(e).await.map(|_| ())
+        })
+        .await
+        .unwrap();
+    let revision = configuration.snapshot().unwrap().revision;
+    assert!(matches!(
+        manager
+            .ensure_with(&profiles[1..], profiles[1], |_| async { Ok(()) })
+            .await,
+        Err(Error::Invalid("CORE_RECONFIGURE_REQUIRES_CONFIRMATION"))
+    ));
+    let impact = manager
+        .prepare_expand(Uuid::new_v4(), revision, &profiles[1..], profiles[1])
+        .await
+        .unwrap();
+    assert_eq!(impact.affected_profiles, [profiles[0]]);
+    assert_eq!(impact.added_profiles, [profiles[1]]);
+    assert!(
+        matches!(manager.state().unwrap(), CoreState::Running { process, .. } if process == ready.process)
+    );
+    assert_eq!(via(endpoints[0].clone()).await.unwrap(), "first");
+    assert!(via(endpoints[1].clone()).await.is_err());
+    // Only the newly requested route fails its probe. The old route must recover
+    // even though the requested profile was never part of the original process.
+    let new_port = endpoints[1].port;
+    let restored = manager
+        .apply_update(
+            impact.plan_id,
+            admit(&configuration, impact.plan_id),
+            |e| async move {
+                if e.port == new_port {
+                    Err(Error::Invalid("TEST_NEW_ROUTE_FAILURE"))
+                } else {
+                    via(e).await.map(|_| ())
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        restored,
+        CoreOutcome::Restored { core_down: false }
+    ));
+    assert_eq!(via(endpoints[0].clone()).await.unwrap(), "first");
+    assert!(via(endpoints[1].clone()).await.is_err());
+    assert_eq!(configuration.snapshot().unwrap().revision, revision);
+    let impact = manager
+        .prepare_expand(Uuid::new_v4(), revision, &profiles[1..], profiles[1])
+        .await
+        .unwrap();
+    let expanded = manager
+        .apply_update(
+            impact.plan_id,
+            admit(&configuration, impact.plan_id),
+            |e| async { via(e).await.map(|_| ()) },
+        )
+        .await
+        .unwrap();
+    let CoreOutcome::Reconfigured {
+        process,
+        revision: committed_revision,
+        ..
+    } = expanded
+    else {
+        panic!("not expanded")
+    };
+    assert_eq!(committed_revision, revision);
+    for endpoint in &endpoints {
+        assert_eq!(via(endpoint.clone()).await.unwrap(), "first");
+    }
+    let reused = manager
+        .ensure_with(&profiles[..1], profiles[0], |e| async {
+            via(e).await.map(|_| ())
+        })
+        .await
+        .unwrap();
+    assert_eq!(reused.process, process);
+    let reused = manager
+        .ensure_with(&profiles[1..], profiles[1], |e| async {
+            via(e).await.map(|_| ())
+        })
+        .await
+        .unwrap();
+    assert_eq!(reused.process, process);
+    assert_eq!(configuration.snapshot().unwrap().revision, revision);
+    manager.stop().await.unwrap();
+}

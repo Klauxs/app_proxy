@@ -110,6 +110,15 @@ impl CoreControl {
 
     pub async fn execute(&self, mut job: CoreJob) -> Result<()> {
         let result = match job.action.clone() {
+            CoreAction::PrepareExpand {
+                expected_revision,
+                profiles,
+                required,
+            } => self
+                .manager
+                .prepare_expand(job.id, expected_revision, &profiles, required)
+                .await
+                .map(|impact| CoreOutcome::Prepared { impact }),
             CoreAction::PrepareUpdate {
                 expected_revision,
                 profile_id,
