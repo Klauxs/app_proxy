@@ -7,7 +7,7 @@ use crate::{
     instance_data::{self, PreparedData},
     process, storage_security as security, store,
 };
-use app_proxy_core::{FileIdentity, ProcessIdentity};
+use app_proxy_core::{FileIdentity, ProcessIdentity, launch::LaunchPhase};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -130,6 +130,8 @@ pub struct ResourceClaim {
     image: FileIdentity,
     pub owner: ResourceOwner,
     dispatch_id: Option<Uuid>,
+    #[serde(default)]
+    local_confirmed: bool,
     pub phase: ResourcePhase,
 }
 
@@ -148,6 +150,12 @@ pub struct ResourceRegistry {
     _directory: Arc<OwnedHandle>,
 }
 impl ResourceRegistry {
+    /// Isolated fixture registries; normal builds always use the user-wide root.
+    #[cfg(feature = "test-support")]
+    pub fn for_test_at(root: &Path) -> Result<Self> {
+        Self::open_at(root)
+    }
+
     pub fn open() -> Result<Self> {
         Self::open_at(&instance_data::local_app_data()?.join("AppProxyRustResources"))
     }
@@ -261,6 +269,42 @@ impl ResourceRegistry {
         reservation.claim = reservation.read_current()?;
         Ok(reservation)
     }
+
+    /// Recover only protected historical evidence. Never resolve current config
+    /// into a replacement identity or issue a new dispatch during recovery.
+    pub fn reconcile_launch(&self, store: &mut store::Store, id: Uuid) -> Result<()> {
+        let attempt = store
+            .launch_request(id)?
+            .ok_or(Error::Invalid("LAUNCH_ATTEMPT_NOT_FOUND"))?;
+        let Some(binding) = attempt.binding else {
+            return Ok(());
+        };
+        let header = store.load()?;
+        let resource = InstanceResource {
+            key: binding.resource_key,
+            user_sid: header.owner_sid,
+            session_id: binding.session_id,
+            executable: binding.executable,
+            image: binding.image,
+            installation_image: None,
+        };
+        let mut reservation = self.acquire(resource)?;
+        let expected = ResourceOwner {
+            store_id: header.store_id,
+            attempt_id: attempt.id,
+            epoch: attempt.epoch,
+        };
+        if reservation.claim().is_some_and(|c| c.owner != expected) {
+            // An acknowledged/released claim may already have a new owner.
+            if matches!(attempt.phase, LaunchPhase::Confirmed { .. })
+                || matches!(&attempt.phase, LaunchPhase::Failed { code } if code == "APPLICATION_NOT_CREATED")
+            {
+                store.finish_resource_sync(attempt.id)?;
+            }
+            return Ok(());
+        }
+        reservation.reconcile(store)
+    }
 }
 
 /// Moveable across async executor threads. Drop releases only the kernel lock;
@@ -309,6 +353,7 @@ impl ResourceReservation {
             image: self.resource.image.clone(),
             owner,
             dispatch_id: None,
+            local_confirmed: false,
             phase: ResourcePhase::Reserved {},
         };
         self.write(claim)
@@ -392,11 +437,94 @@ impl ResourceReservation {
         let ResourcePhase::Confirmed { ref process } = claim.phase else {
             return Err(Error::Invalid("RESOURCE_SPAWN_RESULT_UNKNOWN"));
         };
+        if !claim.local_confirmed {
+            return Err(Error::Invalid("INSTANCE_RESOURCE_RECOVERY_REQUIRED"));
+        }
         if process::is_running_exact(process)? {
             return Err(Error::Invalid("INSTANCE_STILL_RUNNING"));
         }
         claim.phase = ResourcePhase::Released {};
         self.write(claim)
+    }
+
+    /// Complete the two-journal handoff while retaining this resource's lock.
+    /// A matching durable no-creation result is as strong as its original token;
+    /// a mere timeout, PID observation or unrelated terminal result is not.
+    pub fn reconcile(&mut self, store: &mut store::Store) -> Result<()> {
+        let Some(mut claim) = self.claim.clone() else {
+            return Ok(());
+        };
+        if store.load()?.store_id != claim.owner.store_id {
+            return Ok(());
+        }
+        let Some(attempt) = store.launch_request(claim.owner.attempt_id)? else {
+            return Ok(());
+        };
+        if attempt.epoch == claim.owner.epoch
+            && attempt.dispatch_id.is_none()
+            && matches!(attempt.phase, LaunchPhase::Failed { .. })
+            && matches!(
+                claim.phase,
+                ResourcePhase::Reserved {} | ResourcePhase::Released {}
+            )
+        {
+            if matches!(claim.phase, ResourcePhase::Reserved {}) {
+                self.release_before_spawn(claim.owner)?;
+            }
+            return store.finish_resource_sync(attempt.id);
+        }
+        let Some(binding) = &attempt.binding else {
+            return Ok(());
+        };
+        if attempt.epoch != claim.owner.epoch
+            || binding.resource_key != claim.resource_key
+            || binding.image != claim.image
+            || binding.executable != claim.executable
+            || binding.session_id != claim.session_id
+        {
+            return Err(Error::Invalid("RESOURCE_LAUNCH_BINDING_MISMATCH"));
+        }
+        if !matches!(claim.phase, ResourcePhase::Reserved {})
+            && attempt.dispatch_id != claim.dispatch_id
+        {
+            return Err(Error::Invalid("RESOURCE_LAUNCH_BINDING_MISMATCH"));
+        }
+        match (&claim.phase, &attempt.phase) {
+            (ResourcePhase::Confirmed { process }, phase) => {
+                match phase {
+                    LaunchPhase::Confirmed { process: local } if local == process => {}
+                    LaunchPhase::SpawnRequested {}
+                    | LaunchPhase::AwaitingIdentity {}
+                    | LaunchPhase::Indeterminate {} => {
+                        store.confirm_launch(attempt.id, attempt.epoch, process.clone())?;
+                    }
+                    _ => return Err(Error::Invalid("RESOURCE_LAUNCH_BINDING_MISMATCH")),
+                }
+                if !claim.local_confirmed {
+                    claim.local_confirmed = true;
+                    self.write(claim)?;
+                }
+                store.finish_resource_sync(attempt.id)?;
+            }
+            (
+                ResourcePhase::Reserved {} | ResourcePhase::SpawnRequested {},
+                LaunchPhase::Failed { code },
+            ) if attempt.dispatch_id.is_some() && code == "APPLICATION_NOT_CREATED" => {
+                claim.phase = ResourcePhase::Released {};
+                // Reserved means publishing global intent failed before dispatch.
+                claim.dispatch_id = attempt.dispatch_id;
+                self.write(claim)?;
+                store.finish_resource_sync(attempt.id)?;
+            }
+            (
+                ResourcePhase::Released {},
+                LaunchPhase::Failed { .. } | LaunchPhase::Confirmed { .. },
+            ) => {
+                store.finish_resource_sync(attempt.id)?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn require_owner(&self, owner: ResourceOwner) -> Result<&ResourceClaim> {
@@ -453,6 +581,11 @@ impl ResourceReservation {
             return Err(Error::Invalid("INVALID_RESOURCE_CLAIM"));
         }
         if claim.dispatch_id.is_some_and(|id| id.is_nil())
+            || (claim.local_confirmed
+                && !matches!(
+                    claim.phase,
+                    ResourcePhase::Confirmed { .. } | ResourcePhase::Released {}
+                ))
             || (matches!(claim.phase, ResourcePhase::Reserved {}) && claim.dispatch_id.is_some())
             || (matches!(
                 claim.phase,

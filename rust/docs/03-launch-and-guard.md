@@ -83,6 +83,10 @@ coordinator 对 manifest/runtime 的提交串行化，网络、下载、包查�
 
 本地 `ReadyToSpawn → SpawnRequested` 原子写入随机 dispatch nonce，并且只发出一次不可复制的执行许可。跨 store 预留核对完整 store/attempt/epoch 和绑定后，消费此许可并持久化全局启动 intent，平台创建只能消费之后的授权对象。确认成功时先保存全局完整身份，再保存本地 Confirmed；只有平台明确没有创建进程的证据，且完整 owner 与 nonce 都匹配，才能结束为 Failed 并释放占用。创建成功之后的身份读取、调试脱离或回执失败一律保留未知，不能用后续另一次失败尝试证明旧目标不存在。Confirmed 的释放必须只读核对精确进程已经退出。
 
+普通 EXE 服务实现补充：dispatch 前持同一 store 锁恢复已接受的配置请求，再复核依赖摘要并写启动 intent。全局 Confirmed 在本地确认落盘后还需写同步 ACK；没有 ACK 时即使应用退出也不能被另一 store 覆盖，以便原 owner 补回执。本地确定未创建及准备释放失败的记录，在全局占用同步完成前不按普通终态过期清理。恢复仅核对受保护的 owner/epoch/nonce/物理绑定与已保存结果，不重放创建。取得独占资源锁后，同 store 的 Reserved（没有 dispatch nonce）若旧准备记录已过期，仍可释放后交给新 owner；旧执行许可不能通过新 owner 的授权核对。
+
+当前执行模块仅处理普通 EXE，尚未接 RPC/CLI；MSIX 和存在 IFEO Debugger 的程序返回明确待支持错误，避免绕过对应平台流程。启动前的占用扫描能拒绝已识别的外部进程，并不提供对任意外部启动者的原子排他保证。
+
 **4. 崩溃恢复与未知结果**
 
 serve 启动后先获得 store 独占锁，完成 schema/归属校验和 journal reconciliation，再报告 ready。逐项检查：

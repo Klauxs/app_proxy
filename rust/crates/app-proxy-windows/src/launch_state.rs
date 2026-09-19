@@ -124,7 +124,8 @@ impl Store {
         }
         let now = now()?;
         journal.attempts.retain(|a| {
-            a.reserves_instance()
+            a.resource_pending
+                || a.reserves_instance()
                 || a.finished_at
                     .is_none_or(|at| at.saturating_add(RETENTION) > now)
         });
@@ -151,6 +152,7 @@ impl Store {
             binding: None,
             dispatch_id: None,
             session_exited: false,
+            resource_pending: false,
         });
         if is_new {
             journal.attempts.push(attempt.clone());
@@ -224,6 +226,10 @@ impl Store {
         }
         if before_spawn_end {
             attempt.finished_at = Some(now()?.max(attempt.accepted_at));
+            if matches!(&next, LaunchPhase::Failed { code } if code == "INSTANCE_RESOURCE_RELEASE_FAILED")
+            {
+                attempt.resource_pending = true;
+            }
         }
         attempt.phase = next;
         let result = attempt.clone();
@@ -240,6 +246,7 @@ impl Store {
         }
         let dispatch_id = Uuid::new_v4();
         attempt.dispatch_id = Some(dispatch_id);
+        attempt.resource_pending = true;
         attempt.phase = LaunchPhase::SpawnRequested {};
         let binding = attempt.binding.clone().expect("validated ready binding");
         self.write_launch_journal(&journal)?;
@@ -426,6 +433,26 @@ impl Store {
         Ok(true)
     }
 
+    pub(crate) fn finish_resource_sync(&mut self, id: Uuid) -> Result<()> {
+        let mut journal = self.read_launch_journal()?;
+        let attempt = journal
+            .attempts
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or(Error::Invalid("LAUNCH_ATTEMPT_NOT_FOUND"))?;
+        if !matches!(
+            attempt.phase,
+            LaunchPhase::Confirmed { .. } | LaunchPhase::Failed { .. }
+        ) {
+            return Err(Error::Invalid("INVALID_LAUNCH_TRANSITION"));
+        }
+        if attempt.resource_pending {
+            attempt.resource_pending = false;
+            self.write_launch_journal(&journal)?;
+        }
+        Ok(())
+    }
+
     pub fn ensure_core_launch_idle(&self) -> Result<()> {
         if self.read_launch_journal()?.attempts.iter().any(|a| {
             matches!(
@@ -512,6 +539,9 @@ impl Store {
                 || a.finished_at.is_some() != terminal
                 || a.finished_at.is_some_and(|at| at < a.accepted_at)
                 || (a.session_exited && !matches!(a.phase, LaunchPhase::Confirmed { .. }))
+                || (a.resource_pending
+                    && a.dispatch_id.is_none()
+                    && !matches!(&a.phase, LaunchPhase::Failed { code } if code == "INSTANCE_RESOURCE_RELEASE_FAILED"))
                 || !journal.requests.iter().any(|r| {
                     r.request.request_id == a.id
                         && r.attempt_id == a.id

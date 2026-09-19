@@ -403,6 +403,33 @@ fn permission_retains_store_ownership_and_authorization_failure_proves_no_creati
 }
 
 #[test]
+fn recovered_reserved_claim_rejects_old_dispatch_after_owner_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry = ResourceRegistry::open_at(&temp.path().join("resources")).unwrap();
+    let resource = current_resource();
+    let (mut store, previous) = ready_store(&temp.path().join("store"), &resource, Uuid::new_v4());
+    let mut reservation = registry.acquire(resource).unwrap();
+    reservation.reserve(previous).unwrap();
+    let dispatch = store
+        .dispatch_launch(previous.attempt_id, previous.epoch)
+        .unwrap();
+    drop(reservation); // No global intent was ever published.
+    let mut reservation = registry.acquire(current_resource()).unwrap();
+    reservation.release_before_spawn(previous).unwrap();
+    let next = owner();
+    reservation.reserve(next).unwrap();
+    assert!(matches!(
+        reservation.authorize_spawn(dispatch),
+        Err(process::SpawnFailure::NotCreated { .. })
+    ));
+    assert_eq!(reservation.claim().unwrap().owner, next);
+    assert_eq!(
+        reservation.claim().unwrap().phase,
+        ResourcePhase::Reserved {}
+    );
+}
+
+#[test]
 #[ignore = "native subprocess fixture used by resource reservation tests"]
 fn resource_child() {
     let root = PathBuf::from(std::env::var_os("APP_PROXY_RESOURCE_TEST_ROOT").unwrap());
@@ -486,6 +513,34 @@ fn confirmed_process_keeps_claim_after_unlock_until_exact_exit() {
     store
         .confirm_launch(owner.attempt_id, owner.epoch, child.0.identity.clone())
         .unwrap();
+    // Local confirmation cannot authorize another store to erase the global
+    // evidence until its ACK is durable as well.
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(reservation.registry.root.join(&reservation.name))
+        .unwrap();
+    assert!(reservation.reconcile(&mut store).is_err());
+    assert!(
+        store
+            .launch_request(owner.attempt_id)
+            .unwrap()
+            .unwrap()
+            .resource_pending
+    );
+    assert!(matches!(
+        reservation.release_exited(owner),
+        Err(Error::Invalid("INSTANCE_RESOURCE_RECOVERY_REQUIRED"))
+    ));
+    drop(held);
+    reservation.reconcile(&mut store).unwrap();
+    assert!(
+        !store
+            .launch_request(owner.attempt_id)
+            .unwrap()
+            .unwrap()
+            .resource_pending
+    );
     drop(reservation);
     let mut reservation = registry.acquire(current_resource()).unwrap();
     assert!(reservation.reserve(super::tests::owner()).is_err());

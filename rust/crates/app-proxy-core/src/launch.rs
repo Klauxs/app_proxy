@@ -90,6 +90,9 @@ pub struct LaunchAttempt {
     pub dispatch_id: Option<Uuid>,
     /// Only exact process observation can release a confirmed session.
     pub session_exited: bool,
+    /// Preserve a terminal receipt until the cross-store claim is synchronized.
+    #[serde(default)]
+    pub resource_pending: bool,
 }
 impl LaunchAttempt {
     pub fn reserves_instance(&self) -> bool {

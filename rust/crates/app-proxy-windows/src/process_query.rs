@@ -102,6 +102,50 @@ pub async fn inspect(expected: &ProcessIdentity) -> Result<ProcessObservation> {
     inspect_with(expected, Ok).await
 }
 
+/// Read-only candidate discovery for the current physical installation. Snapshot
+/// names only decide which unreadable processes require an unknown result; all
+/// readable processes are checked for physical aliases, regardless of basename.
+pub async fn application_candidates(
+    application: &crate::installation::ResolvedApplication,
+) -> Result<Vec<ProcessIdentity>> {
+    identity::assert_ordinary_user()?;
+    let caller = identity::current()?;
+    let image = application.image().clone();
+    let name = application
+        .executable()
+        .file_name()
+        .ok_or(Error::Invalid("EXE_REQUIRED"))?
+        .to_owned();
+    query_with(&QUERY_BUSY, QUERY_BUDGET, move |deadline| {
+        let mut candidates = Vec::new();
+        for hint in snapshot()? {
+            if Instant::now() >= deadline {
+                return Err(Error::Invalid("PROCESS_QUERY_TIMEOUT"));
+            }
+            match identity::inspect(hint.pid) {
+                Ok(process)
+                    if process.user_sid == caller.user_sid
+                        && process.session_id == caller.session_id
+                        && process.image_file == image =>
+                {
+                    candidates.push(process)
+                }
+                Ok(_) => {}
+                Err(Error::Windows { code: 87, .. }) => {}
+                Err(_) if hint.executable_name.eq_ignore_ascii_case(&name) => {
+                    return Err(Error::Invalid("INSTANCE_PROCESS_UNKNOWN"));
+                }
+                Err(_) => {}
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Invalid("PROCESS_QUERY_TIMEOUT"));
+        }
+        Ok(candidates)
+    })
+    .await
+}
+
 /// Instance attribution's read-only filesystem checks share the same deadline,
 /// retained process handle and outstanding-work bound as the WMI query itself.
 pub(crate) async fn inspect_with<T: Send + 'static>(

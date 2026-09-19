@@ -303,6 +303,9 @@ pub fn spawn_for_attempt(
     if identity::file_identity(&spec.exe).map_err(not_created)? != permit.binding().image {
         return Err(not_created(Error::Invalid("LAUNCH_EXECUTABLE_CHANGED")));
     }
+    if matches!(spec.mode, CreationMode::Normal) {
+        crate::ifeo::ensure_plain_creation(&spec.exe).map_err(not_created)?;
+    }
     // Keep the consumed permit, owner lease and reservation borrow alive through
     // the creating thread's return. A panic after dispatch remains unknown.
     let result = spawn_checked(spec).map_err(|(error, created)| {

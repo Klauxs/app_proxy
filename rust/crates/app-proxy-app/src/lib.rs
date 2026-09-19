@@ -9,6 +9,7 @@ mod core_installer;
 pub mod core_manager;
 mod core_reconfigure;
 pub mod instance_cli;
+pub mod launch_engine;
 pub mod probe;
 pub mod proxy_cli;
 pub mod proxy_health;

@@ -253,6 +253,39 @@ fn cancel_before_spawn_blocks_dispatch_and_after_dispatch_is_only_intent() {
 }
 
 #[test]
+fn unsynchronized_no_creation_receipt_survives_retention_until_resource_release() {
+    let (_temp, mut store, instance, epoch) = setup();
+    let request = prepare(&mut store, instance, epoch);
+    store
+        .ready_launch(request.request_id, epoch, binding())
+        .unwrap();
+    let dispatch = store.dispatch_launch(request.request_id, epoch).unwrap();
+    let process::SpawnFailure::NotCreated { evidence, .. } =
+        process::not_dispatched(dispatch, Error::Invalid("FIXTURE"))
+    else {
+        panic!("expected proof")
+    };
+    store
+        .fail_launch_not_created(request.request_id, epoch, &evidence)
+        .unwrap();
+    let mut journal = store.read_launch_journal().unwrap();
+    journal.attempts[0].accepted_at = 1;
+    journal.attempts[0].finished_at = Some(1);
+    store.write_launch_journal(&journal).unwrap();
+    store.begin_launch(&new_request(instance), epoch).unwrap();
+    assert!(
+        store
+            .launch_request(request.request_id)
+            .unwrap()
+            .unwrap()
+            .resource_pending
+    );
+    store.finish_resource_sync(request.request_id).unwrap();
+    store.begin_launch(&new_request(instance), epoch).unwrap();
+    assert!(store.launch_request(request.request_id).unwrap().is_none());
+}
+
+#[test]
 fn recovery_abandons_only_pre_dispatch_and_unknown_launches_never_expire() {
     for dispatched in [false, true] {
         let (temp, mut store, instance, epoch) = setup();
