@@ -123,7 +123,7 @@ fn executable_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn inspect_file(file: &File) -> Result<(PathBuf, FileIdentity)> {
+pub(crate) fn inspect_file(file: &File) -> Result<(PathBuf, FileIdentity)> {
     // SAFETY: file owns a live handle; both output buffers have their declared size.
     unsafe {
         let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();

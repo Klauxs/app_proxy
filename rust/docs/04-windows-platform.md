@@ -70,6 +70,10 @@ request 消费采用独占 claim 文件/系统锁，helper 全程持有，确保
 
 安装时固化 user SID、store ID、helper hash 和协议版本；提权程序不从用户可写 manifest 加载可执行路径或任意插件。受保护复制内容与 hash 校验在提权侧完成，避免验证后替换源文件的竞态。首版不开放从任意 URL 自动更新提权 helper。
 
+部署平台采用不可变 generation：固定位置为系统 Known Folder Program Files 下的 AppProxyRust/Guard/用户摘要/store/generation，不接受手动安装目录。普通前台先固定同发行目录的 host 文件及所有父目录，记录 fileID、大小和 SHA256，并持续持有句柄直到提权安装结束；这些预期值通过固定 UAC 参数传递，不在提权侧从可写请求重新计算。提权侧只能复制自身映像路径对应且匹配该预期的文件，并验证仍存活的普通请求进程属于同一 SID/session。
+
+每代 helper 与记录由管理员拥有，显式受保护 DACL 仅授予系统/管理员完全控制，普通 Users 只读/执行；不修补或覆盖陌生目录的 ACL。新 generation 和文件独占创建，内容同步后回读大小/hash/fileID/记录绑定，并保留验证句柄。目录、重解析点及文件硬链接异常拒绝。此阶段不切换任务或 IFEO；失败残留不作为有效安装，也不自动递归清除。任务注册事务必须在后续另行核验，不能用 generation 存在替代 Guard active。
+
 **6. 命名管道协议边界**
 
 普通 coordinator 管道和提权事件管道分开。两者都设置显式 DACL、拒绝远程客户端、限定用户/logon SID 和 session；客户端验证 server PID、令牌和映像身份，服务端验证连接方，nonce 不是身份校验的替代品。

@@ -338,3 +338,15 @@ TDH 读取命名 ProcessID/ImageName 属性，不把事件头 PID 或固定 payl
 5 项新管道测试覆盖真实只读管道、读写连接/同名新实例拒绝、普通 token 不能伪装提权端、双方身份条件、帧往返/错 store/错协议、取消后失效，以及初连/断号/计数回退/重连/结束补扫。新增 ETW 回归验证满队列结束后的全部提示和最后一批结束标记。真实管道夹具两端均为普通进程，仅测试内部私有策略；没有生产权限绕过入口。审查方另只读核对本机普通/linked token 的 logon SID 相同，但这不替代实际提权端集成。
 
 独立审查通过并复跑 5 项管道、5 项默认 ETW 测试；全量 workspace 242 项通过、24 项顶层 ignored，clippy -D warnings、fmt/diff 通过。没有 UAC、系统注册或用户应用操作。提权部署、任务、生产 listener 循环、Guard 自动触发和 IFEO 仍待连接，不能据本批宣称保护已生效。
+
+**Guard 受保护 helper generation 平台层（2026-09-20）**
+
+部署路径通过系统 Program Files Known Folder 自动定位，按 SID 摘要/store/generation 分隔，不接受用户指定目录。stage 只供提权 host 调用，核对真实普通 issuer 的完整身份、同 SID/session 和持有句柄的存活状态；拒绝使用其他管理员账户凭据完成这一安装。复制对象固定为本次 host 的映像，不从普通 manifest 接受可执行来源。
+
+审查指出仅在提权后从当前进程映像路径重新取得 fileID 不足以绑定 UAC 前的文件。已新增普通前台 InstallerSource：固定同发行目录的 host、按根到叶保留全部父目录和源文件，独立记录 fileID/大小/SHA256；stage 强制匹配这份期望后才接触机器目录。前台后续接入必须持有此对象直到提权流程结束，并通过固定 UAC 参数传递期望，不能在提权侧重读可写请求来重新决定源文件。普通进程中的源文件与父目录改名/写入拒绝测试通过；释放 pin 后，同 fileID/同大小内容变更仍被原哈希期望拒绝。
+
+目录/文件由管理员组拥有，创建时显式使用 protected DACL：系统和管理员完全控制，普通 Users 只读/执行。回读核对 owner、全部 ACE/权限/继承、目录类型、重解析点和文件硬链接；已有陌生对象不改 ACL、不覆盖。helper 内容同步并校验大小/hash/fileID，记录最后创建并同步，之后重新打开验证整个 generation。Deployment 持有目录、helper、记录句柄；普通 coordinator 的原映像也必须另外 pin/校验。生成代际文件不等于安装激活；没有写 current 指针、任务或 IFEO，失败残留保留给后续维护。
+
+6 项新增默认测试覆盖真实 Windows 内存安全描述符的正反例、真实普通 owner 对象拒绝且保留内容、源文件锁与身份/hash、严格记录绑定、大小上限和普通调用无机器目录写入、真实 issuer 夹具退出后的失效。审查方独立复跑全部 6 项通过。安全描述符正例在内存中验证；没有以提权令牌在 Program Files 创建 generation，因此不能把这些测试称为真实提权部署/权限继承或激活验证。前台授权、任务、后台 listener、自动 Guard 和 IFEO 仍待接入。
+
+最终全量 workspace 248 项通过、24 项顶层 ignored；来源绑定修正后重新全量运行通过，clippy -D warnings、fmt/diff 通过。提交前工作目录未进行 UAC、Program Files 写入、任务或 IFEO 注册。

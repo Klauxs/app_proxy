@@ -42,6 +42,16 @@ pub fn assert_ordinary_user() -> Result<()> {
 }
 
 pub(crate) unsafe fn assert_ordinary_handle(process: RawHandle) -> Result<()> {
+    // SAFETY: caller retains the process query handle.
+    unsafe { assert_elevation_handle(process, false) }
+}
+
+pub fn assert_elevated_user() -> Result<()> {
+    // SAFETY: current process pseudo handle remains valid and is not closed.
+    unsafe { assert_elevation_handle(GetCurrentProcess(), true) }
+}
+
+unsafe fn assert_elevation_handle(process: RawHandle, elevated: bool) -> Result<()> {
     // SAFETY: querying a token we own, with a correctly sized output buffer.
     unsafe {
         let token = token(process)?;
@@ -57,8 +67,12 @@ pub(crate) unsafe fn assert_ordinary_handle(process: RawHandle) -> Result<()> {
         {
             return Err(last_error("GetTokenInformation(elevation)"));
         }
-        if elevation.TokenIsElevated != 0 {
-            return Err(Error::Invalid("ORDINARY_USER_REQUIRED"));
+        if (elevation.TokenIsElevated != 0) != elevated {
+            return Err(Error::Invalid(if elevated {
+                "ELEVATED_USER_REQUIRED"
+            } else {
+                "ORDINARY_USER_REQUIRED"
+            }));
         }
         // Restricted/sandbox tokens are not an ordinary launch context.
         if IsTokenRestricted(token.as_raw_handle()) != 0 {
