@@ -118,6 +118,7 @@ impl Drop for Child {
 
 #[tokio::test]
 async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
+    let _query = QUERY_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let marker = temp.path().join("ready");
     let exe = std::env::current_exe().unwrap();
@@ -179,6 +180,16 @@ async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
         ));
         wait_free(&QUERY_BUSY).await;
     }
+    let child_identity = child.0.identity.clone();
+    let during_finish = inspect_with(&child.0.identity, move |_| {
+        process::terminate_exact(&child_identity)?;
+        Ok(())
+    })
+    .await;
+    assert!(matches!(
+        during_finish,
+        Err(Error::Invalid("PROCESS_EXITED_DURING_INSPECTION"))
+    ));
     child.0.terminate().unwrap();
     assert!(inspect(&child.0.identity).await.is_err());
     wait_free(&QUERY_BUSY).await;

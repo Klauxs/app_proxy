@@ -8,6 +8,7 @@ pub mod core_update;
 pub mod identity;
 pub mod installation;
 pub mod instance_data;
+pub mod instance_process;
 pub mod instance_resource;
 pub mod ipc;
 pub mod launch_state;

@@ -35,6 +35,8 @@ use windows_sys::Win32::{
 const QUERY_BUDGET: Duration = Duration::from_secs(5);
 const MAX_PROCESSES: usize = 32768;
 static QUERY_BUSY: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static QUERY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub struct ProcessHint {
     pub pid: u32,
@@ -97,6 +99,15 @@ pub fn snapshot() -> Result<Vec<ProcessHint>> {
 /// A timeout never proves absence. At most one native query can remain outstanding
 /// in this process even when COM outlives the caller's deadline.
 pub async fn inspect(expected: &ProcessIdentity) -> Result<ProcessObservation> {
+    inspect_with(expected, Ok).await
+}
+
+/// Instance attribution's read-only filesystem checks share the same deadline,
+/// retained process handle and outstanding-work bound as the WMI query itself.
+pub(crate) async fn inspect_with<T: Send + 'static>(
+    expected: &ProcessIdentity,
+    finish: impl FnOnce(ProcessObservation) -> Result<T> + Send + 'static,
+) -> Result<T> {
     identity::assert_ordinary_user()?;
     let caller = identity::current()?;
     if expected.pid == 0
@@ -108,7 +119,7 @@ pub async fn inspect(expected: &ProcessIdentity) -> Result<ProcessObservation> {
     }
     let expected = expected.clone();
     query_with(&QUERY_BUSY, QUERY_BUDGET, move |deadline| {
-        inspect_on_thread(expected, deadline)
+        inspect_on_thread(expected, deadline, finish)
     })
     .await
 }
@@ -136,8 +147,9 @@ async fn query_with<T: Send + 'static>(
     std::thread::Builder::new()
         .name("process-wmi".into())
         .spawn(move || {
-            let _slot = slot;
-            let _ = sender.send(work(deadline));
+            let result = work(deadline);
+            drop(slot);
+            let _ = sender.send(result);
         })?;
     tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver)
         .await
@@ -145,7 +157,11 @@ async fn query_with<T: Send + 'static>(
         .map_err(|_| Error::Invalid("PROCESS_QUERY_INTERRUPTED"))?
 }
 
-fn inspect_on_thread(expected: ProcessIdentity, deadline: Instant) -> Result<ProcessObservation> {
+fn inspect_on_thread<T>(
+    expected: ProcessIdentity,
+    deadline: Instant,
+    finish: impl FnOnce(ProcessObservation) -> Result<T>,
+) -> Result<T> {
     let handle = identity::open(
         expected.pid,
         PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
@@ -164,15 +180,16 @@ fn inspect_on_thread(expected: ProcessIdentity, deadline: Instant) -> Result<Pro
         .map(parse_arguments)
         .transpose()?
         .flatten();
+    let result = finish(ProcessObservation {
+        identity: expected.clone(),
+        parent_pid: row.parent_pid,
+        arguments,
+    })?;
     verify_handle(&handle, &expected)?;
     if Instant::now() >= deadline {
         return Err(Error::Invalid("PROCESS_QUERY_TIMEOUT"));
     }
-    Ok(ProcessObservation {
-        identity: expected,
-        parent_pid: row.parent_pid,
-        arguments,
-    })
+    Ok(result)
 }
 
 fn verify_handle(handle: &OwnedHandle, expected: &ProcessIdentity) -> Result<()> {
