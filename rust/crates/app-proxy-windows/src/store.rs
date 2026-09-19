@@ -301,47 +301,58 @@ impl Store {
     }
 
     pub(crate) fn replace_bounded(&self, relative: &str, bytes: &[u8], limit: usize) -> Result<()> {
-        app_proxy_core::model::safe_relative(Path::new(relative))
-            .map_err(|e| Error::Invalid(e.0))?;
-        if bytes.len() > limit {
-            return Err(Error::Invalid("STORE_FILE_TOO_LARGE"));
-        }
-        let destination = self.root.join(relative);
-        if destination.try_exists()? {
-            // Refuse an untrusted/reparse destination instead of replacing it silently.
-            read_protected(&destination, &self.owner.owner_sid, limit)?;
-        }
-        let parent = destination
-            .parent()
-            .ok_or(Error::Invalid("STORE_PARENT_REQUIRED"))?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-        security::verify(temp.as_file().as_raw_handle(), &self.owner.owner_sid, false)?;
-        temp.write_all(bytes)?;
-        temp.as_file().sync_all()?;
-        // Close the write handle before Windows rename; TempPath removes only our temp on failure.
-        let temp = temp.into_temp_path();
-        let source = wide(temp.as_os_str())?;
-        let target = wide(destination.as_os_str())?;
-        for attempt in 0..4 {
-            // SAFETY: both paths are live terminated buffers on the same protected volume.
-            let success = unsafe {
-                if destination.try_exists()? {
-                    ReplaceFileW(target.as_ptr(), source.as_ptr(), null(), 0, null(), null())
-                } else {
-                    MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH)
-                }
-            };
-            if success != 0 {
-                return Ok(());
-            }
-            let error = std::io::Error::last_os_error();
-            if attempt == 3 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
-                return Err(error.into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
-        }
-        unreachable!()
+        replace_protected(&self.root, &self.owner.owner_sid, relative, bytes, limit)
     }
+}
+
+/// Caller retains an owned, ACL-verified root directory handle throughout this
+/// replacement. Shared by the store and the per-user instance resource registry.
+pub(crate) fn replace_protected(
+    root: &Path,
+    owner_sid: &str,
+    relative: &str,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<()> {
+    app_proxy_core::model::safe_relative(Path::new(relative)).map_err(|e| Error::Invalid(e.0))?;
+    if bytes.len() > limit {
+        return Err(Error::Invalid("STORE_FILE_TOO_LARGE"));
+    }
+    let destination = root.join(relative);
+    if destination.try_exists()? {
+        // Refuse an untrusted/reparse destination instead of replacing it silently.
+        read_protected(&destination, owner_sid, limit)?;
+    }
+    let parent = destination
+        .parent()
+        .ok_or(Error::Invalid("STORE_PARENT_REQUIRED"))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    security::verify(temp.as_file().as_raw_handle(), owner_sid, false)?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    // Close the write handle before Windows rename; TempPath removes only our temp on failure.
+    let temp = temp.into_temp_path();
+    let source = wide(temp.as_os_str())?;
+    let target = wide(destination.as_os_str())?;
+    for attempt in 0..4 {
+        // SAFETY: both paths are live terminated buffers on the same protected volume.
+        let success = unsafe {
+            if destination.try_exists()? {
+                ReplaceFileW(target.as_ptr(), source.as_ptr(), null(), 0, null(), null())
+            } else {
+                MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH)
+            }
+        };
+        if success != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if attempt == 3 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+            return Err(error.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+    }
+    unreachable!()
 }
 
 #[derive(Serialize, Deserialize)]

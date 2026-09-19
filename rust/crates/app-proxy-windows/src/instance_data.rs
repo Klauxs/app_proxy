@@ -31,6 +31,27 @@ pub struct PreparedData {
     _directories: Vec<OwnedHandle>,
 }
 
+impl PreparedData {
+    /// Physical directory identity, independent of path spelling. Preparation
+    /// keeps this directory pinned against replacement while the key is used.
+    pub fn physical_identity(&self) -> Result<app_proxy_core::FileIdentity> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let root = security::directory(&self.paths.root, false)?;
+        // SAFETY: this C output structure contains only integer fields.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: the owned directory handle and sized output live through the call.
+        if unsafe { GetFileInformationByHandle(root.as_raw_handle(), &mut info) } == 0 {
+            return Err(crate::last_error("InstanceDirectoryIdentity"));
+        }
+        Ok(app_proxy_core::FileIdentity {
+            volume_serial: info.dwVolumeSerialNumber,
+            file_index: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        })
+    }
+}
+
 impl Store {
     pub fn prepare_instance_data(
         &self,

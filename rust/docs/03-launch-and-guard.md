@@ -67,7 +67,7 @@ coordinator 对 manifest/runtime 的提交串行化，网络、下载、包查�
 
 | 资源 | 范围 | 持有时间 |
 |---|---|---|
-| Instance reservation | 本次 store + instance key；跨 store 用户级系统 mutex 防同一物理实例竞争 | 从创建 attempt 到确认/明确失败；存在运行会话时继续保留资源所有权 |
+| Instance reservation | 本次 store + instance key；跨 store 用户级 Windows 内核文件锁防同一物理实例竞争 | 执行期间持有锁；确认后由持久化完整进程身份继续占用资源 |
 | ManagedCore gate | 每个 store 的共享 sing-box generation | 配置/启动/停止操作串行；运行期间不持有长配置锁 |
 | State commit gate | manifest/runtime 短事务 | 仅校验 revision、原子写和状态转换 |
 
@@ -77,7 +77,11 @@ coordinator 对 manifest/runtime 的提交串行化，网络、下载、包查�
 
 代理更新与启动间存在 generation race。ReadyToSpawn 从 core manager 获得启动许可，至身份确认前阻止同内核 destructive reconfigure；不持有 state commit 等回执。许可带 attempt deadline 和恢复状态，MSIX 结果未定不能仅因客户端超时立即释放。已有运行会话使用的端口被改掉会影响流量，proxy edit 必须明确列出影响并让用户显式应用，见代理设计。
 
-跨 store mutex 只约束本 Rust 产品，不控制其他启动器。外部手动启动仍需立即复查及 Guard，不能完全消除竞态；外部已存在实例按资源占用处理，不自动接管。
+跨 store 文件锁只约束本 Rust 产品，不控制其他启动器。外部手动启动仍需立即复查及 Guard，不能完全消除竞态；外部已存在实例按资源占用处理，不自动接管。
+
+用户级预留自动存放在 Windows LocalAppData 下的 `AppProxyRustResources`，独立于各配置目录。目录先完成归属标记和 ACL 再发布；资源 key 包含用户/会话、EXE 文件身份或稳定包定位，以及原版标记或分身目录的物理身份，不使用显示名称。锁可以跨执行线程移动，进程退出会释放内核锁，但不会删除持久占用记录。未知记录不能靠重新取得锁、等待超时或 Drop 清除。
+
+本地 `ReadyToSpawn → SpawnRequested` 原子写入随机 dispatch nonce，并且只发出一次不可复制的执行许可。跨 store 预留核对完整 store/attempt/epoch 和绑定后，消费此许可并持久化全局启动 intent，平台创建只能消费之后的授权对象。确认成功时先保存全局完整身份，再保存本地 Confirmed；只有平台明确没有创建进程的证据，且完整 owner 与 nonce 都匹配，才能结束为 Failed 并释放占用。创建成功之后的身份读取、调试脱离或回执失败一律保留未知，不能用后续另一次失败尝试证明旧目标不存在。Confirmed 的释放必须只读核对精确进程已经退出。
 
 **4. 崩溃恢复与未知结果**
 

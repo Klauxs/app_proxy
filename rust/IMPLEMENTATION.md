@@ -18,7 +18,7 @@
 | 共享 core 手动上游重配置 | 已实现，独立 review 通过 | 检查候选、影响预览/具体计划确认、原程序切换、失败回滚、持久化阶段/回执恢复；活动集合移除、未知 Starting 的完整核对及未来应用启动许可仍待续 |
 | 共享 core 代理集合扩容 | 已实现，独立 review 通过 | 原集合并入新增入口、影响预览与明确确认、不改 manifest、失败恢复旧集合、已有子集复用同进程；真实 core/CLI 测试通过 |
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
-| 实例启动 | 持久状态及 core 启动许可基础已实现，独立 review 通过；完整执行待续 | 请求别名去重、阶段/取消/旧 epoch 核对、完整身份回执及退出观察；LaunchEngine/CLI、物理 key 与跨 store 预留、普通/MSIX 执行和确认未创建的终结仍待实现 |
+| 实例启动 | 持久状态、core 许可及跨 store 预留已实现，独立 review 通过；完整执行待续 | 请求别名、物理 key、跨进程锁、一次性 dispatch、未创建证据及精确退出测试通过；LaunchEngine/CLI、外部进程发现、普通/MSIX 完整流程和未知结果核对待实现 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
 | sing-box 管理/一键安装 | 初始生命周期、coordinator/CLI、一键安装/取消已实现，独立 review 通过；产品集成待续 | 自有共享进程；固定官方包校验、自动目录、交互确认/重试、并发安装、进度与取消；启动许可、重配置/回滚、未知副作用核对及持续故障通知待实现 |
 | sing-box 配置生成 | 已实现，独立 review 通过 | 活动 profile 合并、固定入口→出口、末尾拒绝、HTTP/SOCKS5 认证及稳定配置；4 项规则测试和 1 项真实内核转发测试，已接入初始内核管理组件 |
@@ -61,3 +61,5 @@
 - 共享 core 代理集合扩容：独立审查、格式修复复审及 CLI 确认入口增量复审通过；提交主题 `feat(rust): confirm and recover shared core profile expansion`。新集合为原集合与本次请求的并集，已存在子集复用同进程；准备不重启，确认绑定精确计划，失败恢复旧集合，扩容不修改 manifest/revision。新增 3 项平台约束/恢复/既有 Rust 记录读取回归和真实 core 扩容测试；真实 CLI 测试同时覆盖编辑及扩容，含默认仅预览、陈旧计划拒绝、显式应用与恢复回执。全量 148 项通过、12 项顶层 ignored；真实扩容、既有更新/回滚和 CLI 三项集成显式通过，clippy/fmt/diff 检查通过。仅兼容本 Rust 上一批 journal/回执，不导入旧 TS 数据。活动集合移除、应用启动许可、完整未知结果核对及持续通知仍待实现。
 
 - 实例启动持久状态 / core 许可：独立审查及增量复审通过，提交主题 `feat(rust): persist launch attempts and protect core startup permissions`。一个受保护原子 journal 保存请求映射、attempt 和确认会话；同实例未决请求指向同一 attempt，跨配置/core 请求编号冲突拒绝。创建前必须成功持久化 intent，旧 epoch 的前置准备可结束，SpawnRequested 之后保留未知且不按时间释放；晚取消不声称未启动。ReadyToSpawn 发布与 core stop/reconfigure 共用 gate，持久许可在未知结果期间继续阻止破坏性变更。新增 7 项平台行为测试（含真实子进程）及扩展的真实 core 竞争测试通过；workspace 154 项通过后新增容量/时间回归单独通过，共 155 项默认行为已验证、13 项顶层 ignored，clippy/fmt/diff 通过。尚未接实际 LaunchEngine、CLI、跨 store 资源锁、MSIX 回执或确认未创建时的失败终结，不等于生产启动闭环已完成。
+
+- 跨 store 实例预留 / 一次性执行许可：独立审查与修复复审通过，提交主题 `feat(rust): reserve physical instances across stores before dispatch`。按物理安装/数据身份生成 key，独立用户目录内核文件锁配合持久占用，owner 死亡不清除未知；确认后仅精确退出可释放。审查发现并修复未创建证据可重用和跨 store 混用：本地原子写后唯一发放带随机 nonce 的许可，全局授权消费许可，平台创建再消费授权，证据完整绑定 store/attempt/epoch/nonce。新增 7 项行为测试含真实跨进程锁及创建/退出；全量 162 项通过、14 项顶层 ignored，真实 core 扩容/许可竞争另行通过（7.81 秒），clippy/fmt/diff 通过。尚未接入生产 LaunchEngine/CLI、外部进程发现和 MSIX helper，不表示完整启动已交付。

@@ -42,6 +42,28 @@ pub struct LaunchAdmission {
     pub is_new: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DispatchIdentity {
+    pub owner: crate::instance_resource::ResourceOwner,
+    pub dispatch_id: Uuid,
+}
+
+/// Issued once by the atomic ReadyToSpawn -> SpawnRequested transition; never
+/// reconstructed from a request ID. Retains store ownership through creation.
+pub struct LaunchDispatch {
+    context: DispatchIdentity,
+    binding: LaunchBinding,
+    _owner: std::sync::Arc<std::fs::File>,
+}
+impl LaunchDispatch {
+    pub(crate) fn context(&self) -> DispatchIdentity {
+        self.context
+    }
+    pub(crate) fn binding(&self) -> &LaunchBinding {
+        &self.binding
+    }
+}
+
 impl Store {
     pub fn launch_request(&self, id: Uuid) -> Result<Option<LaunchAttempt>> {
         if id.is_nil() {
@@ -127,6 +149,7 @@ impl Store {
             finished_at: None,
             cancel_requested: false,
             binding: None,
+            dispatch_id: None,
             session_exited: false,
         });
         if is_new {
@@ -179,7 +202,6 @@ impl Store {
                     LaunchPhase::PreparingProxy {},
                     LaunchPhase::PreparingData {}
                 )
-                | (LaunchPhase::ReadyToSpawn {}, LaunchPhase::SpawnRequested {})
                 | (
                     LaunchPhase::SpawnRequested {},
                     LaunchPhase::AwaitingIdentity {}
@@ -207,6 +229,32 @@ impl Store {
         let result = attempt.clone();
         self.write_launch_journal(&journal)?;
         Ok(result)
+    }
+
+    pub fn dispatch_launch(&mut self, id: Uuid, epoch: Uuid) -> Result<LaunchDispatch> {
+        let mut journal = self.read_launch_journal()?;
+        let store_id = journal.store_id;
+        let attempt = attempt_mut(&mut journal, id, epoch, &LaunchPhase::ReadyToSpawn {})?;
+        if attempt.cancel_requested {
+            return Err(Error::Invalid("LAUNCH_CANCEL_REQUESTED"));
+        }
+        let dispatch_id = Uuid::new_v4();
+        attempt.dispatch_id = Some(dispatch_id);
+        attempt.phase = LaunchPhase::SpawnRequested {};
+        let binding = attempt.binding.clone().expect("validated ready binding");
+        self.write_launch_journal(&journal)?;
+        Ok(LaunchDispatch {
+            context: DispatchIdentity {
+                owner: crate::instance_resource::ResourceOwner {
+                    store_id,
+                    attempt_id: id,
+                    epoch,
+                },
+                dispatch_id,
+            },
+            binding,
+            _owner: self.owner_lease(),
+        })
     }
 
     /// The engine has checked dependencies and acquired the physical resource.
@@ -281,6 +329,46 @@ impl Store {
             return Err(Error::Invalid("INVALID_LAUNCH_TRANSITION"));
         }
         attempt.phase = LaunchPhase::Confirmed { process: identity };
+        attempt.finished_at = Some(now()?.max(attempt.accepted_at));
+        let result = attempt.clone();
+        self.write_launch_journal(&journal)?;
+        Ok(result)
+    }
+
+    /// Only the platform's evidence of no creation can end a dispatched attempt
+    /// as failed. A timeout, lost ACK or failed identity read cannot produce it.
+    pub fn fail_launch_not_created(
+        &mut self,
+        id: Uuid,
+        epoch: Uuid,
+        evidence: &process::NoProcessCreated,
+    ) -> Result<LaunchAttempt> {
+        let mut journal = self.read_launch_journal()?;
+        let attempt = journal
+            .attempts
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or(Error::Invalid("LAUNCH_ATTEMPT_NOT_FOUND"))?;
+        if evidence.context().owner
+            != (crate::instance_resource::ResourceOwner {
+                store_id: journal.store_id,
+                attempt_id: id,
+                epoch,
+            })
+            || attempt.dispatch_id != Some(evidence.context().dispatch_id)
+            || attempt.epoch != epoch
+            || !matches!(
+                attempt.phase,
+                LaunchPhase::SpawnRequested {}
+                    | LaunchPhase::AwaitingIdentity {}
+                    | LaunchPhase::Indeterminate {}
+            )
+        {
+            return Err(Error::Invalid("LAUNCH_NO_CREATION_EVIDENCE_MISMATCH"));
+        }
+        attempt.phase = LaunchPhase::Failed {
+            code: "APPLICATION_NOT_CREATED".into(),
+        };
         attempt.finished_at = Some(now()?.max(attempt.accepted_at));
         let result = attempt.clone();
         self.write_launch_journal(&journal)?;
@@ -405,6 +493,11 @@ impl Store {
             }
         }
         for a in &journal.attempts {
+            if a.dispatch_id.is_some_and(|id| id.is_nil())
+                || (a.phase.before_spawn() && a.dispatch_id.is_some())
+            {
+                return Err(invalid());
+            }
             let terminal = matches!(
                 a.phase,
                 LaunchPhase::Confirmed { .. }
@@ -470,12 +563,15 @@ impl Store {
                     return Err(invalid());
                 }
                 if let LaunchPhase::Confirmed { process } = &a.phase
+                    // Resolved paths may have a verbatim prefix while the process
+                    // API returns a DOS path. Physical image identity is decisive.
                     && (process.pid == 0
                         || process.creation_time == 0
                         || process.user_sid != header.owner_sid
                         || process.session_id != b.session_id
                         || process.image_file != b.image
-                        || process.image_path != b.executable)
+                        || !process.image_path.is_absolute()
+                        || process.image_path.to_str().is_none_or(|p| p.contains('\0')))
                 {
                     return Err(invalid());
                 }

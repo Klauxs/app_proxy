@@ -206,12 +206,7 @@ fn cancel_before_spawn_blocks_dispatch_and_after_dispatch_is_only_intent() {
     let cancelled = store.request_launch_cancel(first.request_id).unwrap();
     assert!(cancelled.cancel_requested && cancelled.finished_at.is_none());
     assert!(matches!(
-        store.advance_launch(
-            first.request_id,
-            epoch,
-            &LaunchPhase::ReadyToSpawn {},
-            LaunchPhase::SpawnRequested {}
-        ),
+        store.dispatch_launch(first.request_id, epoch),
         Err(Error::Invalid("LAUNCH_CANCEL_REQUESTED"))
     ));
     store
@@ -226,14 +221,7 @@ fn cancel_before_spawn_blocks_dispatch_and_after_dispatch_is_only_intent() {
     store
         .ready_launch(second.request_id, epoch, binding())
         .unwrap();
-    store
-        .advance_launch(
-            second.request_id,
-            epoch,
-            &LaunchPhase::ReadyToSpawn {},
-            LaunchPhase::SpawnRequested {},
-        )
-        .unwrap();
+    store.dispatch_launch(second.request_id, epoch).unwrap();
     store.request_launch_cancel(second.request_id).unwrap();
     assert!(
         store
@@ -273,14 +261,7 @@ fn recovery_abandons_only_pre_dispatch_and_unknown_launches_never_expire() {
             .ready_launch(request.request_id, epoch, binding())
             .unwrap();
         if dispatched {
-            store
-                .advance_launch(
-                    request.request_id,
-                    epoch,
-                    &LaunchPhase::ReadyToSpawn {},
-                    LaunchPhase::SpawnRequested {},
-                )
-                .unwrap();
+            store.dispatch_launch(request.request_id, epoch).unwrap();
         }
         let mut journal = store.read_launch_journal().unwrap();
         journal.attempts[0].accepted_at = 1;
@@ -320,16 +301,7 @@ fn recovery_abandons_only_pre_dispatch_and_unknown_launches_never_expire() {
                     .unwrap()
                     .is_new
             );
-            assert!(
-                store
-                    .advance_launch(
-                        request.request_id,
-                        epoch,
-                        &LaunchPhase::ReadyToSpawn {},
-                        LaunchPhase::SpawnRequested {}
-                    )
-                    .is_err()
-            );
+            assert!(store.dispatch_launch(request.request_id, epoch).is_err());
         }
     }
 }
@@ -348,16 +320,7 @@ fn failed_atomic_write_does_not_authorize_spawn_and_bad_records_are_preserved() 
         .share_mode(1)
         .open(&path)
         .unwrap();
-    assert!(
-        store
-            .advance_launch(
-                request.request_id,
-                epoch,
-                &LaunchPhase::ReadyToSpawn {},
-                LaunchPhase::SpawnRequested {}
-            )
-            .is_err()
-    );
+    assert!(store.dispatch_launch(request.request_id, epoch).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);
     drop(held);
     let mut bad: serde_json::Value = serde_json::from_slice(&before).unwrap();
@@ -438,14 +401,7 @@ fn proxy_permission_validates_generation_and_blocks_destructive_core_transitions
             .transition_core_state(&running, CoreState::Stopped {})
             .is_err()
     );
-    store
-        .advance_launch(
-            request.request_id,
-            epoch,
-            &LaunchPhase::ReadyToSpawn {},
-            LaunchPhase::SpawnRequested {},
-        )
-        .unwrap();
+    store.dispatch_launch(request.request_id, epoch).unwrap();
     store.recover_launches(Uuid::new_v4()).unwrap();
     assert!(store.ensure_core_launch_idle().is_err());
     store
@@ -475,14 +431,7 @@ fn confirmed_process_exit_releases_reservation_and_forged_identity_is_unknown() 
     store
         .ready_launch(request.request_id, epoch, binding())
         .unwrap();
-    store
-        .advance_launch(
-            request.request_id,
-            epoch,
-            &LaunchPhase::ReadyToSpawn {},
-            LaunchPhase::SpawnRequested {},
-        )
-        .unwrap();
+    store.dispatch_launch(request.request_id, epoch).unwrap();
     let mut child = process::spawn(process::SpawnSpec {
         exe: std::env::current_exe().unwrap(),
         args: ["--exact", "launch_state::tests::holding_child", "--ignored"]

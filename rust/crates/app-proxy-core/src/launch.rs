@@ -86,6 +86,8 @@ pub struct LaunchAttempt {
     pub finished_at: Option<u64>,
     pub cancel_requested: bool,
     pub binding: Option<LaunchBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<Uuid>,
     /// Only exact process observation can release a confirmed session.
     pub session_exited: bool,
 }

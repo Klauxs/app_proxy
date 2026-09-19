@@ -32,6 +32,41 @@ pub struct StartedProcess {
     pub identity: ProcessIdentity,
 }
 
+/// Evidence issued only by this process creation boundary, never by a timeout.
+/// Bound to a one-use permit including store, attempt, epoch and dispatch nonce.
+#[derive(Debug)]
+pub struct NoProcessCreated {
+    context: crate::launch_state::DispatchIdentity,
+}
+impl NoProcessCreated {
+    pub(crate) fn context(&self) -> crate::launch_state::DispatchIdentity {
+        self.context
+    }
+}
+
+#[derive(Debug)]
+pub enum SpawnFailure {
+    NotCreated {
+        evidence: NoProcessCreated,
+        error: Error,
+    },
+    Indeterminate {
+        error: Error,
+    },
+}
+
+pub(crate) fn not_dispatched(
+    dispatch: crate::launch_state::LaunchDispatch,
+    error: Error,
+) -> SpawnFailure {
+    SpawnFailure::NotCreated {
+        evidence: NoProcessCreated {
+            context: dispatch.context(),
+        },
+        error,
+    }
+}
+
 pub struct StartedHost {
     process: OwnedHandle,
     pub identity: ProcessIdentity,
@@ -250,8 +285,40 @@ pub fn is_running_exact(expected: &ProcessIdentity) -> Result<bool> {
 }
 
 pub fn spawn(spec: SpawnSpec) -> Result<StartedProcess> {
-    identity::assert_ordinary_user()?;
-    spec.environment.validate()?;
+    spawn_checked(spec).map_err(|(error, _)| error)
+}
+
+pub fn spawn_for_attempt(
+    permit: crate::instance_resource::AuthorizedSpawn<'_>,
+    spec: SpawnSpec,
+) -> std::result::Result<StartedProcess, SpawnFailure> {
+    let context = permit.context();
+    let not_created = |error| SpawnFailure::NotCreated {
+        evidence: NoProcessCreated { context },
+        error,
+    };
+    if spec.exe != permit.binding().executable {
+        return Err(not_created(Error::Invalid("LAUNCH_EXECUTABLE_CHANGED")));
+    }
+    if identity::file_identity(&spec.exe).map_err(not_created)? != permit.binding().image {
+        return Err(not_created(Error::Invalid("LAUNCH_EXECUTABLE_CHANGED")));
+    }
+    // Keep the consumed permit, owner lease and reservation borrow alive through
+    // the creating thread's return. A panic after dispatch remains unknown.
+    let result = spawn_checked(spec).map_err(|(error, created)| {
+        if created {
+            SpawnFailure::Indeterminate { error }
+        } else {
+            not_created(error)
+        }
+    });
+    drop(permit);
+    result
+}
+
+fn spawn_checked(spec: SpawnSpec) -> std::result::Result<StartedProcess, (Error, bool)> {
+    identity::assert_ordinary_user().map_err(|e| (e, false))?;
+    spec.environment.validate().map_err(|e| (e.into(), false))?;
     if !spec.exe.is_absolute()
         || !spec.cwd.is_absolute()
         || !spec
@@ -259,16 +326,23 @@ pub fn spawn(spec: SpawnSpec) -> Result<StartedProcess> {
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
     {
-        return Err(Error::Invalid("ABSOLUTE_EXE_AND_CWD_REQUIRED"));
+        return Err((Error::Invalid("ABSOLUTE_EXE_AND_CWD_REQUIRED"), false));
     }
-    // Windows debug events and detach belong to the thread that created the child.
-    // A short-lived thread also tests that successful detach lets the target survive.
-    std::thread::spawn(move || spawn_on_thread(spec))
+    // Windows debug events and detach belong to the thread creating the child.
+    let thread = std::thread::Builder::new()
+        .spawn(move || {
+            let mut created = false;
+            let result = spawn_on_thread(spec, &mut created);
+            (result, created)
+        })
+        .map_err(|e| (e.into(), false))?;
+    let (result, created) = thread
         .join()
-        .map_err(|_| Error::Invalid("SPAWN_THREAD_PANICKED_RESULT_UNKNOWN"))?
+        .map_err(|_| (Error::Invalid("SPAWN_THREAD_PANICKED_RESULT_UNKNOWN"), true))?;
+    result.map_err(|error| (error, created))
 }
 
-fn spawn_on_thread(spec: SpawnSpec) -> Result<StartedProcess> {
+fn spawn_on_thread(spec: SpawnSpec, created: &mut bool) -> Result<StartedProcess> {
     let expected_image = identity::file_identity(&spec.exe)?;
     let caller = identity::current()?;
     let debug = matches!(spec.mode, CreationMode::DebugDetach);
@@ -289,6 +363,7 @@ fn spawn_on_thread(spec: SpawnSpec) -> Result<StartedProcess> {
         command.creation_flags(DEBUG_ONLY_THIS_PROCESS);
     }
     let mut child = command.spawn()?;
+    *created = true;
     if debug {
         // SAFETY: this thread just established a debug relationship via CreateProcess.
         if unsafe { DebugSetProcessKillOnExit(0) } == 0 {
