@@ -3,6 +3,8 @@
 pub mod identity;
 pub mod package;
 pub mod process;
+mod storage_security;
+pub mod store;
 
 use std::io;
 

@@ -11,6 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
+uuid.workspace = true
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization",
     "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx",

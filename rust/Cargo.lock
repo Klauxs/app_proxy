@@ -85,6 +85,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "uuid",
  "windows-sys",
 ]
 
