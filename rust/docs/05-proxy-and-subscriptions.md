@@ -82,7 +82,7 @@ HTTP 客户端按用途创建：代理健康/出口请求显式指定 profile；
 
 下载采用经过 fixture 验证的客户端 user-agent 列表，单次最多 15 秒，总预算 120 秒；流式读取解压后的总大小不得超过 8 MiB。成功获取正文后进入解析，不能通过反复换 UA 掩盖确定的语法错误。URL 只允许 HTTP/HTTPS，不允许 userinfo；query 可能含 token，整体视为秘密。重定向数量有界，禁止 HTTPS 降级到 HTTP。
 
-下载传输层现已实现：明确直连或指定回环 HTTP 入口，均忽略环境/系统代理；最多 5 次重定向，完整请求链禁止 HTTPS 降级。HTTP 非成功状态、请求超时和网络错误才继续下一 UA，成功正文立即交给未来解析器。URL/正文不持久化，错误只保留安全类别与 HTTP 状态码。调用方仍须核验指定入口属于自有 ManagedCore，并在提交时核对 source revision；该 API 自身不认领端口，也未接入生产订阅流程。
+下载传输层现已实现：明确直连或指定回环 HTTP 入口，均忽略环境/系统代理；最多 5 次重定向，完整请求链禁止 HTTPS 降级。HTTP 非成功状态、请求超时和网络错误才继续下一 UA，成功正文立即返回供解析。URL/正文不持久化，错误只保留安全类别与 HTTP 状态码。调用方仍须核验指定入口属于自有 ManagedCore，并在提交时核对 source revision；该 API 自身不认领端口，也未接入生产订阅流程。
 
 原始 HTTP 正文和解压后正文分别限制 8 MiB；禁用 reqwest 自动解压以先检查原始 Content-Encoding，拒绝重复、叠加和未知编码。支持 gzip/br/deflate（zlib）/zstd，gzip 多成员与 zstd 多帧完整解码并累计限制，所有解码器拒绝未消费尾部或损坏数据。完整接收网络正文后才解码，网络截断与压缩损坏分别处理；空正文和非 UTF-8 正文拒绝，不换 UA。当前 UA 兼容证据为本地 fixture，未宣称对真实订阅提供商逐一验证。
 
@@ -94,7 +94,13 @@ URI/Base64 适配与 typed Node 现已实现：六协议、标准/URL-safe Base6
 
 允许的扩展包括 TLS SNI/证书验证开关/ALPN/uTLS、Reality、VLESS Vision、VMess 加密/alter-id、Hysteria2 salamander/带宽，以及 WebSocket、HTTP、gRPC、HTTPUpgrade、QUIC。只从已验证类型生成单个 outbound，不能注入任意 JSON。Reality 公钥输出规范化为 URL-safe 无 padding，SS2022 每个密钥输出标准带 padding Base64；ChaCha20 的 SS2022 多密钥链拒绝，AES 可用。字段以 [sing-box 出口文档](https://sing-box.sagernet.org/configuration/outbound/)、[TLS](https://sing-box.sagernet.org/configuration/shared/tls/)、[传输](https://sing-box.sagernet.org/configuration/shared/v2ray-transport/) 为依据，并用本机固定 1.14.1 实测 check。
 
-未知参数、重复参数/别名、未知 VMess JSON 字段及无法保持含义的组合让该节点不可选。当前明确拒绝 TCP 的 HTTP 伪装（不能等价替换为 TLS 下的 HTTP/2）、无 TLS 的 h2、QUIC 上的 uTLS/Reality、AnyTLS/Hysteria2/SS 的 V2Ray transport，以及尚未映射的 SS plugin 等扩展。显式 http 在无 TLS 下为 HTTP/1，有 TLS 下为 HTTP/2，与 [1.14.1 内核实现](https://github.com/SagerNet/sing-box/blob/v1.14.1/transport/v2rayhttp/client.go) 一致。上述限制不能当作已完成其他订阅格式或全部扩展；Clash/文本适配、秘密持久化、刷新提交和 CLI 集成仍待续。
+未知参数、重复参数/别名、未知 VMess JSON 字段及无法保持含义的组合让该节点不可选。URI 当前明确拒绝 tcp/headerType=http、无 TLS 的 h2、QUIC 上的 uTLS/Reality、AnyTLS/Hysteria2/SS 的 V2Ray transport，以及尚未映射的 SS plugin 等扩展。URI 显式 http 在无 TLS 下为 HTTP/1，有 TLS 下为 HTTP/2，与 [1.14.1 内核实现](https://github.com/SagerNet/sing-box/blob/v1.14.1/transport/v2rayhttp/client.go) 一致。
+
+统一 `subscription::parse` 现可识别 Clash YAML、客户端文本、URI 列表及它们的一层 Base64 包装。YAML 使用事件解析器，只导入根 `proxies`，不执行规则、provider 或外部引用；支持有界锚点、别名和普通标量 `<<` 合并，拒绝标签、多文档、重复键、前向/自引用及超限展开。物理和别名逻辑深度均限 32，每次合并有工作预算；引号内的 `"<<"` 不作为合并键。ALPN 等块列表按层级读取，来源行号保留前导空行。
+
+文本读取 `[Proxy]`、`[server_local]` 或无节名节点列表，支持命名节点和 Quantumult X 协议前缀、位置参数和键值参数、带引号的逗号/等号/反斜杠。其他节忽略，仅支持整行注释；客户端的全部扩展并未覆盖。未知连接选项、证书约束、SS 插件、自定义传输头和不等价组合会报告不可选，不能静默删除。`client-fingerprint` 才映射 uTLS，证书 `fingerprint` 当前不支持；`udp: false` 保留 TCP 限制（AnyTLS 无等价字段则拒绝）。
+
+Clash `network: http` 与 URI 显式 http 分开处理：无 TLS 时明确保留默认 GET 或 `http-opts.method`，有 TLS 时拒绝，避免把 TCP 伪装转成 HTTP/2。真实 sing-box 1.14.1 本地收包夹具已验证 GET/POST 方法，另有 YAML/文本六协议共 12 个配置通过 check；这些不是完整协议握手或真实订阅服务验收。秘密持久化、刷新提交和 CLI 集成仍待续。
 
 刷新先锁外下载/解析，再对 source revision 做 compare-and-swap。按节点名保留选中项；重名拒绝；报告新增和删除；若刷新清空选择则保留旧配置。source 已变化就丢弃旧响应，不能写回覆盖。导入成功不等于节点实网可用，需生成配置 check 和对应探测。
 

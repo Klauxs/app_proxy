@@ -15,6 +15,7 @@ pub struct Node {
     pub protocol: Protocol,
     pub tls: Option<Tls>,
     pub transport: Option<Transport>,
+    pub tcp_only: bool,
 }
 #[derive(Clone, PartialEq, Eq)]
 pub enum Protocol {
@@ -59,10 +60,22 @@ pub struct Reality {
 }
 #[derive(Clone, PartialEq, Eq)]
 pub enum Transport {
-    WebSocket { path: String, host: Option<String> },
-    Http { path: String, hosts: Vec<String> },
-    Grpc { service_name: String },
-    HttpUpgrade { path: String, host: Option<String> },
+    WebSocket {
+        path: String,
+        host: Option<String>,
+    },
+    Http {
+        path: String,
+        hosts: Vec<String>,
+        method: Option<String>,
+    },
+    Grpc {
+        service_name: String,
+    },
+    HttpUpgrade {
+        path: String,
+        host: Option<String>,
+    },
     Quic,
 }
 
@@ -166,6 +179,9 @@ impl Node {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.tcp_only && matches!(self.protocol, Protocol::AnyTls { .. }) {
+            return Err(Error::UnsupportedOption);
+        }
         if !clean(&self.name, 256) || self.port == 0 {
             return Err(Error::InvalidNode);
         }
@@ -322,7 +338,18 @@ impl Node {
                         return Err(Error::InvalidNode);
                     }
                 }
-                Transport::Http { path, hosts } => {
+                Transport::Http {
+                    path,
+                    hosts,
+                    method,
+                } => {
+                    if method.as_ref().is_some_and(|s| {
+                        s.is_empty()
+                            || s.len() > 32
+                            || !s.bytes().all(|b| b.is_ascii_uppercase() || b == b'-')
+                    }) {
+                        return Err(Error::UnsupportedOption);
+                    }
                     valid_path(path)?;
                     if hosts.len() > 16 {
                         return Err(Error::InvalidNode);
@@ -399,6 +426,9 @@ impl Node {
         out["tag"] = json!(tag);
         out["server"] = json!(host(&self.server)?);
         out["server_port"] = json!(self.port);
+        if self.tcp_only {
+            out["network"] = json!("tcp");
+        }
         if let Some(tls) = &self.tls {
             let mut value = json!({"enabled":true,"insecure":tls.insecure});
             if let Some(name) = &tls.server_name {
@@ -424,7 +454,17 @@ impl Node {
                     }
                     value
                 }
-                Transport::Http { path, hosts } => json!({"type":"http","path":path,"host":hosts}),
+                Transport::Http {
+                    path,
+                    hosts,
+                    method,
+                } => {
+                    let mut value = json!({"type":"http","path":path,"host":hosts});
+                    if let Some(method) = method {
+                        value["method"] = json!(method);
+                    }
+                    value
+                }
                 Transport::Grpc { service_name } => {
                     json!({"type":"grpc","service_name":service_name})
                 }

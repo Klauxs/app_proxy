@@ -1,6 +1,9 @@
 //! Subscription import data is secret-bearing, in-memory data, not a manifest
 //! or arbitrary sing-box config. Diagnostics contain only categories and indexes.
+mod clash;
+mod fields;
 mod node;
+mod text;
 mod uri;
 use base64::{
     Engine, alphabet,
@@ -50,14 +53,87 @@ pub struct Parsed {
     pub unsupported: Vec<Issue>,
 }
 
+/// Detect a supported subscription container without executing external refs.
+pub fn parse(text: &str) -> Result<Parsed> {
+    parse_container(text, true)
+}
+fn parse_container(text: &str, allow_base64: bool) -> Result<Parsed> {
+    if text.len() > INPUT_LIMIT {
+        return Err(Error::TooLarge);
+    }
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if text.trim().is_empty() {
+        return Err(Error::Empty);
+    }
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|s| !s.is_empty() && !s.starts_with('#') && !s.starts_with(';'))
+        .ok_or(Error::Empty)?;
+    if first.starts_with('[')
+        || first.split_once('=').is_some_and(|(left, right)| {
+            right.contains(',') && !left.contains("://") && !left.contains(':')
+        })
+    {
+        return self::text::parse(text);
+    }
+    if first.starts_with('{')
+        || first.starts_with("---")
+        || first
+            .split_once(':')
+            .is_some_and(|(_, after)| !after.starts_with("//"))
+    {
+        return clash::parse(text);
+    }
+    // One Base64 envelope may contain any supported format, never nested envelopes.
+    if !text.contains("://") {
+        if !allow_base64 {
+            return Err(Error::Format);
+        }
+        let compact: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        let decoded = base64_text(&compact)?;
+        return parse_container(&decoded, false);
+    }
+    parse_uris(text)
+}
+
+fn collect(items: impl IntoIterator<Item = (usize, Result<Node>)>) -> Result<Parsed> {
+    let mut parsed = Parsed {
+        nodes: Vec::new(),
+        unsupported: Vec::new(),
+    };
+    let mut names = HashSet::new();
+    for (index, result) in items {
+        if parsed.nodes.len() + parsed.unsupported.len() >= NODE_LIMIT {
+            return Err(Error::TooManyNodes);
+        }
+        match result {
+            Ok(node) => {
+                if !names.insert(node.name.clone()) {
+                    return Err(Error::DuplicateNames);
+                }
+                parsed.nodes.push(node);
+            }
+            Err(reason) => parsed.unsupported.push(Issue {
+                source_index: index,
+                reason,
+            }),
+        }
+    }
+    if parsed.nodes.is_empty() && parsed.unsupported.is_empty() {
+        return Err(Error::Empty);
+    }
+    Ok(parsed)
+}
+
 /// Parse URI lines, optionally wrapped once in Base64 (standard or URL-safe,
 /// padded or unpadded). Other subscription formats have separate adapters.
 pub fn parse_uris(text: &str) -> Result<Parsed> {
     if text.len() > INPUT_LIMIT {
         return Err(Error::TooLarge);
     }
-    let text = text.trim().trim_start_matches('\u{feff}');
-    if text.is_empty() {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if text.trim().is_empty() {
         return Err(Error::Empty);
     }
     let decoded;
@@ -148,5 +224,7 @@ fn host(value: &str) -> Result<String> {
     }
 }
 
+#[cfg(test)]
+mod format_tests;
 #[cfg(test)]
 mod tests;

@@ -2,6 +2,16 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：Clash YAML 与客户端文本订阅适配**
+
+统一解析入口识别 YAML、客户端文本、URI 和一层 Base64 包装，复用六协议 typed Node 与 outbound 编译。YAML 使用有界事件解析，支持锚点/别名/合并且限制物理深度、别名逻辑深度与展开工作量；仅提取 proxies。文本支持 Proxy/server_local 节、位置参数和键值参数、引号内的分隔符与转义。未知连接字段和无法等价转换的选项报告不可选，不将原始内容写入诊断或 manifest。
+
+新增 10 项格式回归，合计 22 项解析专项经独立复跑通过：六协议双格式、嵌套 ALPN、四类 Base64、引号与字面百分号、YAML 合并优先级/类型/别名边界、资源上限、来源行号、重复/冲突选项与名称、未知安全约束、普通合并键和 HTTP 方法。审查推动修复证书 fingerprint 被误当 uTLS、HTTP + TLS 不等价转换、引号内合并键及默认 GET 被内核 PUT 替换；最终独立复审无阻塞问题。
+
+3 项真实 sing-box 1.14.1 契约测试单独显式运行，并经独立复跑全部通过：既有 16 个 URI 配置 check；新增 YAML/文本六协议共 12 个配置 check；新增自有 core 和回环 TCP 上游实际观察默认 GET 与显式 POST。收包夹具在读到请求头后关闭，不构成 VMess 握手/转发成功；只启动和停止自身 Child，未接触用户应用、真实订阅或用户凭据。没有执行提权安装或 IFEO 写入。
+
+最终全量 workspace **333 项通过、0 失败、30 项顶层 ignored**，日志 `.tools/subscription-formats-final-tests.log`。3 项内核契约属于 ignored 中另行显式验证的项目；workspace clippy -D warnings、fmt/diff 通过。格式解析完成不等于完整客户端扩展兼容，秘密分存、刷新选择保持和 CLI 仍待实现。
+
 **2026-09-20：六协议 URI/Base64 节点与 outbound**
 
 core 新增内存中的 Node/Protocol/Tls/Reality/Transport 类型和 URI 列表适配，覆盖 AnyTLS、VLESS、VMess、Shadowsocks、Trojan、Hysteria2；不实现 Debug/Serialize，不修改既有 manifest。原始 URI 仅一次百分号解码，Base64 Shadowsocks 凭据与 VMess JSON 保持字面值；输入/行/条目有界，重复名字拒绝，来源行号和固定错误类别不泄漏输入。未知连接字段和不支持的 TLS/transport 组合不能进入可选节点；outbound 编译重新验证并只输出允许字段。

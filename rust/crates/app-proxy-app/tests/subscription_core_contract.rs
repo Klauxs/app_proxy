@@ -83,3 +83,128 @@ async fn parsed_six_protocols_and_extensions_pass_real_core_check() {
         );
     }
 }
+
+#[tokio::test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX pointing to verified sing-box 1.14.1"]
+async fn clash_and_client_text_outbounds_pass_real_core_check() {
+    let binary = std::path::PathBuf::from(std::env::var_os("APP_PROXY_TEST_SING_BOX").unwrap());
+    let version = invoke(&binary, &["version"], None).await;
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("sing-box version 1.14.1"));
+    for text in [
+        include_str!("../../app-proxy-core/tests/fixtures/subscription.yaml"),
+        include_str!("../../app-proxy-core/tests/fixtures/subscription.txt"),
+    ] {
+        let parsed = app_proxy_core::subscription::parse(text).unwrap();
+        assert_eq!(parsed.unsupported, []);
+        assert_eq!(parsed.nodes.len(), 6);
+        for (index, node) in parsed.nodes.iter().enumerate() {
+            let config =
+                json!({"log":{"disabled":true}, "outbounds":[node.outbound("out").unwrap()]});
+            let result = invoke(
+                &binary,
+                &["check", "-c", "stdin"],
+                Some(serde_json::to_vec(&config).unwrap()),
+            )
+            .await;
+            assert!(
+                result.status.success(),
+                "synthetic fixture {index}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX; starts only an owned fixture core and loopback HTTP peer"]
+async fn clash_http_method_is_preserved_on_the_real_wire() {
+    use tokio::{
+        io::AsyncReadExt,
+        net::{TcpListener, TcpStream},
+    };
+    let binary = std::path::PathBuf::from(std::env::var_os("APP_PROXY_TEST_SING_BOX").unwrap());
+    let version = invoke(&binary, &["version"], None).await;
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("sing-box version 1.14.1"));
+    for (option, expected) in [
+        ("", "GET"),
+        (", http-opts: {method: POST, path: [/edge]}", "POST"),
+    ] {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let entry = reserved.local_addr().unwrap();
+        let text = format!(
+            "proxies: [{{name: synthetic, type: vmess, server: 127.0.0.1, port: {upstream_port}, uuid: 12345678-1234-1234-1234-123456789abc, network: http{option}}}]"
+        );
+        let parsed = app_proxy_core::subscription::parse(&text).unwrap();
+        assert_eq!(parsed.unsupported, []);
+        let config = json!({"log":{"disabled":true},
+            "inbounds":[{"type":"http","listen":"127.0.0.1","listen_port":entry.port()}],
+            "outbounds":[parsed.nodes[0].outbound("out").unwrap()]});
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fixture.json");
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        drop(reserved);
+        let mut child = Command::new(&binary)
+            .arg("run")
+            .arg("-c")
+            .arg(&path)
+            .creation_flags(0x08000000)
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "fixture core exited before ready"
+                );
+                if TcpStream::connect(entry).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(
+                reqwest::Proxy::all(format!("http://{entry}"))
+                    .unwrap()
+                    .no_proxy(None),
+            )
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let request = client.get("http://wire-fixture.invalid/").send();
+        let observe = async {
+            let (mut peer, _) = upstream.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                assert!(header.len() < 16384);
+                header.push(peer.read_u8().await.unwrap());
+            }
+            let first = std::str::from_utf8(&header)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .to_owned();
+            assert!(first.starts_with(&format!("{expected} ")), "{first}");
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // The fixture closes after observing headers; no successful upstream response is expected.
+            let (_response, ()) = tokio::join!(request, observe);
+        })
+        .await
+        .unwrap();
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
+    }
+}

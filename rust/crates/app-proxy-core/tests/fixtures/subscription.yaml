@@ -1,0 +1,45 @@
+defaults: &secure
+  server: 127.0.0.1
+  port: 443
+  password: 'fixture%2F,secret'
+  sni: example.com
+proxies:
+- <<: *secure
+  name: JP AnyTLS
+  type: anytls
+  udp: true
+  alpn:
+  - h2
+  - http/1.1
+- name: JP VLESS
+  type: vless
+  server: 127.0.0.1
+  port: 443
+  uuid: 12345678-1234-1234-1234-123456789abc
+  tls: true
+  network: ws
+  udp: false
+  ws-opts:
+    path: /edge%2F
+    headers:
+      Host: example.com
+- {name: JP VMess, type: vmess, server: 127.0.0.1, port: 443, uuid: 12345678-1234-1234-1234-123456789abc, alterId: 0, cipher: auto, tls: true, network: grpc, grpc-opts: {grpc-service-name: edge}}
+- {name: US SS, type: ss, server: 127.0.0.1, port: 8388, cipher: aes-128-gcm, password: 'fixture%2F,secret', udp: false}
+- <<: *secure
+  name: US Trojan
+  type: trojan
+  alpn:
+    - h2
+- <<: *secure
+  name: US Hysteria2
+  type: hysteria2
+  obfs: salamander
+  obfs-password: fixture
+  up: 100 Mbps
+  down: 200
+proxy-groups:
+- name: not-a-node
+  type: select
+  proxies: [JP AnyTLS]
+rules:
+- MATCH,not-a-node

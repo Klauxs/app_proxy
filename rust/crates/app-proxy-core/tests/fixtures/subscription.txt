@@ -1,0 +1,12 @@
+[General]
+ignored = not-a-proxy
+[Proxy]
+JP AnyTLS = anytls, 127.0.0.1, 443, password="fixture%2F,secret", sni=example.com
+JP VLESS = vless, 127.0.0.1, 443, username=12345678-1234-1234-1234-123456789abc, tls=true, ws=true, ws-path=/edge%2F, udp-relay=false
+JP VMess = vmess, 127.0.0.1, 443, auto, "12345678-1234-1234-1234-123456789abc", over-tls=true
+US SS = ss, 127.0.0.1, 8388, aes-128-gcm, "fixture%2F,secret", udp-relay=false
+[server_local]
+trojan=127.0.0.1:443, password="fixture%2F,secret", tls-host=example.com, tls-verification=true, tag=US Trojan
+hysteria2=127.0.0.1:443, password="fixture%2F,secret", obfs=salamander, obfs-password=fixture, up=100, down=200, tag=US Hysteria2
+[filter_local]
+host,example.com,not-a-proxy

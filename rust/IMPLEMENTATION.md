@@ -2,7 +2,7 @@
 
 目标：按已确认设计完整实现 Rust 版，每项功能经独立 review、修复与验证后单独 commit。此文件记录进度，不缩小设计范围；不把实验、编译或局部测试作为整个产品完成的证据。
 
-最近完成：六协议 URI/Base64 节点与 outbound 通过独立 review 和四项边界修复复审；12 项专项、16 个真实内核 check 样例通过，全量 323 项通过（28 项顶层 ignored），clippy/fmt/diff 通过。提交主题 `feat(rust): parse typed subscription URIs and compile protocol outbounds`。此前订阅下载传输层已提交 `3fe03a1`。实现与验收范围见 `TEST-RESULTS.md`；其他格式适配与生产导入流程待续。
+最近完成：Clash YAML 与客户端文本适配通过独立 review；合计 22 项解析专项、3 项真实 sing-box 契约测试通过，包含 GET/POST 本地收包验证。全量 333 项通过（30 项顶层 ignored），clippy/fmt/diff 通过。提交主题 `feat(rust): parse Clash and client text subscriptions`。此前 URI/Base64 已提交 `a0ec753`，下载传输层已提交 `3fe03a1`。实现与验收范围见 `TEST-RESULTS.md`；秘密分存、刷新和生产导入流程待续。
 
 | 功能 | 当前状态 | 完成证据 / 下一项验证 |
 |---|---|---|
@@ -29,7 +29,7 @@
 | sing-box 程序发现/检查 | 已实现，独立 review 通过 | 自动发现/真实 version、有界子进程输出及 check；CLI discover sing-box 已接入，安装及生产运行待实现 |
 | HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和真实 sing-box TLS/管理集成，已接初始内核管理，应用启动/运行监控待实现 |
 | 订阅下载 | 传输层已实现，独立 review 通过 | 明确路由、UA 回退、TLS/重定向限制、双 8 MiB 上限、四种压缩及完整成员读取；11 项专项通过，尚未接订阅 CLI、ManagedCore 选择和刷新提交 |
-| 订阅解析 | 六协议 typed Node、URI/Base64 与单 outbound 编译已实现，独立 review 通过 | 12 项专项与 16 个真实 1.14.1 check 样例通过；密钥规范化、严格字段/语义组合、凭据单次解码、名称/地区/有界诊断。Clash/文本适配、秘密分存、刷新与 CLI 待续 |
+| 订阅解析 | 六协议 typed Node、URI/Base64、Clash YAML、客户端文本与单 outbound 编译已实现，独立 review 通过 | 22 项专项、28 个真实 1.14.1 check 样例及 GET/POST 本地收包通过；有界 YAML 别名与层级、凭据引号/单次解码、严格字段/语义组合。秘密分存、刷新与 CLI 待续 |
 | IFEO | 注册/恢复平台层已实现并通过独立 review，入口待接入 | 受保护归属及父值备份、精确路径过滤、持久断点恢复、冲突保留；15 项专项测试通过。尚无生产调用方写入规则，真实匹配/防递归/子进程/完整接管待验收 |
 | Guard/ETW | 监听 host、授权安装、普通侧监听监督、自动扫描与纠正触发已接入 | 调度/受控进程/状态/协议测试及独立 review 通过；真实提权事件链路、登录任务与 IFEO 仍待验收或实现 |
 | 原生 ETW 进程事件平台层 | 已实现，独立 review 通过；实际 kernel provider 采集待授权验证 | 固定 provider/事件、TDH 命名属性、1024 项有界提示队列、丢失统计、会话归属及退出；默认 4 项及真实空会话控制测试通过，当前权限启用 provider 返回 Win32 5；未接入提权部署或事件管道 |

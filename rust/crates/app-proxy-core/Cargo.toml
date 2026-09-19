@@ -13,6 +13,7 @@ uuid.workspace = true
 url = "2"
 base64 = "0.22"
 percent-encoding = "2"
+yaml-rust2 = { version = "0.13", default-features = false }
 
 [lints]
 workspace = true

@@ -85,12 +85,13 @@ pub(super) fn parse(line: &str) -> Result<Node> {
         protocol,
         tls,
         transport,
+        tcp_only: false,
     };
     node.validate()?;
     Ok(node)
 }
 
-fn endpoint_parts(value: &str, default_https: bool) -> Result<(String, u16)> {
+pub(super) fn endpoint_parts(value: &str, default_https: bool) -> Result<(String, u16)> {
     let (name, port) = if value.starts_with('[') {
         let closing = value.find(']').ok_or(Error::InvalidNode)?;
         let port = &value[closing + 1..];
@@ -112,7 +113,7 @@ fn endpoint_parts(value: &str, default_https: bool) -> Result<(String, u16)> {
     };
     Ok((host(name)?, decimal(port)?))
 }
-fn decimal<T: std::str::FromStr>(value: &str) -> Result<T> {
+pub(super) fn decimal<T: std::str::FromStr>(value: &str) -> Result<T> {
     if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Error::InvalidNode);
     }
@@ -155,7 +156,7 @@ fn shadowsocks_authority(value: &str) -> Result<(String, String)> {
 }
 
 #[derive(Default)]
-struct Options(BTreeMap<String, String>);
+pub(super) struct Options(pub(super) BTreeMap<String, String>);
 impl Options {
     fn parse(query: &str) -> Result<Self> {
         let mut values = BTreeMap::new();
@@ -199,7 +200,7 @@ impl Options {
         }
     }
 }
-fn tls(options: &mut Options, required: bool) -> Result<Option<Tls>> {
+pub(super) fn tls(options: &mut Options, required: bool) -> Result<Option<Tls>> {
     let security = options.take(&["security"])?;
     let enabled = options.flag(&["tls"])?;
     if security.is_some() && enabled.is_some() {
@@ -259,7 +260,7 @@ fn tls(options: &mut Options, required: bool) -> Result<Option<Tls>> {
         reality,
     }))
 }
-fn transport(options: &mut Options, tls_enabled: bool) -> Result<Option<Transport>> {
+pub(super) fn transport(options: &mut Options, tls_enabled: bool) -> Result<Option<Transport>> {
     let kind = options
         .take(&["type", "network"])?
         .unwrap_or_else(|| "tcp".into());
@@ -280,6 +281,7 @@ fn transport(options: &mut Options, tls_enabled: bool) -> Result<Option<Transpor
             host: options.take(&["host"])?,
         }),
         "http" | "h2" => Some(Transport::Http {
+            method: None,
             path: options.take(&["path"])?.unwrap_or_else(|| "/".into()),
             hosts: options
                 .take(&["host"])?
@@ -403,6 +405,7 @@ fn vmess(payload: &str) -> Result<Node> {
         },
         tls,
         transport,
+        tcp_only: false,
     };
     node.validate()?;
     Ok(node)
