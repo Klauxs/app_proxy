@@ -49,7 +49,7 @@ pub enum Error {
     #[error("SUBSCRIPTION_UTF8_INVALID")]
     Utf8,
 }
-type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 // No Debug/Serialize: text can include both proxy credentials and provider tokens.
 pub struct Downloaded {

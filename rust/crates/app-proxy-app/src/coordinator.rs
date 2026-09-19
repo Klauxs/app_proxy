@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 12;
+const PROTOCOL_MINOR: u32 = 13;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -56,6 +56,22 @@ struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    SubscriptionPreview {
+        id: Uuid,
+        request: crate::subscription_preview::PreviewRequest,
+    },
+    SubscriptionPreviewPage {
+        id: Uuid,
+        offset: usize,
+    },
+    SubscriptionPreviewClose {
+        id: Uuid,
+    },
+    SubscriptionStage {
+        preview_id: Uuid,
+        stage_id: Uuid,
+        request: crate::subscription_preview::StageRequest,
+    },
     Status {},
     Catalog {
         offset: usize,
@@ -103,6 +119,13 @@ struct Response {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
+    SubscriptionPreview {
+        page: crate::subscription_preview::PreviewPage,
+    },
+    SubscriptionStaged {
+        staged: Box<app_proxy_windows::subscription_stage::StagedSubscription>,
+    },
+    SubscriptionPreviewClosed {},
     Status {
         status: Status,
     },
@@ -139,6 +162,7 @@ struct Shared {
     launch: Arc<crate::launch_engine::LaunchEngine>,
     guard_queries: Arc<tokio::sync::Semaphore>,
     guard_monitor: Arc<crate::guard_monitor::Monitor>,
+    subscription: Arc<crate::subscription_preview::PreviewService>,
     jobs: AtomicUsize,
     job_finished: tokio::sync::Notify,
 }
@@ -165,6 +189,10 @@ impl Shared {
             resources,
         )?;
         Ok(Self {
+            subscription: crate::subscription_preview::PreviewService::new(
+                configuration.clone(),
+                core.manager(),
+            ),
             identity,
             guard_monitor: crate::guard_monitor::Monitor::new(
                 configuration.clone(),
@@ -185,6 +213,7 @@ impl Shared {
             return Ok(false);
         }
         Ok(self.jobs.load(Ordering::SeqCst) == 0
+            && !self.subscription.keeps_alive()?
             && self.core.idle_allowed()?
             && self
                 .configuration
@@ -204,6 +233,26 @@ impl Shared {
     }
     fn execute(&self, request: Request) -> Result<Reply> {
         match request.operation {
+            Operation::SubscriptionPreview { id, request } => {
+                self.subscription.begin(id, request)?;
+                Ok(Reply::SubscriptionPreview {
+                    page: self.subscription.page(id, 0)?,
+                })
+            }
+            Operation::SubscriptionPreviewPage { id, offset } => Ok(Reply::SubscriptionPreview {
+                page: self.subscription.page(id, offset)?,
+            }),
+            Operation::SubscriptionPreviewClose { id } => {
+                self.subscription.close(id)?;
+                Ok(Reply::SubscriptionPreviewClosed {})
+            }
+            Operation::SubscriptionStage {
+                preview_id,
+                stage_id,
+                request,
+            } => Ok(Reply::SubscriptionStaged {
+                staged: Box::new(self.subscription.stage(preview_id, stage_id, request)?),
+            }),
             Operation::Catalog {
                 offset,
                 expected_revision,
@@ -418,6 +467,17 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if subscription_preview_operation(&request.operation) && client_minor < 13 {
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: Reply::Error {
+                    code: "SUBSCRIPTION_PROTOCOL_UPDATE_REQUIRED".into(),
+                },
+            })
+            .await;
+    }
     if subscription_edit_operation(&request.operation) && client_minor < 12 {
         return connection
             .send(&Response {
@@ -650,6 +710,9 @@ async fn rpc(
     if subscription_edit_operation(&request.operation) && server.protocol_minor < 12 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
+    if subscription_preview_operation(&request.operation) && server.protocol_minor < 13 {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     let request_id = request.request_id;
     connection.send(&request).await?;
     let response: Response = connection.receive().await?;
@@ -671,6 +734,24 @@ async fn rpc(
             "CONFIG_REQUEST_PENDING" => "CONFIG_REQUEST_PENDING",
             "CATALOG_CHANGED" => "CATALOG_CHANGED",
             "CATALOG_ENTRY_TOO_LARGE" => "CATALOG_ENTRY_TOO_LARGE",
+            "SUBSCRIPTION_PREVIEW_EXPIRED" => "SUBSCRIPTION_PREVIEW_EXPIRED",
+            "SUBSCRIPTION_PREVIEW_LIMIT" => "SUBSCRIPTION_PREVIEW_LIMIT",
+            "SUBSCRIPTION_PREVIEW_NOT_READY" => "SUBSCRIPTION_PREVIEW_NOT_READY",
+            "SUBSCRIPTION_STAGE_PENDING" => "SUBSCRIPTION_STAGE_PENDING",
+            "SUBSCRIPTION_STAGE_FAILED" => "SUBSCRIPTION_STAGE_FAILED",
+            "SUBSCRIPTION_STAGE_TOO_LARGE" => "SUBSCRIPTION_STAGE_TOO_LARGE",
+            "SUBSCRIPTION_PREVIEW_KIND_MISMATCH" => "SUBSCRIPTION_PREVIEW_KIND_MISMATCH",
+            "STALE_SUBSCRIPTION_SOURCE" => "STALE_SUBSCRIPTION_SOURCE",
+            "SUBSCRIPTION_SELECTED_NODE_REMOVED" => "SUBSCRIPTION_SELECTED_NODE_REMOVED",
+            "SUBSCRIPTION_URL_INVALID" => "SUBSCRIPTION_URL_INVALID",
+            "SUBSCRIPTION_PROFILE_REQUIRED" => "SUBSCRIPTION_PROFILE_REQUIRED",
+            "SUBSCRIPTION_REQUEST_TOO_LARGE" => "SUBSCRIPTION_REQUEST_TOO_LARGE",
+            "SELECTED_NODE_NOT_FOUND" => "SELECTED_NODE_NOT_FOUND",
+            "INVALID_SUBSCRIPTION_NODE" => "INVALID_SUBSCRIPTION_NODE",
+            "INVALID_SUBSCRIPTION_SECRET" => "INVALID_SUBSCRIPTION_SECRET",
+            "SECRET_ID_CONFLICT" => "SECRET_ID_CONFLICT",
+            "STALE_MANIFEST_REVISION" => "STALE_MANIFEST_REVISION",
+            "PROFILE_NOT_FOUND" => "PROFILE_NOT_FOUND",
             "LAUNCH_ATTEMPT_NOT_FOUND" => "LAUNCH_ATTEMPT_NOT_FOUND",
             "LAUNCH_OPERATION_LIMIT" => "LAUNCH_OPERATION_LIMIT",
             "LAUNCH_CONFIG_CHANGED" => "LAUNCH_CONFIG_CHANGED",
@@ -707,6 +788,82 @@ fn subscription_edit_operation(operation: &Operation) -> bool {
             action: CoreAction::PrepareSubscription { .. }
         }
     )
+}
+
+fn subscription_preview_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::SubscriptionPreview { .. }
+            | Operation::SubscriptionPreviewPage { .. }
+            | Operation::SubscriptionPreviewClose { .. }
+            | Operation::SubscriptionStage { .. }
+    )
+}
+
+pub async fn subscription_preview(
+    root: PathBuf,
+    id: Uuid,
+    request: crate::subscription_preview::PreviewRequest,
+) -> Result<crate::subscription_preview::PreviewPage> {
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::SubscriptionPreview { id, request },
+    )
+    .await?
+    {
+        Reply::SubscriptionPreview { page } => Ok(page),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn subscription_preview_page(
+    root: PathBuf,
+    id: Uuid,
+    offset: usize,
+) -> Result<crate::subscription_preview::PreviewPage> {
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::SubscriptionPreviewPage { id, offset },
+    )
+    .await?
+    {
+        Reply::SubscriptionPreview { page } => Ok(page),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn subscription_preview_close(root: PathBuf, id: Uuid) -> Result<()> {
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::SubscriptionPreviewClose { id },
+    )
+    .await?
+    {
+        Reply::SubscriptionPreviewClosed {} => Ok(()),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn subscription_stage(
+    root: PathBuf,
+    preview_id: Uuid,
+    stage_id: Uuid,
+    request: crate::subscription_preview::StageRequest,
+) -> Result<app_proxy_windows::subscription_stage::StagedSubscription> {
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::SubscriptionStage {
+            preview_id,
+            stage_id,
+            request,
+        },
+    )
+    .await?
+    {
+        Reply::SubscriptionStaged { staged } => Ok(*staged),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
 }
 
 pub async fn request_status(

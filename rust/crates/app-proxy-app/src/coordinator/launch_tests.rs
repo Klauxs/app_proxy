@@ -1,6 +1,194 @@
 use super::*;
 use app_proxy_core::{launch::LaunchPhase, model::*};
 
+#[tokio::test]
+async fn subscription_preview_requires_minor_thirteen_in_both_directions() {
+    use crate::subscription_preview::{PreviewRequest, StageRequest};
+    for operation in [
+        Operation::SubscriptionPreview {
+            id: Uuid::new_v4(),
+            request: PreviewRequest::Import {
+                url: "http://127.0.0.1:1/private-token".into(),
+                network: NetworkBinding::Direct {},
+            },
+        },
+        Operation::SubscriptionPreviewPage {
+            id: Uuid::new_v4(),
+            offset: 0,
+        },
+        Operation::SubscriptionPreviewClose { id: Uuid::new_v4() },
+        Operation::SubscriptionStage {
+            preview_id: Uuid::new_v4(),
+            stage_id: Uuid::new_v4(),
+            request: StageRequest::Refresh {},
+        },
+    ] {
+        let fixture = Fixture::new();
+        let bytes = serde_json::to_vec(&operation).unwrap();
+        let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+        let identity = fixture.shared.identity.clone();
+        let old_server = tokio::spawn(async move {
+            let mut connection = listener.accept().await.unwrap();
+            connection.receive::<Hello>().await.unwrap();
+            let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
+            greeting.protocol_minor = 12;
+            connection
+                .send(&Welcome::Ready { hello: greeting })
+                .await
+                .unwrap();
+            assert!(connection.receive::<Request>().await.is_err());
+        });
+        assert!(matches!(
+            fixture.rpc(Uuid::new_v4(), operation).await,
+            Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+        ));
+        old_server.await.unwrap();
+        let server = fixture.server();
+        let policy = policy();
+        let mut connection = ipc::connect(
+            fixture.shared.identity.store_id,
+            &policy,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
+        greeting.protocol_minor = 12;
+        connection.send(&greeting).await.unwrap();
+        connection.receive::<Welcome>().await.unwrap();
+        connection
+            .send(&Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id: Uuid::new_v4(),
+                operation: serde_json::from_slice(&bytes).unwrap(),
+            })
+            .await
+            .unwrap();
+        let response: Response = connection.receive().await.unwrap();
+        assert!(
+            matches!(response.result, Reply::Error { code } if code == "SUBSCRIPTION_PROTOCOL_UPDATE_REQUIRED")
+        );
+        assert!(!fixture.shared.subscription.keeps_alive().unwrap());
+        assert_eq!(fixture.shared.configuration.snapshot().unwrap().revision, 2);
+        drop(connection);
+        server.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn subscription_rpc_keeps_preview_alive_and_preserves_failed_stage_reason() {
+    use crate::subscription_preview::{PreviewRequest, PreviewStatus, StageRequest};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let fixture = Fixture::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/?token=private-source-token",
+        listener.local_addr().unwrap()
+    );
+    let http = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(stream.read_u8().await.unwrap());
+        }
+        let body = "trojan://private-password@edge.invalid:443#Node";
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let server = fixture.server();
+    let id = Uuid::new_v4();
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::SubscriptionPreview {
+                    id,
+                    request: PreviewRequest::Import {
+                        url,
+                        network: NetworkBinding::Direct {}
+                    }
+                }
+            )
+            .await
+            .unwrap(),
+        Reply::SubscriptionPreview { .. }
+    ));
+    let page = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let Reply::SubscriptionPreview { page } = fixture
+                .rpc(
+                    Uuid::new_v4(),
+                    Operation::SubscriptionPreviewPage { id, offset: 0 },
+                )
+                .await
+                .unwrap()
+            else {
+                panic!()
+            };
+            match page.status {
+                PreviewStatus::Pending {} => tokio::time::sleep(Duration::from_millis(10)).await,
+                PreviewStatus::Ready { .. } => break page,
+                PreviewStatus::Failed { code } => panic!("{code}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    http.await.unwrap();
+    assert_eq!(page.nodes[0].name, "Node");
+    assert!(!serde_json::to_string(&page).unwrap().contains("private-"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!server.is_finished());
+    assert!(
+        fixture
+            .shared
+            .configuration
+            .snapshot()
+            .unwrap()
+            .profiles
+            .is_empty()
+    );
+    // Failed staging must return the same concrete code over real IPC too.
+    let failed_id = Uuid::new_v4();
+    for _ in 0..2 {
+        assert!(matches!(
+            fixture
+                .rpc(
+                    Uuid::new_v4(),
+                    Operation::SubscriptionStage {
+                        preview_id: id,
+                        stage_id: failed_id,
+                        request: StageRequest::Refresh {}
+                    }
+                )
+                .await,
+            Err(Error::Invalid("SUBSCRIPTION_PREVIEW_KIND_MISMATCH"))
+        ));
+    }
+    fixture
+        .rpc(Uuid::new_v4(), Operation::SubscriptionPreviewClose { id })
+        .await
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::SubscriptionPreviewPage { id, offset: 0 }
+            )
+            .await,
+        Err(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED"))
+    ));
+    server.await.unwrap().unwrap();
+}
+
 struct Fixture {
     shared: Arc<Shared>,
     instance: Uuid,

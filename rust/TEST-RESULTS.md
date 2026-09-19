@@ -2,6 +2,16 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：订阅预览协调服务与 RPC**
+
+coordinator 新增内存预览会话：下载/解析移出配置锁，只返回分页节点元数据；最多 4 个会话，10 分钟到期，关闭会取消下载，忙槽在实际 worker 结束后才释放。预览本身不写秘密或 manifest，不启动/停止内核。确认节点后的 stage 仅发布不可变秘密和引用式 ConfigRequest；缓存精确请求与固定失败码，同 ID 重试保持原结果，提交继续走既有持久配置请求和共享 core 影响确认。coordinator 重启后预览失效，须重新下载；已提交配置仍按原请求编号查询。未提交 stage 可能留下无引用秘密文件，不自动删除用户配置。
+
+8 项新增默认测试通过并经独立复跑：本地 HTTP 下载只读/分页/脱敏、同 ID 去重与冲突、stage 精确请求及已提交结果重放、失败具体原因重放、4 个慢下载取消及槽释放、TTL/跨 epoch 失效、刷新期间改名允许与来源 revision 变化拒绝、未运行自有 core 时不连接外部监听也不退回直连；真实管道验证 minor 13 四类操作双向准入、预览保活、分页、失败码重放及关闭。独立订阅专项共 22 项通过、3 项 ignored。
+
+新增真实 sing-box 1.14.1 专项单独运行并经独立复跑通过：自有 core 的手动 HTTP 路由连到回环合成上游，下载 `.invalid` 地址得到两个节点，前后进程身份相同；非法 URL 拒绝后内核仍存活。下载在共享生命周期 gate 内，前后核验进程和全部入口的归属。失败保留场景为 URL 校验失败，不是网络中断验收；没有访问真实订阅、操作用户应用或执行提权操作。
+
+CLI 导入/刷新/选择与完整菜单尚未接入；按 profile 下载目前要求自有 core 已就绪，预览服务本身不触发安装或启动。独立最终复审无剩余阻塞。全量 workspace **357 项通过、0 失败、33 项顶层 ignored**，日志 `.tools/subscription-preview-final-tests.log`；新增真实下载测试属于 ignored 中另行显式通过的一项。workspace clippy -D warnings、fmt/diff 通过。提交主题 `feat(rust): coordinate bounded subscription previews and staging`。
+
 **2026-09-20：订阅 staging、刷新/选择事务与共享 core 恢复**
 
 新增 Store 导入/刷新 staging API，将调用方已解析的节点转换为不可变秘密及只含引用的 ConfigRequest；不提交 manifest 或启动进程。来源 revision/URL 引用来自下载前，当前全局 revision 在 staging 时读取；registry 提交再次核验。按名字保留 ID/当前选择，所选名字消失、重名、来源陈旧或提交期间全局变化都拒绝覆盖；不变节点复用秘密。Refresh/Select 如不改变整个活动 generation 的编译字节可纯提交，连接变化仍需 PrepareSubscription 预览和已有 ApplyUpdate 明确确认。

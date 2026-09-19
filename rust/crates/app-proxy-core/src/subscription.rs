@@ -70,13 +70,14 @@ pub fn source_url(value: &str) -> Result<url::Url> {
     Ok(url)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Issue {
     /// One-based line in the decoded source. No name, raw protocol or input text.
     pub source_index: usize,
     pub reason: Error,
 }
 // No Debug or Serialize: successful entries contain credentials.
+#[derive(Clone)]
 pub struct Parsed {
     pub nodes: Vec<Node>,
     pub unsupported: Vec<Issue>,

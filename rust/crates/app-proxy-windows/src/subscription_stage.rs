@@ -24,6 +24,8 @@ pub struct ImportRequest {
 
 /// Retain/replay this exact request after a lost commit response. A new download
 /// is a new operation, never a retry with different content under the same ID.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StagedSubscription {
     pub request: ConfigRequest,
     pub changes: SubscriptionChanges,

@@ -50,6 +50,53 @@ pub enum CoreObserved {
 }
 
 impl CoreManager {
+    /// Download through a currently verified owned route only. The lifecycle
+    /// gate keeps our stop/reconfigure from replacing it during this request.
+    pub(crate) async fn download_subscription(
+        &self,
+        profile_id: Uuid,
+        target: &str,
+    ) -> Result<crate::subscription_download::Result<crate::subscription_download::Downloaded>>
+    {
+        let _gate = self.gate.lock().await;
+        let (process, endpoint, endpoints) = {
+            let store = self.configuration.lock()?;
+            store.ensure_core_update_idle()?;
+            let CoreState::Running {
+                generation,
+                process,
+            } = store.core_state()?
+            else {
+                return Err(Error::Invalid("SUBSCRIPTION_DOWNLOAD_PROXY_NOT_READY"));
+            };
+            let active = store.open_core_generation(generation)?;
+            if !store.core_generation_is_current(&active)? {
+                return Err(Error::Invalid("CORE_CONFIG_CHANGED"));
+            }
+            let endpoint = active
+                .profiles()
+                .iter()
+                .find(|p| p.id == profile_id)
+                .ok_or(Error::Invalid("SUBSCRIPTION_DOWNLOAD_PROXY_NOT_READY"))?
+                .endpoint
+                .clone();
+            let endpoints: Vec<_> = active
+                .profiles()
+                .iter()
+                .map(|p| p.endpoint.clone())
+                .collect();
+            (process, endpoint, endpoints)
+        };
+        let core = CoreProcess::attach(&process)?;
+        if !core.listeners_verified(&endpoints)? {
+            return Err(Error::Invalid("CORE_LISTENER_OWNER_UNCONFIRMED"));
+        }
+        let result = crate::subscription_download::download(target, Some(&endpoint)).await;
+        if !core.listeners_verified(&endpoints)? {
+            return Err(Error::Invalid("CORE_LISTENER_OWNER_UNCONFIRMED"));
+        }
+        Ok(result)
+    }
     pub fn new(root: PathBuf, configuration: Arc<Configuration>) -> Self {
         Self {
             root,

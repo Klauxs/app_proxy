@@ -2,7 +2,7 @@
 
 目标：按已确认设计完整实现 Rust 版，每项功能经独立 review、修复与验证后单独 commit。此文件记录进度，不缩小设计范围；不把实验、编译或局部测试作为整个产品完成的证据。
 
-最近完成：订阅导入/刷新 staging、Refresh/Select 事务与共享内核预览/切换/恢复接入通过独立 review；6 项新增默认回归和真实 sing-box 本地 Shadowsocks 选择/刷新/失败回滚经独立复跑通过。全量 349 项通过（32 项顶层 ignored），clippy/fmt/diff 通过。提交主题 `feat(rust): stage subscription edits and reuse shared core recovery`。此前秘密分存已提交 `9686786`。实现与验收范围见 `TEST-RESULTS.md`；下载协调、CLI 导入/刷新/节点选择及完整菜单待续。
+最近完成：订阅预览协调服务及 IPC 2.13 通过独立 review；8 项新增默认回归和真实 sing-box 自有路由下载经独立复跑通过。预览有界、可取消、到期失效；stage 保留精确请求及失败原因，提交复用既有事务。全量 357 项通过（33 项顶层 ignored），clippy/fmt/diff 通过。提交主题 `feat(rust): coordinate bounded subscription previews and staging`，此前刷新/选择事务已提交 `46ee54d`。实现与验收范围见 `TEST-RESULTS.md`；CLI 导入/刷新/节点选择及完整菜单待续。
 
 | 功能 | 当前状态 | 完成证据 / 下一项验证 |
 |---|---|---|
@@ -28,10 +28,10 @@
 | sing-box 配置生成 | 已实现，独立 review 通过 | 活动 profile 合并、固定入口→出口、末尾拒绝、HTTP/SOCKS5 认证及稳定配置；4 项规则测试和 1 项真实内核转发测试，已接入初始内核管理组件 |
 | sing-box 程序发现/检查 | 已实现，独立 review 通过 | 自动发现/真实 version、有界子进程输出及 check；CLI discover sing-box 已接入，安装及生产运行待实现 |
 | HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和真实 sing-box TLS/管理集成，已接初始内核管理，应用启动/运行监控待实现 |
-| 订阅下载 | 传输层已实现，独立 review 通过 | 明确路由、UA 回退、TLS/重定向限制、双 8 MiB 上限、四种压缩及完整成员读取；11 项专项通过，尚未接订阅 CLI、ManagedCore 选择和刷新提交 |
+| 订阅下载 | 传输层及预览协调服务已实现，独立 review 通过 | 明确路由、UA 回退、TLS/重定向限制、双 8 MiB 上限；自有已运行 core 归属核验、内存预览/分页/取消/TTL 与 stage；8 项新默认测试及真实路由下载通过；CLI 与就绪/安装流程待接入 |
 | 订阅解析 | 六协议 typed Node、URI/Base64、Clash YAML、客户端文本与单 outbound 编译已实现，独立 review 通过 | 22 项专项、28 个真实 1.14.1 check 样例及 GET/POST 本地收包通过；有界 YAML 别名与层级、凭据引号/单次解码、严格字段/语义组合 |
 | 订阅持久化与共享编译 | 已实现，独立 review 通过 | 10 项默认回归及真实 7 profile check，URL/节点秘密分存、严格绑定与损坏保留、目录脱敏、选中节点编译、旧启动摘要兼容 |
-| 订阅 staging/刷新/选择事务 | 已实现，独立 review 通过；下载协调与 CLI 待续 | 来源 CAS、按名字保持身份/选择、秘密复用与严格重放、完整配置字节判断重启；共享 core 预览/确认/恢复和持久回执，6 项默认及真实 Shadowsocks 切换/回滚通过；IPC 2.12 |
+| 订阅 staging/刷新/选择事务 | 已实现，下载协调已接入，独立 review 通过；CLI 待续 | 来源 CAS、按名字保持身份/选择、秘密复用与严格重放、完整配置字节判断重启；共享 core 预览/确认/恢复和持久回执，6 项默认及真实 Shadowsocks 切换/回滚通过；IPC 2.12，预览入口 2.13 |
 | IFEO | 注册/恢复平台层已实现并通过独立 review，入口待接入 | 受保护归属及父值备份、精确路径过滤、持久断点恢复、冲突保留；15 项专项测试通过。尚无生产调用方写入规则，真实匹配/防递归/子进程/完整接管待验收 |
 | Guard/ETW | 监听 host、授权安装、普通侧监听监督、自动扫描与纠正触发已接入 | 调度/受控进程/状态/协议测试及独立 review 通过；真实提权事件链路、登录任务与 IFEO 仍待验收或实现 |
 | 原生 ETW 进程事件平台层 | 已实现，独立 review 通过；实际 kernel provider 采集待授权验证 | 固定 provider/事件、TDH 命名属性、1024 项有界提示队列、丢失统计、会话归属及退出；默认 4 项及真实空会话控制测试通过，当前权限启用 provider 返回 Win32 5；未接入提权部署或事件管道 |
