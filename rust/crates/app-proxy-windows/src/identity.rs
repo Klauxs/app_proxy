@@ -37,9 +37,14 @@ pub(crate) fn open(pid: u32, access: u32) -> Result<OwnedHandle> {
 }
 
 pub fn assert_ordinary_user() -> Result<()> {
+    // SAFETY: current-process pseudo handle remains valid for this call.
+    unsafe { assert_ordinary_handle(GetCurrentProcess()) }
+}
+
+pub(crate) unsafe fn assert_ordinary_handle(process: RawHandle) -> Result<()> {
     // SAFETY: querying a token we own, with a correctly sized output buffer.
     unsafe {
-        let token = token(GetCurrentProcess())?;
+        let token = token(process)?;
         let mut elevation: TOKEN_ELEVATION = zeroed();
         let mut written = 0;
         if GetTokenInformation(
