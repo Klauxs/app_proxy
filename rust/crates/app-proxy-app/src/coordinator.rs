@@ -138,6 +138,7 @@ struct Shared {
     core: CoreControl,
     launch: Arc<crate::launch_engine::LaunchEngine>,
     guard_queries: Arc<tokio::sync::Semaphore>,
+    guard_monitor: Arc<crate::guard_monitor::Monitor>,
     jobs: AtomicUsize,
     job_finished: tokio::sync::Notify,
 }
@@ -165,6 +166,7 @@ impl Shared {
         )?;
         Ok(Self {
             identity,
+            guard_monitor: crate::guard_monitor::Monitor::new(configuration.clone()),
             configuration,
             core,
             launch,
@@ -323,6 +325,7 @@ async fn serve_connections(
     shared: Arc<Shared>,
     idle_timeout: Duration,
 ) -> Result<()> {
+    let _guard_listener = shared.guard_monitor.start()?;
     let mut idle_allowed = shared.idle_allowed()?;
     let mut clients = tokio::task::JoinSet::new();
     let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
@@ -417,12 +420,32 @@ async fn handle(
         let result = tokio::task::spawn_blocking(move || {
             let scan_allowed = permit.is_some();
             let _permit = permit;
-            runtime.block_on(crate::guard_control::status(
+            let mut status = runtime.block_on(crate::guard_control::status(
                 &shared.configuration,
                 &shared.launch,
                 instance_id,
                 scan_allowed,
-            ))
+            ))?;
+            // Receiving events is distinct from applying Guard policy. Until
+            // the scan consumer is connected, keep protection explicitly blocked.
+            if status.desired == app_proxy_core::model::Desired::Enabled
+                && status.diagnostic.as_deref()
+                    == Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED")
+            {
+                let listener = shared.guard_monitor.snapshot();
+                status.diagnostic = Some(match listener.phase {
+                    crate::guard_monitor::Phase::Etw => {
+                        "GUARD_EVENTS_CONNECTED_SCAN_PENDING".into()
+                    }
+                    crate::guard_monitor::Phase::Polling => {
+                        "GUARD_EVENTS_INTERRUPTED_SCAN_PENDING".into()
+                    }
+                    _ => listener
+                        .diagnostic
+                        .unwrap_or_else(|| "GUARD_LISTENER_START_PENDING".into()),
+                });
+            }
+            Ok::<_, Error>(status)
         })
         .await
         .map_err(|_| Error::Invalid("GUARD_STATUS_WORKER_FAILED"))?;
