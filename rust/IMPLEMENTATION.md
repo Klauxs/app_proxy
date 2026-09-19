@@ -18,6 +18,7 @@
 | 实例启动 | 待实现 | 统一状态机、安装解析和已运行判断 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
 | sing-box 管理/一键安装 | 待实现 | 自行启动、多个入口/出口共享进程、安装/取消、CONNECT/TLS、配置切换恢复 |
+| sing-box 配置生成 | 已实现，独立 review 通过 | 活动 profile 合并、固定入口→出口、末尾拒绝、HTTP/SOCKS5 认证及稳定配置；4 项规则测试和 1 项真实内核转发测试，尚未接入内核管理 |
 | 订阅解析 | 待实现 | 六协议、URI/Base64/Clash/文本格式、兼容 fixtures、刷新保持选择 |
 | IFEO | 仅调试创建候选 | 实际注册匹配/防递归/子进程/调用语义/恢复；未管理原版不受干预 |
 | Guard/ETW | 待实现 | 默认范围、普通/提权分工、事件/扫描、身份未知、限流及未管理进程存活 |
@@ -42,3 +43,4 @@
 - 安装解析：独立审查及桥接测试增量复审通过，3 项安装身份/更新夹具与 2 项 PowerShell 桥接夹具通过；真实 Codex/Claude discover 只读查询成功。提交主题 `feat(rust): resolve installation identity and package updates`。本批全量 75 项测试通过，3 项顶层 ignored（其中 2 项由父测试显式调用的子进程 fixture 已运行）；clippy 通过。尚未接入创建/启动，也未验证真实应用启动、多开或代理。
 - 配置写服务 / coordinator RPC：独立审查发现并修复旧状态快照覆盖 Guard 空闲策略的竞态；复审及查询恢复增量审查通过。提交主题 `feat(rust): coordinate durable configuration edits over IPC`。全量 81 项测试通过；随后新增临时文件占用查询恢复回归，4 项服务测试通过（共 82 项已验证行为测试）；clippy/fmt 通过。新增管道写测试仍为同测试进程两端；实际 CLI 写链路下一批验证。开发版协议 major 2；尚未实现启动、网络准备或 Guard 执行。
 - 实例配置 CLI：独立审查发现并修复长 Unicode locator 超出 IPC 帧限制的分页边界；复审通过。提交主题 `feat(rust): expose instance configuration commands`。4 项真实 CLI→host 测试验证创建/克隆/改名/绑定/移除/查询、只登记分身、安装别名复用及数据保留；列表隐藏参数/环境值，另有字节预算分页回归。全量 87 项测试通过（3 项顶层 ignored 的含义同前），clippy/fmt 通过；不包含真实应用启动、代理或保护执行。
+- sing-box 配置生成：独立审查通过，4 项配置契约及 1 项 sing-box 1.14.1 真实进程测试通过。提交主题 `feat(rust): compile shared sing-box proxy configurations`。真实测试覆盖同一内核的双上游认证、未匹配入口拒绝和故障不串线；全量 91 项测试通过、4 项顶层 ignored（其中真实内核测试另行显式运行），clippy/fmt 通过。尚未实现生产内核生命周期、安装或 CONNECT/TLS 健康检查。

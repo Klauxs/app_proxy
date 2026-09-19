@@ -2,6 +2,7 @@
 
 pub mod model;
 pub mod registry;
+pub mod singbox;
 pub mod template;
 
 use serde::{Deserialize, Serialize};
