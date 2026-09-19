@@ -2,9 +2,14 @@ use super::*;
 use app_proxy_core::{launch::LaunchPhase, model::*};
 
 #[tokio::test]
-async fn subscription_preview_requires_minor_thirteen_in_both_directions() {
+async fn subscription_preview_and_nodes_require_their_minor_in_both_directions() {
     use crate::subscription_preview::{PreviewRequest, StageRequest};
     for operation in [
+        Operation::SubscriptionNodes {
+            profile_id: Uuid::new_v4(),
+            offset: 0,
+            expected_revision: None,
+        },
         Operation::SubscriptionPreview {
             id: Uuid::new_v4(),
             request: PreviewRequest::Import {
@@ -24,6 +29,11 @@ async fn subscription_preview_requires_minor_thirteen_in_both_directions() {
         },
     ] {
         let fixture = Fixture::new();
+        let previous_minor = if matches!(&operation, Operation::SubscriptionNodes { .. }) {
+            13
+        } else {
+            12
+        };
         let bytes = serde_json::to_vec(&operation).unwrap();
         let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
         let identity = fixture.shared.identity.clone();
@@ -31,7 +41,7 @@ async fn subscription_preview_requires_minor_thirteen_in_both_directions() {
             let mut connection = listener.accept().await.unwrap();
             connection.receive::<Hello>().await.unwrap();
             let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
-            greeting.protocol_minor = 12;
+            greeting.protocol_minor = previous_minor;
             connection
                 .send(&Welcome::Ready { hello: greeting })
                 .await
@@ -53,7 +63,7 @@ async fn subscription_preview_requires_minor_thirteen_in_both_directions() {
         .await
         .unwrap();
         let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
-        greeting.protocol_minor = 12;
+        greeting.protocol_minor = previous_minor;
         connection.send(&greeting).await.unwrap();
         connection.receive::<Welcome>().await.unwrap();
         connection

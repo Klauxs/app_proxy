@@ -23,7 +23,7 @@ enum Commands {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// 创建、查看和编辑手动代理配置
+    /// 管理手动代理和订阅，导入、刷新及选择节点
     Proxy {
         #[command(subcommand)]
         command: app_proxy_app::proxy_cli::Command,

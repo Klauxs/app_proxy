@@ -36,6 +36,12 @@ impl Foreground {
         }
     }
     pub async fn read_line(&mut self) -> Result<String, Failure> {
+        Ok(self
+            .read_optional_line()
+            .await?
+            .unwrap_or_else(|| "2".into()))
+    }
+    pub async fn read_optional_line(&mut self) -> Result<Option<String>, Failure> {
         self.check()?;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         // Unlike spawn_blocking, a pending console read on this thread cannot
@@ -53,7 +59,7 @@ impl Foreground {
             result = receiver => {
                 let (bytes, input) = result.map_err(|_| fail(10, "PROMPT_READ_FAILED"))?
                     .map_err(|_| fail(10, "PROMPT_READ_FAILED"))?;
-                if bytes == 0 { Ok("2".into()) } else { Ok(input) }
+                if bytes == 0 { Ok(None) } else { Ok(Some(input)) }
             }
         }
     }

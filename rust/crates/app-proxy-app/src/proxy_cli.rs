@@ -42,6 +42,39 @@ pub struct Node {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// 导入订阅；地址通过交互输入或 --url-stdin 读取
+    Import {
+        #[arg(long)]
+        name: String,
+        /// 从标准输入读取一行订阅地址，避免命令行泄露 token
+        #[arg(long)]
+        url_stdin: bool,
+        /// 选择准确节点名；交互模式省略时显示列表
+        #[arg(long)]
+        node: Option<String>,
+        /// 使用本工具管理的代理下载；默认直接下载
+        #[arg(long)]
+        via: Option<Uuid>,
+        #[arg(long)]
+        apply_to_running: bool,
+    },
+    /// 刷新订阅，保留当前选中节点
+    Refresh {
+        id: Uuid,
+        #[arg(long)]
+        via: Option<Uuid>,
+        #[arg(long)]
+        apply_to_running: bool,
+    },
+    /// 列出订阅的已保存节点，不重新下载
+    Nodes { id: Uuid },
+    /// 选择已保存的订阅节点；省略节点 ID 时交互选择
+    Select {
+        id: Uuid,
+        node: Option<Uuid>,
+        #[arg(long)]
+        apply_to_running: bool,
+    },
     /// 列出代理地址、入口和认证状态；不显示凭据
     List,
     /// 查看一个代理配置；不检查当前连通性
@@ -129,6 +162,15 @@ fn display(text: &str) -> String {
 }
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
+    if matches!(
+        command,
+        Command::Import { .. }
+            | Command::Refresh { .. }
+            | Command::Nodes { .. }
+            | Command::Select { .. }
+    ) {
+        return crate::subscription_cli::run(root, command, json).await;
+    }
     if let Command::Request { id } = command {
         return instance_cli::run(root, instance_cli::Command::Request { id }, json).await;
     }
@@ -229,7 +271,11 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             name,
         },
         Command::Remove { id } => ConfigAction::RemoveProfile { profile_id: id },
-        Command::Request { .. } => unreachable!(),
+        Command::Request { .. }
+        | Command::Import { .. }
+        | Command::Refresh { .. }
+        | Command::Nodes { .. }
+        | Command::Select { .. } => unreachable!(),
     };
     let (request_id, receipt) = instance_cli::submit(&root, catalog.revision, action, json).await?;
     drop(reservations);

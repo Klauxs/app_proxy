@@ -76,6 +76,68 @@ pub struct PreviewPage {
     pub next_offset: Option<usize>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedNodeSummary {
+    pub id: Uuid,
+    pub node: NodeSummary,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedPage {
+    pub revision: u64,
+    pub source_revision: u64,
+    pub selected_node_id: Uuid,
+    pub nodes: Vec<SavedNodeSummary>,
+    pub next_offset: Option<usize>,
+}
+
+pub fn saved_page(
+    manifest: &app_proxy_core::model::Manifest,
+    profile_id: Uuid,
+    offset: usize,
+    expected_revision: Option<u64>,
+) -> Result<SavedPage> {
+    if expected_revision.is_some_and(|r| r != manifest.revision) {
+        return Err(Error::Invalid("CATALOG_CHANGED"));
+    }
+    let profile = manifest
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .ok_or(Error::Invalid("PROFILE_NOT_FOUND"))?;
+    let ProxySource::Subscription {
+        revision, nodes, ..
+    } = &profile.source
+    else {
+        return Err(Error::Invalid("SUBSCRIPTION_PROFILE_REQUIRED"));
+    };
+    let end = offset
+        .checked_add(64)
+        .ok_or(Error::Invalid("INVALID_PREVIEW_OFFSET"))?;
+    Ok(SavedPage {
+        revision: manifest.revision,
+        source_revision: *revision,
+        selected_node_id: profile.selected_node_id,
+        nodes: nodes
+            .iter()
+            .skip(offset)
+            .take(64)
+            .map(|n| SavedNodeSummary {
+                id: n.id,
+                node: NodeSummary {
+                    name: n.name.clone(),
+                    protocol: n.protocol,
+                    server: n.server.clone(),
+                    port: n.port,
+                },
+            })
+            .collect(),
+        next_offset: (end < nodes.len()).then_some(end),
+    })
+}
+
 enum Source {
     Import {
         url: String,

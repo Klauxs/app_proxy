@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 13;
+const PROTOCOL_MINOR: u32 = 14;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -56,6 +56,11 @@ struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    SubscriptionNodes {
+        profile_id: Uuid,
+        offset: usize,
+        expected_revision: Option<u64>,
+    },
     SubscriptionPreview {
         id: Uuid,
         request: crate::subscription_preview::PreviewRequest,
@@ -119,6 +124,9 @@ struct Response {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
+    SubscriptionNodes {
+        page: crate::subscription_preview::SavedPage,
+    },
     SubscriptionPreview {
         page: crate::subscription_preview::PreviewPage,
     },
@@ -233,6 +241,18 @@ impl Shared {
     }
     fn execute(&self, request: Request) -> Result<Reply> {
         match request.operation {
+            Operation::SubscriptionNodes {
+                profile_id,
+                offset,
+                expected_revision,
+            } => Ok(Reply::SubscriptionNodes {
+                page: crate::subscription_preview::saved_page(
+                    &self.configuration.snapshot()?,
+                    profile_id,
+                    offset,
+                    expected_revision,
+                )?,
+            }),
             Operation::SubscriptionPreview { id, request } => {
                 self.subscription.begin(id, request)?;
                 Ok(Reply::SubscriptionPreview {
@@ -467,6 +487,17 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if matches!(&request.operation, Operation::SubscriptionNodes { .. }) && client_minor < 14 {
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: Reply::Error {
+                    code: "SUBSCRIPTION_PROTOCOL_UPDATE_REQUIRED".into(),
+                },
+            })
+            .await;
+    }
     if subscription_preview_operation(&request.operation) && client_minor < 13 {
         return connection
             .send(&Response {
@@ -713,6 +744,11 @@ async fn rpc(
     if subscription_preview_operation(&request.operation) && server.protocol_minor < 13 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
+    if matches!(&request.operation, Operation::SubscriptionNodes { .. })
+        && server.protocol_minor < 14
+    {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     let request_id = request.request_id;
     connection.send(&request).await?;
     let response: Response = connection.receive().await?;
@@ -813,6 +849,28 @@ pub async fn subscription_preview(
     .await?
     {
         Reply::SubscriptionPreview { page } => Ok(page),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn subscription_nodes(
+    root: PathBuf,
+    profile_id: Uuid,
+    offset: usize,
+    expected_revision: Option<u64>,
+) -> Result<crate::subscription_preview::SavedPage> {
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::SubscriptionNodes {
+            profile_id,
+            offset,
+            expected_revision,
+        },
+    )
+    .await?
+    {
+        Reply::SubscriptionNodes { page } => Ok(page),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
 }

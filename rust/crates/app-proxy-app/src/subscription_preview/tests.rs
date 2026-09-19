@@ -202,6 +202,10 @@ async fn download_preview_is_read_only_and_stage_replays_the_exact_durable_reque
     let encoded = serde_json::to_vec(&staged).unwrap();
     assert!(!String::from_utf8_lossy(&encoded).contains("private-"));
     fixture.apply(&staged.request);
+    let saved = saved_page(&service.configuration.snapshot().unwrap(), profile, 0, None).unwrap();
+    assert_eq!(saved.nodes.len(), 64);
+    assert_eq!(saved.next_offset, Some(64));
+    assert!(!serde_json::to_string(&saved).unwrap().contains("secret"));
     // Simulate losing both stage and commit replies: the identical ID recovers
     // the original expected revision even after the commit advanced it.
     let repeated = service
@@ -210,6 +214,12 @@ async fn download_preview_is_read_only_and_stage_replays_the_exact_durable_reque
     assert_eq!(serde_json::to_vec(&repeated).unwrap(), encoded);
     fixture.apply(&repeated.request);
     assert_eq!(service.configuration.snapshot().unwrap().revision, 2);
+    let mut changed = service.configuration.snapshot().unwrap();
+    changed.revision += 1;
+    assert!(matches!(
+        saved_page(&changed, profile, 64, Some(saved.revision)),
+        Err(Error::Invalid("CATALOG_CHANGED"))
+    ));
     assert!(matches!(
         service.stage(id, stage_id, import(profile, "Node1")),
         Err(Error::Invalid("REQUEST_ID_CONFLICT"))

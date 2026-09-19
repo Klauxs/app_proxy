@@ -18,5 +18,6 @@ pub mod launch_engine;
 pub mod probe;
 pub mod proxy_cli;
 pub mod proxy_health;
+mod subscription_cli;
 pub mod subscription_download;
 pub mod subscription_preview;

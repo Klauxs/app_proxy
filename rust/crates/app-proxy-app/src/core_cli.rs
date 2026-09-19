@@ -403,13 +403,25 @@ pub(crate) async fn prepare_and_apply(
     prepare_and_apply_with_foreground(root, action, apply, json, &mut Foreground::new()).await
 }
 
-async fn prepare_and_apply_with_foreground(
+pub(crate) async fn prepare_and_apply_with_foreground(
     root: PathBuf,
     action: CoreAction,
     apply: bool,
     json: bool,
     foreground: &mut Foreground,
 ) -> Result<(), Failure> {
+    let (id, status) = prepare_and_apply_result(root, action, apply, json, foreground).await?;
+    output(id, &status, json)?;
+    outcome(status)
+}
+
+async fn prepare_and_apply_result(
+    root: PathBuf,
+    action: CoreAction,
+    apply: bool,
+    json: bool,
+    foreground: &mut Foreground,
+) -> Result<(Uuid, Option<CoreRequestStatus>), Failure> {
     foreground.check()?;
     let (request_id, status, interrupted) = submit(root.clone(), action, json, foreground).await;
     if interrupted {
@@ -422,7 +434,8 @@ async fn prepare_and_apply_with_foreground(
     }) = status
     else {
         output(request_id, &status, json)?;
-        return outcome(status);
+        outcome(status)?;
+        return Err(fail(6, "CORE_UPDATE_PLAN_MISSING"));
     };
     let plan_id = impact.plan_id;
     if json {
@@ -448,11 +461,75 @@ async fn prepare_and_apply_with_foreground(
     foreground.check()?;
     let (id, status, interrupted) =
         submit(root, CoreAction::ApplyUpdate { plan_id }, json, foreground).await;
-    output(id, &status, json)?;
     if interrupted {
+        output(id, &status, json)?;
         return Err(fail(5, "已停止后续操作；请查询原请求编号。"));
     }
-    outcome(status)
+    Ok((id, status))
+}
+
+/// Prepare a route for a subscription download with the same installation and
+/// concrete shared-core confirmation flow as an explicit start.
+pub(crate) async fn ensure_download_profile(
+    root: PathBuf,
+    profile_id: Uuid,
+    apply: bool,
+    json: bool,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    let snapshot = coordinator::core_status(root.clone())
+        .await
+        .map_err(|e| fail(3, e.to_string()))?;
+    if matches!(snapshot.observed, CoreObserved::Listening)
+        && snapshot.profiles.iter().any(|p| p.id == profile_id)
+    {
+        return foreground.check();
+    }
+    let action = CoreAction::Start {
+        profiles: vec![profile_id],
+        required: profile_id,
+    };
+    let (mut id, mut status, mut interrupted) =
+        submit(root.clone(), action.clone(), json, foreground).await;
+    if !interrupted && missing_binary(&status) && !json && interactive() {
+        install_interactively(root.clone(), foreground).await?;
+        foreground.check()?;
+        (id, status, interrupted) = submit(root.clone(), action, json, foreground).await;
+    }
+    if interrupted {
+        output(id, &status, json)?;
+        return Err(fail(5, "已停止下载；请查询原代理操作编号。"));
+    }
+    if matches!(&status, Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == "CORE_RECONFIGURE_REQUIRES_CONFIRMATION")
+    {
+        let revision = coordinator::catalog(root.clone())
+            .await
+            .map_err(|e| fail(3, e.to_string()))?
+            .revision;
+        (id, status) = prepare_and_apply_result(
+            root,
+            CoreAction::PrepareExpand {
+                expected_revision: revision,
+                profiles: vec![profile_id],
+                required: profile_id,
+            },
+            apply,
+            json,
+            foreground,
+        )
+        .await?;
+    }
+    if !matches!(
+        status,
+        Some(CoreRequestStatus::Complete {
+            outcome: CoreOutcome::Ready { .. } | CoreOutcome::Reconfigured { .. },
+            ..
+        })
+    ) {
+        output(id, &status, json)?;
+        return outcome(status);
+    }
+    foreground.check()
 }
 
 pub(crate) fn show_impact(impact: &app_proxy_core::core_control::UpdateImpact) {
