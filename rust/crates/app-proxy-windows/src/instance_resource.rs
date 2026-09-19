@@ -122,6 +122,10 @@ pub enum ResourcePhase {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceClaim {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    guard_stops: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guard_dispatch_id: Option<Uuid>,
     schema_version: u32,
     resource_key: [u8; 32],
     user_sid: String,
@@ -333,6 +337,11 @@ pub struct AuthorizedSpawn<'a> {
     _reservation: &'a mut ResourceReservation,
     dispatch: crate::launch_state::LaunchDispatch,
 }
+
+pub struct AuthorizedGuardStop<'a> {
+    pub(crate) dispatch: crate::launch_state::GuardStopDispatch,
+    _reservation: &'a mut ResourceReservation,
+}
 impl AuthorizedSpawn<'_> {
     pub(crate) fn package_request(&self) -> Option<&Path> {
         self.dispatch.package_request()
@@ -358,6 +367,12 @@ impl ResourceReservation {
             return Err(Error::Invalid("INSTANCE_RESOURCE_RECOVERY_REQUIRED"));
         }
         let claim = ResourceClaim {
+            guard_stops: self
+                .claim
+                .as_ref()
+                .map(|c| c.guard_stops.clone())
+                .unwrap_or_default(),
+            guard_dispatch_id: None,
             schema_version: 1,
             resource_key: self.resource.key,
             user_sid: self.resource.user_sid.clone(),
@@ -369,6 +384,59 @@ impl ResourceReservation {
             local_confirmed: false,
             phase: ResourcePhase::Reserved {},
         };
+        self.write(claim)
+    }
+
+    /// Consume the local one-use intent and persist the physical instance's
+    /// cooldown across store/owner changes before any native close request.
+    pub fn authorize_guard_stop(
+        &mut self,
+        dispatch: crate::launch_state::GuardStopDispatch,
+    ) -> Result<AuthorizedGuardStop<'_>> {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Invalid("CLOCK_BEFORE_EPOCH"))?
+            .as_secs();
+        self.publish_guard_stop(&dispatch, at)?;
+        Ok(AuthorizedGuardStop {
+            dispatch,
+            _reservation: self,
+        })
+    }
+
+    fn publish_guard_stop(
+        &mut self,
+        dispatch: &crate::launch_state::GuardStopDispatch,
+        at: u64,
+    ) -> Result<()> {
+        let mut claim = self.require_owner(dispatch.owner)?.clone();
+        let target = &dispatch.target.process;
+        if claim.phase != (ResourcePhase::Reserved {})
+            || claim.guard_dispatch_id.is_some()
+            || target.image_file != claim.image
+            || target.user_sid != claim.user_sid
+            || target.session_id != claim.session_id
+        {
+            return Err(Error::Invalid("GUARD_RESOURCE_MISMATCH"));
+        }
+        if claim.guard_stops.last().is_some_and(|last| *last > at) {
+            return Err(Error::Invalid("GUARD_CLOCK_ROLLBACK"));
+        }
+        claim
+            .guard_stops
+            .retain(|last| last.saturating_add(60) > at);
+        if claim
+            .guard_stops
+            .last()
+            .is_some_and(|last| last.saturating_add(5) > at)
+        {
+            return Err(Error::Invalid("GUARD_COOLDOWN"));
+        }
+        if claim.guard_stops.len() >= 3 {
+            return Err(Error::Invalid("GUARD_RATE_LIMIT"));
+        }
+        claim.guard_stops.push(at);
+        claim.guard_dispatch_id = Some(dispatch.nonce);
         self.write(claim)
     }
 
@@ -601,6 +669,11 @@ impl ResourceReservation {
     }
     fn validate(&self, claim: &ResourceClaim) -> Result<()> {
         if claim.schema_version != 1
+            || claim.guard_stops.len() > 3
+            || claim.guard_stops.contains(&0)
+            || claim.guard_stops.windows(2).any(|pair| pair[0] >= pair[1])
+            || claim.guard_dispatch_id.is_some_and(|id| id.is_nil())
+            || (claim.guard_dispatch_id.is_some() && claim.guard_stops.is_empty())
             || claim.resource_key != self.resource.key
             || claim.user_sid != self.registry.sid
             || claim.session_id != self.resource.session_id

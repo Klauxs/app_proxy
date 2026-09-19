@@ -17,12 +17,16 @@ const LIMIT: usize = 8 * 1024 * 1024;
 const REQUEST_LIMIT: usize = 4096;
 const RETENTION: u64 = 7 * 24 * 60 * 60;
 
+mod guard;
 #[cfg(test)]
 mod tests;
+pub use guard::{GuardStopDispatch, GuardStopReceipt};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guard_target: Option<GuardTarget>,
     request: LaunchRequest,
     attempt_id: Uuid,
 }
@@ -102,6 +106,29 @@ impl Store {
         epoch: Uuid,
         expected_revision: Option<u64>,
     ) -> Result<LaunchAdmission> {
+        self.begin_launch_checked(request, epoch, expected_revision, None)
+    }
+
+    pub fn begin_guard_launch(
+        &mut self,
+        request: &LaunchRequest,
+        epoch: Uuid,
+        revision: u64,
+        target: GuardTarget,
+    ) -> Result<LaunchAdmission> {
+        if request.origin != LaunchOrigin::Guard {
+            return Err(Error::Invalid("INVALID_GUARD_REQUEST"));
+        }
+        self.begin_launch_checked(request, epoch, Some(revision), Some(target))
+    }
+
+    fn begin_launch_checked(
+        &mut self,
+        request: &LaunchRequest,
+        epoch: Uuid,
+        expected_revision: Option<u64>,
+        guard_target: Option<GuardTarget>,
+    ) -> Result<LaunchAdmission> {
         if request.request_id.is_nil() || request.instance_id.is_nil() || epoch.is_nil() {
             return Err(Error::Invalid("INVALID_LAUNCH_REQUEST"));
         }
@@ -116,7 +143,7 @@ impl Store {
             .iter()
             .find(|r| r.request.request_id == request.request_id)
         {
-            if entry.request != *request {
+            if entry.request != *request || entry.guard_target != guard_target {
                 return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
             }
             return Ok(LaunchAdmission {
@@ -159,6 +186,9 @@ impl Store {
             .iter()
             .find(|a| a.instance_id == request.instance_id && a.reserves_instance());
         let is_new = existing.is_none();
+        if guard_target.is_some() && existing.is_some() {
+            return Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"));
+        }
         if expected_revision.is_some()
             && existing.is_some_and(|a| {
                 !matches!(a.phase, LaunchPhase::Confirmed { .. })
@@ -168,6 +198,14 @@ impl Store {
             return Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"));
         }
         let attempt = existing.cloned().unwrap_or(LaunchAttempt {
+            guard_correction: guard_target.clone().map(|target| {
+                Box::new(GuardCorrection {
+                    target,
+                    stop_started_at: None,
+                    stop_nonce: None,
+                    stop_confirmed: false,
+                })
+            }),
             package_request: None,
             id: request.request_id,
             instance_id: request.instance_id,
@@ -187,6 +225,7 @@ impl Store {
             journal.attempts.push(attempt.clone());
         }
         journal.requests.push(RequestEntry {
+            guard_target,
             request: request.clone(),
             attempt_id: attempt.id,
         });
@@ -457,7 +496,16 @@ impl Store {
             }
             if attempt.phase.before_spawn() {
                 attempt.phase = LaunchPhase::Failed {
-                    code: "LAUNCH_INTERRUPTED_BEFORE_SPAWN".into(),
+                    code: if attempt
+                        .guard_correction
+                        .as_ref()
+                        .is_some_and(|g| g.stop_started_at.is_some())
+                    {
+                        "GUARD_CORRECTION_INTERRUPTED"
+                    } else {
+                        "LAUNCH_INTERRUPTED_BEFORE_SPAWN"
+                    }
+                    .into(),
                 };
                 attempt.finished_at = Some(now()?.max(attempt.accepted_at));
                 changed = true;
@@ -581,6 +629,17 @@ impl Store {
             }
         }
         for a in &journal.attempts {
+            guard::validate(a, &header.owner_sid)?;
+            if journal
+                .requests
+                .iter()
+                .find(|r| r.request.request_id == a.id)
+                .is_none_or(|r| {
+                    r.guard_target.as_ref() != a.guard_correction.as_ref().map(|g| &g.target)
+                })
+            {
+                return Err(invalid());
+            }
             if a.dispatch_id.is_some_and(|id| id.is_nil())
                 || (a.phase.before_spawn() && a.dispatch_id.is_some())
                 || (a.package_request.is_some() && a.dispatch_id.is_none())

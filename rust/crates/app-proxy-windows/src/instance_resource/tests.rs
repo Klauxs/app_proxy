@@ -21,6 +21,190 @@ fn owner() -> ResourceOwner {
     }
 }
 
+fn guard_store(root: &Path) -> (Store, ResourceOwner, LaunchRequest, GuardTarget) {
+    let resource = current_resource();
+    let (mut store, setup) = ready_store(root, &resource, Uuid::new_v4());
+    store
+        .advance_launch(
+            setup.attempt_id,
+            setup.epoch,
+            &LaunchPhase::ReadyToSpawn {},
+            LaunchPhase::Failed {
+                code: "FIXTURE_SETUP".into(),
+            },
+        )
+        .unwrap();
+    let mut manifest = store.load().unwrap();
+    let profile = Uuid::new_v4();
+    let node = Uuid::new_v4();
+    let endpoint = Endpoint {
+        host: "127.0.0.1".parse().unwrap(),
+        port: 49199,
+    };
+    manifest.profiles.push(ProxyProfile {
+        id: profile,
+        name: "fixture".into(),
+        revision: 1,
+        kind: ProxyKind::Managed,
+        endpoint: endpoint.clone(),
+        selected_node_id: node,
+        source: ProxySource::Manual {
+            nodes: vec![ManualNode {
+                id: node,
+                name: "fixture".into(),
+                protocol: ManualProtocol::Http,
+                host: "127.0.0.1".into(),
+                port: 1,
+                credentials: None,
+            }],
+        },
+    });
+    manifest.applications[0].template_ref = Template::Chromium;
+    manifest.instances[0].guard.desired = Desired::Enabled;
+    manifest.instances[0].network = NetworkBinding::Profile {
+        profile_id: profile,
+    };
+    let request = LaunchRequest {
+        request_id: Uuid::new_v4(),
+        instance_id: manifest.instances[0].id,
+        origin: LaunchOrigin::Guard,
+    };
+    store.commit(manifest.revision, manifest).unwrap();
+    let target = GuardTarget {
+        process: identity::current().unwrap(),
+        endpoint,
+    };
+    let owner = ResourceOwner {
+        store_id: setup.store_id,
+        attempt_id: request.request_id,
+        epoch: Uuid::new_v4(),
+    };
+    store
+        .begin_guard_launch(
+            &request,
+            owner.epoch,
+            store.load().unwrap().revision,
+            target.clone(),
+        )
+        .unwrap();
+    store
+        .advance_launch(
+            owner.attempt_id,
+            owner.epoch,
+            &LaunchPhase::Accepted {},
+            LaunchPhase::Resolving {},
+        )
+        .unwrap();
+    store
+        .advance_launch(
+            owner.attempt_id,
+            owner.epoch,
+            &LaunchPhase::Resolving {},
+            LaunchPhase::CheckingInstance {},
+        )
+        .unwrap();
+    (store, owner, request, target)
+}
+
+#[test]
+fn guard_intent_is_one_use_and_recovery_or_aliases_cannot_upgrade_stop_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut store, owner, request, target) = guard_store(&temp.path().join("store"));
+    assert!(matches!(
+        store.begin_launch(&request, owner.epoch),
+        Err(Error::Invalid("REQUEST_ID_CONFLICT"))
+    ));
+    let mut alias = request.clone();
+    alias.request_id = Uuid::new_v4();
+    assert!(matches!(
+        store.begin_guard_launch(&alias, owner.epoch, store.load().unwrap().revision, target),
+        Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"))
+    ));
+    let path = store.root().join("state/launch.json");
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&path)
+        .unwrap();
+    assert!(
+        store
+            .dispatch_guard_stop(owner.attempt_id, owner.epoch)
+            .is_err()
+    );
+    assert!(
+        store
+            .launch_request(owner.attempt_id)
+            .unwrap()
+            .unwrap()
+            .guard_correction
+            .unwrap()
+            .stop_nonce
+            .is_none()
+    );
+    drop(held);
+    let dispatch = store
+        .dispatch_guard_stop(owner.attempt_id, owner.epoch)
+        .unwrap();
+    assert!(matches!(
+        store.dispatch_guard_stop(owner.attempt_id, owner.epoch),
+        Err(Error::Invalid("GUARD_STOP_ALREADY_DISPATCHED"))
+    ));
+    drop(dispatch); // Dropping the capability causes no process action.
+    store.recover_launches(Uuid::new_v4()).unwrap();
+    let result = store.launch_request(owner.attempt_id).unwrap().unwrap();
+    assert!(
+        matches!(result.phase, LaunchPhase::Failed { code } if code == "GUARD_CORRECTION_INTERRUPTED")
+    );
+    assert!(!result.guard_correction.unwrap().stop_confirmed);
+    assert!(
+        store
+            .dispatch_guard_stop(owner.attempt_id, owner.epoch)
+            .is_err()
+    );
+}
+
+#[test]
+fn physical_guard_cooldown_survives_other_stores_and_rejects_clock_rollback() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry = ResourceRegistry::open_at(&temp.path().join("resources")).unwrap();
+    let mut reservation = registry.acquire(current_resource()).unwrap();
+    for (index, at) in [100, 105, 110].into_iter().enumerate() {
+        let (mut store, owner, _, _) = guard_store(&temp.path().join(format!("store-{index}")));
+        reservation.reserve(owner).unwrap();
+        let dispatch = store
+            .dispatch_guard_stop(owner.attempt_id, owner.epoch)
+            .unwrap();
+        reservation.publish_guard_stop(&dispatch, at).unwrap();
+        assert!(matches!(
+            reservation.publish_guard_stop(&dispatch, at + 5),
+            Err(Error::Invalid("GUARD_RESOURCE_MISMATCH"))
+        ));
+        reservation.release_before_spawn(owner).unwrap();
+    }
+    drop(reservation);
+    let mut reservation = registry.acquire(current_resource()).unwrap();
+    let (mut store, owner, _, _) = guard_store(&temp.path().join("next-store"));
+    reservation.reserve(owner).unwrap();
+    let dispatch = store
+        .dispatch_guard_stop(owner.attempt_id, owner.epoch)
+        .unwrap();
+    assert!(matches!(
+        reservation.publish_guard_stop(&dispatch, 90),
+        Err(Error::Invalid("GUARD_CLOCK_ROLLBACK"))
+    ));
+    assert!(matches!(
+        reservation.publish_guard_stop(&dispatch, 113),
+        Err(Error::Invalid("GUARD_COOLDOWN"))
+    ));
+    assert!(matches!(
+        reservation.publish_guard_stop(&dispatch, 115),
+        Err(Error::Invalid("GUARD_RATE_LIMIT"))
+    ));
+    reservation.publish_guard_stop(&dispatch, 171).unwrap();
+    assert_eq!(reservation.claim().unwrap().guard_stops, vec![171]);
+    reservation.release_before_spawn(owner).unwrap();
+}
+
 #[test]
 fn package_recovery_revokes_pending_recovers_receipts_and_preserves_uncertainty() {
     use crate::package_launch::{

@@ -176,6 +176,7 @@ fn terminal_retention_clamps_clock_rollback_and_capacity_preserves_replays() {
     journal.attempts[0].accepted_at = 1; // Pending never expires by age.
     for _ in 1..REQUEST_LIMIT {
         journal.requests.push(RequestEntry {
+            guard_target: None,
             request: new_request(instance),
             attempt_id: current.request_id,
         });

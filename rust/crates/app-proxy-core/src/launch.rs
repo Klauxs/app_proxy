@@ -77,6 +77,8 @@ pub struct LaunchBinding {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchAttempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_correction: Option<Box<GuardCorrection>>,
     pub id: Uuid,
     pub instance_id: Uuid,
     pub origin: LaunchOrigin,
@@ -101,6 +103,22 @@ pub struct LaunchAttempt {
     /// package capability from an ordinary CreateProcess result that was lost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_request: Option<PathBuf>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardTarget {
+    pub process: ProcessIdentity,
+    pub endpoint: Endpoint,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardCorrection {
+    pub target: GuardTarget,
+    pub stop_started_at: Option<u64>,
+    pub stop_nonce: Option<Uuid>,
+    pub stop_confirmed: bool,
 }
 impl LaunchAttempt {
     pub fn reserves_instance(&self) -> bool {

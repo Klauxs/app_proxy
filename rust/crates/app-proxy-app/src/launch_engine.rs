@@ -5,7 +5,7 @@ use app_proxy_core::{launch::*, model::*, template};
 use app_proxy_windows::{
     Error, Result, identity, installation,
     instance_data::PreparedData,
-    instance_process::{InstanceRelation, InstanceTarget, ProcessRole},
+    instance_process::{InstanceRelation, InstanceTarget, ProcessRole, ProxyArguments},
     instance_resource::{
         InstanceResource, ResourceOwner, ResourcePhase, ResourceRegistry, ResourceReservation,
     },
@@ -31,6 +31,12 @@ pub struct LaunchEngine {
     before_dispatch: Mutex<Option<Arc<tokio::sync::Notify>>>,
     #[cfg(test)]
     after_spawn: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    before_guard_stop: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    before_guard_receipt: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_guard_stop: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl LaunchEngine {
     pub fn new(
@@ -62,6 +68,12 @@ impl LaunchEngine {
             before_dispatch: Mutex::new(None),
             #[cfg(test)]
             after_spawn: Mutex::new(None),
+            #[cfg(test)]
+            before_guard_stop: Mutex::new(None),
+            #[cfg(test)]
+            before_guard_receipt: Mutex::new(None),
+            #[cfg(test)]
+            after_guard_stop: Mutex::new(None),
         }))
     }
 
@@ -76,13 +88,43 @@ impl LaunchEngine {
         request: LaunchRequest,
         expected_revision: Option<u64>,
     ) -> Result<LaunchAttempt> {
+        self.submit_checked(request, expected_revision, None).await
+    }
+
+    /// Internal Guard adapter. A caller-supplied origin label on ordinary launch
+    /// never grants stop permission; this path binds an exact observed target.
+    pub async fn submit_guard(
+        self: &Arc<Self>,
+        request: LaunchRequest,
+        revision: u64,
+        target: GuardTarget,
+    ) -> Result<LaunchAttempt> {
+        self.submit_checked(request, Some(revision), Some(target))
+            .await
+    }
+
+    async fn submit_checked(
+        self: &Arc<Self>,
+        request: LaunchRequest,
+        expected_revision: Option<u64>,
+        guard_target: Option<GuardTarget>,
+    ) -> Result<LaunchAttempt> {
         let mut active = self
             .active
             .lock()
             .map_err(|_| Error::Invalid("LAUNCH_OWNER_FAILED"))?;
         let mut store = self.configuration.lock()?;
+        let admit = |store: &mut app_proxy_windows::store::Store| match &guard_target {
+            Some(target) => store.begin_guard_launch(
+                &request,
+                self.epoch,
+                expected_revision.unwrap(),
+                target.clone(),
+            ),
+            None => store.begin_launch_at_revision(&request, self.epoch, expected_revision),
+        };
         if store.launch_request(request.request_id)?.is_some() {
-            return Ok(store.begin_launch(&request, self.epoch)?.attempt);
+            return Ok(admit(&mut store)?.attempt);
         }
         store.recover_config_requests()?;
         for attempt in store.launch_attempts()? {
@@ -119,7 +161,7 @@ impl LaunchEngine {
                 }
             }
         }
-        let admission = store.begin_launch_at_revision(&request, self.epoch, expected_revision)?;
+        let admission = admit(&mut store)?;
         if admission.is_new {
             active.insert(admission.attempt.id);
             let job = Job {
@@ -154,7 +196,16 @@ impl LaunchEngine {
                 attempt.epoch,
                 &attempt.phase,
                 LaunchPhase::Failed {
-                    code: "LAUNCH_EXECUTION_INTERRUPTED".into(),
+                    code: if attempt
+                        .guard_correction
+                        .as_ref()
+                        .is_some_and(|g| g.stop_started_at.is_some())
+                    {
+                        "GUARD_CORRECTION_INTERRUPTED"
+                    } else {
+                        "LAUNCH_EXECUTION_INTERRUPTED"
+                    }
+                    .into(),
                 },
             )?;
         }
@@ -271,12 +322,31 @@ impl LaunchEngine {
             .launch_request(id)?
             .ok_or(Error::Invalid("LAUNCH_ATTEMPT_NOT_FOUND"))?;
         if attempt.phase.before_spawn() {
-            let phase = if attempt.cancel_requested && released {
+            let phase = if attempt.cancel_requested
+                && released
+                && attempt
+                    .guard_correction
+                    .as_ref()
+                    .is_some_and(|g| g.stop_started_at.is_some())
+            {
+                LaunchPhase::Failed {
+                    code: "GUARD_CANCELLED_AFTER_STOP_REQUEST".into(),
+                }
+            } else if attempt.cancel_requested && released {
                 LaunchPhase::Cancelled {}
             } else {
                 LaunchPhase::Failed {
                     code: if released {
-                        error_code(error)
+                        if matches!(attempt.phase, LaunchPhase::PreparingProxy {})
+                            && attempt
+                                .guard_correction
+                                .as_ref()
+                                .is_some_and(|g| g.stop_confirmed)
+                        {
+                            "GUARD_STOPPED_PROXY_UNAVAILABLE"
+                        } else {
+                            error_code(error)
+                        }
                     } else {
                         "INSTANCE_RESOURCE_RELEASE_FAILED"
                     }
@@ -370,6 +440,25 @@ impl LaunchEngine {
         }
         acquired.reserve(owner)?;
         *reservation = Some(acquired);
+        let correction = self
+            .configuration
+            .lock()?
+            .launch_request(id)?
+            .unwrap()
+            .guard_correction;
+        let (application, data) = if let Some(correction) = correction {
+            self.correct_guard(
+                id,
+                application,
+                data,
+                app.template_ref,
+                &correction.target,
+                reservation,
+            )
+            .await?
+        } else {
+            (application, data)
+        };
         check_occupancy(&application, data.as_ref(), app.template_ref).await?;
         self.advance(
             id,
@@ -514,6 +603,114 @@ impl LaunchEngine {
         .await
         .map_err(|_| Error::Invalid("LAUNCH_CREATION_INTERRUPTED"))??;
         Ok(())
+    }
+
+    async fn correct_guard(
+        &self,
+        id: Uuid,
+        application: installation::ResolvedApplication,
+        data: Option<PreparedData>,
+        template: Template,
+        target: &GuardTarget,
+        reservation: &mut Option<ResourceReservation>,
+    ) -> Result<(installation::ResolvedApplication, Option<PreparedData>)> {
+        let instance = InstanceTarget::new(&application, data.as_ref(), template)?;
+        let endpoint = std::net::SocketAddr::new(target.endpoint.host, target.endpoint.port);
+        let observed =
+            query_when_ready(|| instance.inspect_proxy(&target.process, endpoint)).await?;
+        if observed.role != ProcessRole::Main
+            || observed.relation != InstanceRelation::Target
+            || observed.proxy != ProxyArguments::Mismatched
+        {
+            return Err(Error::Invalid("GUARD_TARGET_NOT_UNPROXIED"));
+        }
+        let candidates =
+            query_when_ready(|| process_query::application_candidates(&application)).await?;
+        let mut auxiliaries = Vec::new();
+        for candidate in candidates {
+            if candidate == target.process {
+                continue;
+            }
+            let observed = query_when_ready(|| instance.inspect(&candidate)).await?;
+            match (observed.role, observed.relation) {
+                (_, InstanceRelation::Other) => {}
+                (ProcessRole::Auxiliary, InstanceRelation::Target) => auxiliaries.push(candidate),
+                _ => return Err(Error::Invalid("GUARD_INSTANCE_NOT_EXCLUSIVE")),
+            }
+        }
+        // Refresh the exact main after capturing auxiliaries; no inference from
+        // orphaned parent PIDs is needed after the main exits.
+        let observed =
+            query_when_ready(|| instance.inspect_proxy(&target.process, endpoint)).await?;
+        if observed.role != ProcessRole::Main
+            || observed.relation != InstanceRelation::Target
+            || observed.proxy != ProxyArguments::Mismatched
+        {
+            return Err(Error::Invalid("GUARD_TARGET_NOT_UNPROXIED"));
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.before_guard_stop.lock().unwrap().clone() {
+            hook();
+        }
+        let mut held = reservation.take().unwrap();
+        let configuration = self.configuration.clone();
+        let epoch = self.epoch;
+        #[cfg(test)]
+        let after_guard_stop = self.after_guard_stop.lock().unwrap().clone();
+        #[cfg(test)]
+        let before_guard_receipt = self.before_guard_receipt.lock().unwrap().clone();
+        let (application, data, held, result) = tokio::task::spawn_blocking(move || {
+            let result = (|| {
+                let dispatch = configuration.lock()?.dispatch_guard_stop(id, epoch)?;
+                let permit = held.authorize_guard_stop(dispatch)?;
+                let receipt = app_proxy_windows::process_stop::stop_guarded(permit)?;
+                if !matches!(
+                    receipt.outcome(),
+                    app_proxy_windows::process_stop::StopOutcome::Exited
+                        | app_proxy_windows::process_stop::StopOutcome::Forced
+                ) {
+                    return Err(Error::Invalid("GUARD_TARGET_EXITED_BEFORE_STOP"));
+                }
+                #[cfg(test)]
+                if let Some(hook) = &before_guard_receipt {
+                    hook();
+                }
+                configuration.lock()?.confirm_guard_stop(&receipt)?;
+                #[cfg(test)]
+                if let Some(hook) = &after_guard_stop {
+                    hook();
+                }
+                Ok(())
+            })();
+            (application, data, held, result)
+        })
+        .await
+        .map_err(|_| Error::Invalid("GUARD_STOP_INTERRUPTED"))?;
+        *reservation = Some(held);
+        result?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let mut running = false;
+            for auxiliary in &auxiliaries {
+                running |= process::is_running_exact(auxiliary)?;
+            }
+            if !running {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Invalid("GUARD_AUXILIARY_STILL_RUNNING"));
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        let store = self.configuration.lock()?;
+        let attempt = store.launch_request(id)?.unwrap();
+        if attempt.expected_revision != Some(store.load()?.revision) {
+            return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
+        }
+        if attempt.cancel_requested {
+            return Err(Error::Invalid("LAUNCH_CANCEL_REQUESTED"));
+        }
+        Ok((application, data))
     }
 }
 

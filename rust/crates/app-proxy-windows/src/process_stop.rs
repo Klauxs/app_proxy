@@ -16,6 +16,20 @@ pub enum StopOutcome {
     StillRunning,
 }
 
+/// Guard path requires both durable intents and keeps the global reservation
+/// borrowed until native stopping has returned. No receipt is issued on error.
+pub fn stop_guarded(
+    permit: crate::instance_resource::AuthorizedGuardStop<'_>,
+) -> Result<crate::launch_state::GuardStopReceipt> {
+    let outcome = stop_exact(&permit.dispatch.target.process, true)?;
+    Ok(crate::launch_state::GuardStopReceipt {
+        owner: permit.dispatch.owner,
+        nonce: permit.dispatch.nonce,
+        target: permit.dispatch.target.clone(),
+        outcome,
+    })
+}
+
 /// Blocking platform operation: run off the coordinator's async executor and
 /// configuration lock. Close messages have a shared one-second budget, followed
 /// by 1.5 seconds for exit. Force, when explicitly selected by the caller,
