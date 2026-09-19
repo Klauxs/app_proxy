@@ -32,6 +32,11 @@ pub struct ProfileSummary {
     pub id: Uuid,
     pub name: String,
     pub revision: u64,
+    pub endpoint: model::Endpoint,
+    pub protocol: model::ManualProtocol,
+    pub host: String,
+    pub port: u16,
+    pub authenticated: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -96,12 +101,24 @@ pub fn catalog_page(
             .into_iter()
             .skip(offset)
             .take(PAGE)
-            .map(|p| ProfileSummary {
-                id: p.id,
-                name: display(p.name),
-                revision: p.revision,
+            .map(|p| {
+                let model::ProxySource::Manual { nodes } = p.source;
+                let node = nodes
+                    .into_iter()
+                    .find(|n| n.id == p.selected_node_id)
+                    .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?;
+                Ok(ProfileSummary {
+                    id: p.id,
+                    name: display(p.name),
+                    revision: p.revision,
+                    endpoint: p.endpoint,
+                    protocol: node.protocol,
+                    host: node.host,
+                    port: node.port,
+                    authenticated: node.credentials.is_some(),
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     };
     // Count limits alone do not bound UTF-8 locator sizes. Keep ample room for
     // the RPC envelope, preserve complete locators, and fail explicitly if even

@@ -22,6 +22,23 @@ pub enum ConfigAction {
     AddProfile {
         profile: ProxyProfile,
     },
+    CreateManualProfile {
+        profile_id: Uuid,
+        name: String,
+        endpoint: Endpoint,
+        node: ManualProxyInput,
+    },
+    UpdateManualProfile {
+        profile_id: Uuid,
+        node: ManualProxyInput,
+    },
+    RenameProfile {
+        profile_id: Uuid,
+        name: String,
+    },
+    RemoveProfile {
+        profile_id: Uuid,
+    },
     CreateInstance {
         instance: NewInstance,
     },
@@ -45,6 +62,50 @@ pub enum ConfigAction {
     RemoveInstance {
         instance_id: Uuid,
     },
+}
+
+/// Transient request input. Passwords are stored separately from the manifest
+/// and durable request records; never derive Debug for these request types.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManualProxyInput {
+    pub protocol: ManualProtocol,
+    pub host: String,
+    pub port: u16,
+    pub credentials: Option<ProxyCredentialInput>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyCredentialInput {
+    pub username: String,
+    pub password: String,
+}
+
+impl ManualProxyInput {
+    fn node(&self, id: Uuid, secret_id: Uuid) -> Result<ManualNode, ValidationError> {
+        if self
+            .credentials
+            .as_ref()
+            .is_some_and(|c| c.password.contains('\0') || c.password.len() > 32768)
+        {
+            return Err(ValidationError("INVALID_PROXY_PASSWORD"));
+        }
+        if let Some(c) = &self.credentials {
+            validate_proxy_credentials(&self.protocol, &c.username, &c.password)?;
+        }
+        Ok(ManualNode {
+            id,
+            name: "手动代理".into(),
+            protocol: self.protocol.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            credentials: self.credentials.as_ref().map(|c| Credentials {
+                username: c.username.clone(),
+                password_secret_id: secret_id,
+            }),
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -135,6 +196,54 @@ pub fn apply(
             }
             manifest.profiles.push(profile.clone());
             profile.id
+        }
+        ConfigAction::CreateManualProfile {
+            profile_id,
+            name,
+            endpoint,
+            node,
+        } => {
+            let node = node.node(*profile_id, request.request_id)?;
+            manifest.profiles.push(ProxyProfile {
+                id: *profile_id,
+                name: name.clone(),
+                revision: 1,
+                kind: ProxyKind::Managed,
+                endpoint: endpoint.clone(),
+                selected_node_id: node.id,
+                source: ProxySource::Manual { nodes: vec![node] },
+            });
+            *profile_id
+        }
+        ConfigAction::UpdateManualProfile { profile_id, node } => {
+            let target = profile_mut(&mut manifest, *profile_id)?;
+            let ProxySource::Manual { nodes } = &target.source;
+            if nodes.len() != 1 {
+                return Err(ValidationError("SINGLE_MANUAL_NODE_REQUIRED"));
+            }
+            let node = node.node(target.selected_node_id, request.request_id)?;
+            target.revision = next_revision(target.revision)?;
+            target.source = ProxySource::Manual { nodes: vec![node] };
+            *profile_id
+        }
+        ConfigAction::RenameProfile { profile_id, name } => {
+            let target = profile_mut(&mut manifest, *profile_id)?;
+            target.revision = next_revision(target.revision)?;
+            target.name = name.clone();
+            *profile_id
+        }
+        ConfigAction::RemoveProfile { profile_id } => {
+            profile_mut(&mut manifest, *profile_id)?;
+            let binding = NetworkBinding::Profile {
+                profile_id: *profile_id,
+            };
+            if manifest.instances.iter().any(|i| i.network == binding)
+                || manifest.settings.download_network == binding
+            {
+                return Err(ValidationError("PROFILE_IN_USE"));
+            }
+            manifest.profiles.retain(|p| p.id != *profile_id);
+            *profile_id
         }
         ConfigAction::CreateInstance { instance } => {
             let app = application(&manifest, instance.application_id)?;
@@ -257,6 +366,19 @@ pub fn apply(
             revision,
         },
     ))
+}
+
+fn next_revision(revision: u64) -> Result<u64, ValidationError> {
+    revision
+        .checked_add(1)
+        .ok_or(ValidationError("REVISION_EXHAUSTED"))
+}
+fn profile_mut(manifest: &mut Manifest, id: Uuid) -> Result<&mut ProxyProfile, ValidationError> {
+    manifest
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or(ValidationError("PROFILE_NOT_FOUND"))
 }
 
 fn application(manifest: &Manifest, id: Uuid) -> Result<&Application, ValidationError> {

@@ -151,3 +151,13 @@ coordinator 新增 core 接纳、结果查询与进程/端口观察；CLI 为 `c
 3 项取消/容量测试覆盖预取消无下载、原请求重放、不可取消其他操作、leader 取消后其他授权请求继续、等待者取消不影响 leader、32 个普通后台任务上限下仍可重放和取消。真实 Windows PTY 中下载约 1.6 MiB 后发送 Ctrl+C，原请求 `a4411c32-a211-4227-b18d-e90d37c323f5` 持久化为 Cancelled，隔离验证目录 `.tools/installer-cancel-validation-cba252ea/` 没有 bin 目录，未启动应用或 core。
 
 独立审查发现并修复长安装 handler 占满 16 个连接槽而饿死查询/取消：后台工作使用独立计数与 RAII 完成通知，短连接可继续接受控制；完成后重新计算 idle。1 项真实管道回归在 16 个受控阻塞安装任务下验证状态/取消可达，所有任务完成后 owner 正常空闲退出。最终独立增量复审、全量 workspace 126 项测试、clippy/fmt 通过；9 项顶层 ignored，其中本批官方 ZIP 与网络下载安装已显式执行，其他类别同前。没有把 HTTP/SOCKS5/安装证据当作六协议、完整发行、应用启动或 Guard 验收。
+
+**手动代理配置与凭据（2026-09-20）**
+
+新增 `proxy create/list/show/update/rename/remove/request`，支持手动 HTTP/SOCKS5、自动选择回环端口、稳定 ID/端口及实例绑定。更新要求显式选择认证或无认证，密码仅接受重定向 stdin；列表不显示用户名、密码或 secret ID。新增密码使用请求 UUID 作为不可变身份，在受保护目录中先同步临时文件，再无覆盖发布；intent 仅持有秘密引用与请求摘要。原始密码不进入 manifest、配置回执、CLI stdout/stderr。失败或移除不擅自删除已有秘密。
+
+4 项新 core 规则测试覆盖更新/改名、两类引用保护、无效地址及密码、HTTP/SOCKS5 认证边界；5 项平台测试覆盖 staging 后重试、pending 两侧恢复、活动 generation 的更新/移除拒绝与改名免重启、已有秘密冲突/损坏保留、实际文件占用触发的恢复竞态。2 项真实 CLI→host 测试验证带密码创建、摘要脱敏、改名、显式清除认证、请求查询、重启读取、移除保留秘密、两个不同入口与实例引用阻止移除。
+
+独立审查发现：已接受但未写入 manifest 的 profile 更新可在旧配置启动后恢复，绕过运行保护。现在 CoreManager 入口先恢复配置，平台进入 Starting 时在同一 store gate 内再次恢复并检查 candidate 当前性；占用未解除则不能启动，恢复后旧 candidate 被拒绝。第二项修复将协议认证可表达性校验共用于保存和 sing-box 编译，避免保存必然无法启动的认证。
+
+独立复审通过；全量 workspace 137 项通过、9 项顶层 ignored，clippy/fmt 通过。两项真实 sing-box TLS/生命周期集成显式通过（隔离本地夹具），没有运行真实 Codex/Claude 或写 IFEO。本批不含运行中配置切换/回滚、交互密码框、订阅或应用启动；活动 generation 的网络修改仍返回需重配置。

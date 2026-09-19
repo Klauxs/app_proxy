@@ -61,17 +61,11 @@ pub fn compile(
         }
         if let Some(credentials) = &node.credentials {
             let password = secret(credentials.password_secret_id)?;
-            if credentials.username.is_empty()
-                || password.contains('\0')
-                || (matches!(node.protocol, ManualProtocol::Http)
-                    && credentials.username.contains(':'))
-                || (matches!(node.protocol, ManualProtocol::Socks5)
-                    && (credentials.username.len() > 255
-                        || password.is_empty()
-                        || password.len() > 255))
-            {
-                return Err(ValidationError("INVALID_PROXY_CREDENTIALS"));
-            }
+            crate::model::validate_proxy_credentials(
+                &node.protocol,
+                &credentials.username,
+                &password,
+            )?;
             outbound["username"] = json!(credentials.username);
             outbound["password"] = json!(password);
         }

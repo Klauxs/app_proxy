@@ -60,6 +60,211 @@ fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 #[test]
+fn proxy_cli_edits_credentials_keeps_endpoint_and_redacts_all_output() {
+    use std::{io::Write, process::Stdio};
+    let (_temp, root, _) = setup();
+    let mut owner = Owner::capture(&root);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_app-proxy"))
+        .arg("--home")
+        .arg(&root)
+        .args([
+            "proxy",
+            "create",
+            "--name",
+            "认证代理",
+            "--protocol",
+            "http",
+            "--host",
+            "proxy.example",
+            "--port",
+            "8080",
+            "--username",
+            "private-user",
+            "--password-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"private-cli-password\r\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("private-"));
+    let created: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let id = created["receipt"]["entity_id"].as_str().unwrap();
+    let request = created["request_id"].as_str().unwrap();
+    let initial = ok(&root, &["proxy", "show", id, "--json"]);
+    assert_eq!(initial["profiles"][0]["authenticated"], true);
+    assert!(!initial.to_string().contains("private-"));
+    let endpoint = initial["profiles"][0]["endpoint"].clone();
+    ok(&root, &["proxy", "rename", id, "改名", "--json"]);
+    let rejected = cli(
+        &root,
+        &[
+            "proxy",
+            "update",
+            id,
+            "--protocol",
+            "socks5",
+            "--host",
+            "changed.example",
+            "--port",
+            "1080",
+            "--json",
+        ],
+    );
+    assert_eq!(rejected.status.code(), Some(2));
+    assert_eq!(
+        ok(&root, &["proxy", "show", id, "--json"])["profiles"][0]["authenticated"],
+        true
+    );
+    ok(
+        &root,
+        &[
+            "proxy",
+            "update",
+            id,
+            "--protocol",
+            "socks5",
+            "--host",
+            "changed.example",
+            "--port",
+            "1080",
+            "--no-auth",
+            "--json",
+        ],
+    );
+    let updated = ok(&root, &["proxy", "show", id, "--json"]);
+    assert_eq!(updated["profiles"][0]["endpoint"], endpoint);
+    assert_eq!(updated["profiles"][0]["revision"], 3);
+    assert_eq!(updated["profiles"][0]["name"], "改名");
+    assert_eq!(updated["profiles"][0]["authenticated"], false);
+    assert_eq!(updated["profiles"][0]["protocol"], "socks5");
+    assert!(
+        !ok(&root, &["instance", "list", "--json"])
+            .to_string()
+            .contains("private-")
+    );
+    assert_eq!(
+        ok(&root, &["proxy", "request", request, "--json"])["result"]["outcome"]["receipt"],
+        created["receipt"]
+    );
+    owner.stop();
+    let store = Store::open(&root).unwrap();
+    assert_eq!(
+        store
+            .read_secret(Uuid::parse_str(request).unwrap())
+            .unwrap(),
+        "private-cli-password"
+    );
+    for entry in fs::read_dir(root.join("state/requests")).unwrap() {
+        assert!(
+            !fs::read_to_string(entry.unwrap().path())
+                .unwrap()
+                .contains("private-cli-password")
+        );
+    }
+    drop(store);
+    ok(&root, &["proxy", "remove", id, "--json"]);
+    owner = Owner::capture(&root);
+    assert_eq!(
+        ok(&root, &["proxy", "list", "--json"])["profiles"],
+        serde_json::json!([])
+    );
+    assert!(root.join(format!("secrets/{request}.json")).exists());
+    owner.stop();
+}
+
+#[test]
+fn proxy_cli_assigns_distinct_ports_and_rejects_removal_while_bound() {
+    let (_temp, root, exe) = setup();
+    let mut owner = Owner::capture(&root);
+    let first = ok(
+        &root,
+        &[
+            "proxy",
+            "create",
+            "--name",
+            "one",
+            "--protocol",
+            "http",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8080",
+            "--json",
+        ],
+    );
+    let second = ok(
+        &root,
+        &[
+            "proxy",
+            "create",
+            "--name",
+            "two",
+            "--protocol",
+            "socks5",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "1080",
+            "--json",
+        ],
+    );
+    let id = first["receipt"]["entity_id"].as_str().unwrap();
+    let profiles = ok(&root, &["proxy", "list", "--json"]);
+    assert_ne!(
+        profiles["profiles"][0]["endpoint"]["port"],
+        profiles["profiles"][1]["endpoint"]["port"]
+    );
+    assert_ne!(
+        first["receipt"]["entity_id"],
+        second["receipt"]["entity_id"]
+    );
+    let instance = ok(
+        &root,
+        &[
+            "instance",
+            "create",
+            "--exe",
+            exe.to_str().unwrap(),
+            "--adapter",
+            "environment",
+            "--proxy",
+            id,
+            "--json",
+        ],
+    );
+    let rejected = cli(&root, &["proxy", "remove", id, "--json"]);
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("PROFILE_IN_USE"));
+    ok(
+        &root,
+        &[
+            "instance",
+            "bind",
+            instance["receipt"]["entity_id"].as_str().unwrap(),
+            "--direct",
+            "--json",
+        ],
+    );
+    ok(&root, &["proxy", "remove", id, "--json"]);
+    owner.stop();
+}
+
+#[test]
 fn core_cli_stop_receipt_survives_owner_restart_and_missing_profile_fails_safely() {
     let (_temp, root, _) = setup();
     let initial = ok(&root, &["core", "status", "--json"]);

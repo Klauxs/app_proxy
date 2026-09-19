@@ -80,7 +80,11 @@ impl CoreManager {
         }
         let _gate = self.gate.lock().await;
         let mut requested_profiles = profiles.to_vec();
-        let mut state = self.configuration.lock()?.core_state()?;
+        let mut state = {
+            let mut store = self.configuration.lock()?;
+            store.recover_config_requests()?;
+            store.core_state()?
+        };
         if let CoreState::Running {
             generation,
             process,

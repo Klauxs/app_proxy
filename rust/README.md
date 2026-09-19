@@ -1,6 +1,6 @@
 **App Proxy Rust 版设计**
 
-状态：基础平台、配置/存储、认证管道、协调进程、启动模板、实例数据/配置编辑、安装解析及共享 sing-box 初始生命周期已实现。2026-09-20 已接入 core 控制、一键安装、进度查询与取消。仍缺少代理编辑菜单、应用实例启动与 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
+状态：基础平台、配置/存储、认证管道、协调进程、启动模板、实例数据/配置编辑、安装解析及共享 sing-box 初始生命周期已实现。2026-09-20 已接入 core 控制、一键安装、进度查询、取消与手动代理配置 CLI。仍缺少代理编辑菜单、应用实例启动与 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
 
 **构建与验证**
 
@@ -34,7 +34,23 @@ cargo fmt --all -- --check
 .\target\debug\app-proxy.exe instance request <请求ID> --json
 ```
 
-创建默认原版，必须选择 `--direct` 或 `--proxy <已登记代理ID>`；普通 EXE 使用 `--exe <绝对路径> --adapter codex|claude|chromium|environment`，只有已支持的 Codex/Claude 模板允许分身。应用位置和分身存储自动解析，不复制登录数据。移除只删除登记，保留数据；已有系统集成时先要求清理。每次写入前会输出请求编号，响应中断后查询原编号，不自动重新创建。首次登记应用和创建实例是两个请求，实例创建失败可能保留应用记录。列表为摘要，显示名最多 256 字符，不含参数、环境值和代理凭据；不是完整配置导出。代理创建、启动及 Guard 授权仍待后续实现。
+创建默认原版，必须选择 `--direct` 或 `--proxy <已登记代理ID>`；普通 EXE 使用 `--exe <绝对路径> --adapter codex|claude|chromium|environment`，只有已支持的 Codex/Claude 模板允许分身。应用位置和分身存储自动解析，不复制登录数据。移除只删除登记，保留数据；已有系统集成时先要求清理。每次写入前会输出请求编号，响应中断后查询原编号，不自动重新创建。首次登记应用和创建实例是两个请求，实例创建失败可能保留应用记录。列表为摘要，显示名最多 256 字符，不含参数、环境值和代理凭据；不是完整配置导出。应用启动及 Guard 授权仍待后续实现。
+
+手动代理配置入口（HTTP/SOCKS5；本地入口自动分配）：
+
+```powershell
+.\target\debug\app-proxy.exe proxy create --name "工作代理" --protocol http --host 127.0.0.1 --port 8080
+.\target\debug\app-proxy.exe proxy list --json
+.\target\debug\app-proxy.exe proxy show <代理ID>
+.\target\debug\app-proxy.exe proxy rename <代理ID> "新名称"
+.\target\debug\app-proxy.exe proxy update <代理ID> --protocol socks5 --host 127.0.0.1 --port 1080 --no-auth
+.\target\debug\app-proxy.exe proxy remove <代理ID>
+.\target\debug\app-proxy.exe proxy request <请求ID> --json
+```
+
+认证使用 `--username <用户名> --password-stdin`，密码通过重定向标准输入传入，不接受密码命令参数；读取 UTF-8 并去除一个末尾换行。当前没有交互密码输入框。更新替换完整上游和认证，必须明确选择无认证或提供认证，避免遗漏参数时清空旧凭据。改名和更新保持 ID、本地入口与实例绑定；列表只显示认证是否已配置。密码保存在受保护的独立文件内，manifest 和持久化请求记录仅引用其 ID。移除要求实例及下载网络均不再引用此配置，保留秘密文件。
+
+修改或移除当前共享内核 generation 中的代理会返回需重配置，配置保持不变；展示影响及确认切换流程尚未接入。改名不触发重启。启动前必须先恢复已接受的配置事务，再核对候选配置，避免中断写入在内核启动后悄悄生效。
 
 `discover sing-box` 自动探测 store 内完整版本目录、绝对 PATH、Scoop 和 WinGet Links 中的程序，执行 version 并输出位置/版本/来源，不创建 store，不接入外部服务。具体代理配置仍须执行 check；此只读命令不代表代理可用。探测子进程每次限时 3 秒、总异步等待预算 20 秒；同步文件系统访问（例如网络盘）仍受 Windows I/O 超时约束。只接受稳定版本，Scoop 的转发 shim 不作为内核执行。
 

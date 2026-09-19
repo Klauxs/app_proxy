@@ -403,11 +403,11 @@ fn rejection_exit(code: &str) -> i32 {
         | "INSTALLATION_CHECK_FAILED"
         | "INSTALLATION_ACCESS_DENIED"
         | "AMBIGUOUS_PACKAGE" => 3,
-        "INTEGRATION_CLEANUP_REQUIRED" => 5,
+        "INTEGRATION_CLEANUP_REQUIRED" | "CORE_RECONFIGURATION_REQUIRED" => 5,
         _ => 2,
     }
 }
-async fn submit(
+pub(crate) async fn submit(
     root: &Path,
     revision: u64,
     action: ConfigAction,
@@ -433,7 +433,13 @@ async fn submit(
             let ConfigOutcome::Rejected { code, .. } = outcome else {
                 unreachable!()
             };
-            Err(fail(rejection_exit(&code), code))
+            let exit = rejection_exit(&code);
+            let message = if code == "CORE_RECONFIGURATION_REQUIRED" {
+                "该代理仍属于共享内核的当前配置；需确认影响后重配置。此流程尚未接入，当前配置保持不变。".into()
+            } else {
+                code
+            };
+            Err(fail(exit, message))
         }
         Err(_) => Err(fail(
             6,

@@ -231,23 +231,42 @@ impl Store {
     }
 
     pub fn put_secret(&self, value: &str) -> Result<Uuid> {
+        let id = Uuid::new_v4();
+        self.put_secret_once(id, value)?;
+        Ok(id)
+    }
+
+    /// Stable request identity allows retry after staging but before intent.
+    /// Publish a complete file without ever replacing an existing secret.
+    pub(crate) fn put_secret_once(&self, id: Uuid, value: &str) -> Result<()> {
+        if id.is_nil() {
+            return Err(Error::Invalid("INVALID_SECRET_ID"));
+        }
         if value.contains('\0') {
             return Err(Error::Invalid("INVALID_SECRET_VALUE"));
         }
-        let id = Uuid::new_v4();
+        let destination = self.root.join(format!("secrets/{id}.json"));
+        if destination.try_exists()? {
+            return if self.read_secret(id)? == value {
+                Ok(())
+            } else {
+                Err(Error::Invalid("SECRET_ID_CONFLICT"))
+            };
+        }
         let bytes = encode(
             &Secret {
                 value: value.to_owned(),
             },
             SECRET_LIMIT,
         )?;
-        // Immutable identity: a changed secret always gets a new file.
-        write_new(
-            &self.root.join(format!("secrets/{id}.json")),
-            &bytes,
-            &self.owner.owner_sid,
-        )?;
-        Ok(id)
+        let mut temp = tempfile::NamedTempFile::new_in(self.root.join("secrets"))?;
+        security::verify(temp.as_file().as_raw_handle(), &self.owner.owner_sid, false)?;
+        temp.write_all(&bytes)?;
+        temp.as_file().sync_all()?;
+        temp.into_temp_path()
+            .persist_noclobber(destination)
+            .map_err(|e| Error::Io(e.error))?;
+        Ok(())
     }
 
     pub fn read_secret(&self, id: Uuid) -> Result<String> {

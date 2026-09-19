@@ -11,6 +11,143 @@ fn request(action: ConfigAction) -> ConfigRequest {
         action,
     }
 }
+
+fn proxy_input() -> ManualProxyInput {
+    ManualProxyInput {
+        protocol: ManualProtocol::Socks5,
+        host: "proxy.example".into(),
+        port: 1080,
+        credentials: Some(ProxyCredentialInput {
+            username: "account".into(),
+            password: "secret-fixture".into(),
+        }),
+    }
+}
+
+#[test]
+fn protocol_credentials_are_validated_before_accepting_an_edit() {
+    for (protocol, username, password, valid) in [
+        (ManualProtocol::Http, "user".into(), "".into(), true),
+        (ManualProtocol::Http, "user:name".into(), "p".into(), false),
+        (ManualProtocol::Http, "".into(), "p".into(), false),
+        (
+            ManualProtocol::Socks5,
+            "u".repeat(255),
+            "p".repeat(255),
+            true,
+        ),
+        (ManualProtocol::Socks5, "u".into(), "".into(), false),
+        (ManualProtocol::Socks5, "文".repeat(86), "p".into(), false),
+        (ManualProtocol::Socks5, "u".into(), "文".repeat(86), false),
+    ] {
+        let manifest = example();
+        let change = request(ConfigAction::UpdateManualProfile {
+            profile_id: manifest.profiles[0].id,
+            node: ManualProxyInput {
+                protocol,
+                host: "proxy.example".into(),
+                port: 8080,
+                credentials: Some(ProxyCredentialInput { username, password }),
+            },
+        });
+        let result = apply(manifest, &change);
+        if valid {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(result.err().unwrap().0, "INVALID_PROXY_CREDENTIALS");
+        }
+    }
+}
+
+#[test]
+fn manual_proxy_edits_keep_identity_endpoint_binding_and_redact_password() {
+    let mut manifest = example();
+    let profile_id = manifest.profiles[0].id;
+    let endpoint = manifest.profiles[0].endpoint.clone();
+    let node_id = manifest.profiles[0].selected_node_id;
+    let change = request(ConfigAction::UpdateManualProfile {
+        profile_id,
+        node: proxy_input(),
+    });
+    manifest = apply(manifest, &change).unwrap().0;
+    let p = &manifest.profiles[0];
+    assert!(p.endpoint == endpoint);
+    assert_eq!(p.selected_node_id, node_id);
+    assert_eq!(p.revision, 2);
+    let ProxySource::Manual { nodes } = &p.source;
+    assert_eq!(
+        nodes[0].credentials.as_ref().unwrap().password_secret_id,
+        change.request_id
+    );
+    assert!(
+        !serde_json::to_string(&manifest)
+            .unwrap()
+            .contains("secret-fixture")
+    );
+    assert!(
+        manifest
+            .instances
+            .iter()
+            .any(|i| i.network == NetworkBinding::Profile { profile_id })
+    );
+    let renamed = request(ConfigAction::RenameProfile {
+        profile_id,
+        name: "renamed".into(),
+    });
+    let manifest = apply(manifest, &renamed).unwrap().0;
+    assert_eq!(manifest.profiles[0].revision, 3);
+    assert_eq!(manifest.profiles[0].name, "renamed");
+    assert!(manifest.profiles[0].endpoint == endpoint);
+}
+
+#[test]
+fn profile_removal_requires_all_references_released() {
+    let mut manifest = example();
+    let profile_id = manifest.profiles[0].id;
+    let remove = request(ConfigAction::RemoveProfile { profile_id });
+    assert_eq!(apply(example(), &remove).err().unwrap().0, "PROFILE_IN_USE");
+    manifest.instances.clear();
+    manifest.settings.download_network = NetworkBinding::Profile { profile_id };
+    assert_eq!(apply(manifest, &remove).err().unwrap().0, "PROFILE_IN_USE");
+    let mut manifest = example();
+    manifest.instances.clear();
+    let updated = apply(manifest, &remove).unwrap().0;
+    assert!(updated.profiles.is_empty());
+}
+
+#[test]
+fn create_proxy_validates_endpoint_upstream_and_password_before_persistence() {
+    for (host, port, password, expected) in [
+        ("proxy.example", 0, "ok", "INVALID_NODE"),
+        (
+            "http://user:password@proxy.example",
+            80,
+            "ok",
+            "INVALID_NODE",
+        ),
+        (
+            "proxy.example",
+            80,
+            "bad\0password",
+            "INVALID_PROXY_PASSWORD",
+        ),
+    ] {
+        let mut node = proxy_input();
+        node.host = host.into();
+        node.port = port;
+        node.credentials.as_mut().unwrap().password = password.into();
+        let change = request(ConfigAction::CreateManualProfile {
+            profile_id: Uuid::new_v4(),
+            name: "new proxy".into(),
+            endpoint: Endpoint {
+                host: "127.0.0.1".parse().unwrap(),
+                port: 31001,
+            },
+            node,
+        });
+        assert_eq!(apply(example(), &change).err().unwrap().0, expected);
+    }
+}
 fn create(manifest: &Manifest, data: NewData, network: NetworkBinding) -> ConfigRequest {
     request(ConfigAction::CreateInstance {
         instance: NewInstance {

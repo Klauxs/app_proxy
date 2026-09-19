@@ -6,7 +6,7 @@ use crate::{
 };
 use app_proxy_core::{
     model::{MANIFEST_LIMIT, Manifest},
-    registry::{self, ConfigReceipt, ConfigRequest},
+    registry::{self, ConfigAction, ConfigReceipt, ConfigRequest},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -135,6 +135,10 @@ impl Store {
                 // Ensure the complete snapshot fits and all referenced secrets exist
                 // before a pending record can authorize changing the manifest.
                 store::encode(&target, MANIFEST_LIMIT)?;
+                let rejection = rejection.or(self.profile_edit_rejection(&request.action)?);
+                if rejection.is_none() {
+                    self.stage_proxy_secret(request)?;
+                }
                 if let Some(code) = rejection {
                     Phase::Complete {
                         outcome: ConfigOutcome::Rejected {
@@ -181,6 +185,41 @@ impl Store {
         };
         self.write_record(&record)?;
         self.finish(record)
+    }
+
+    fn stage_proxy_secret(&self, request: &ConfigRequest) -> Result<()> {
+        let node = match &request.action {
+            ConfigAction::CreateManualProfile { node, .. }
+            | ConfigAction::UpdateManualProfile { node, .. } => node,
+            _ => return Ok(()),
+        };
+        if let Some(credentials) = &node.credentials {
+            self.put_secret_once(request.request_id, &credentials.password)?;
+        }
+        Ok(())
+    }
+
+    // Checked inside the same store gate as intent/commit. A candidate being
+    // prepared outside this gate must still pass the manager's current check.
+    fn profile_edit_rejection(&self, action: &ConfigAction) -> Result<Option<&'static str>> {
+        use crate::core_state::CoreState;
+        let id = match action {
+            ConfigAction::UpdateManualProfile { profile_id, .. }
+            | ConfigAction::RemoveProfile { profile_id } => profile_id,
+            _ => return Ok(None),
+        };
+        let generation = match self.core_state()? {
+            CoreState::Stopped {} => return Ok(None),
+            CoreState::Down { generation }
+            | CoreState::Starting { generation }
+            | CoreState::Running { generation, .. } => generation,
+        };
+        let generation = self.open_core_generation(generation)?;
+        Ok(generation
+            .profiles()
+            .iter()
+            .any(|p| p.id == *id)
+            .then_some("CORE_RECONFIGURATION_REQUIRED"))
     }
 
     pub fn config_request_status(&self, request_id: Uuid) -> Result<Option<ConfigRequestStatus>> {
@@ -457,6 +496,252 @@ mod tests {
         };
         assert_eq!(receipt.revision, revision);
         receipt.entity_id
+    }
+
+    fn add_proxy() -> ConfigRequest {
+        use app_proxy_core::{model::*, registry::*};
+        ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 1,
+            action: ConfigAction::CreateManualProfile {
+                profile_id: Uuid::new_v4(),
+                name: "proxy".into(),
+                endpoint: Endpoint {
+                    host: "127.0.0.1".parse().unwrap(),
+                    port: 29123,
+                },
+                node: ManualProxyInput {
+                    protocol: ManualProtocol::Http,
+                    host: "proxy.example".into(),
+                    port: 8080,
+                    credentials: Some(ProxyCredentialInput {
+                        username: "fixture-user".into(),
+                        password: "private-password-fixture".into(),
+                    }),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn proxy_secret_staging_is_atomic_idempotent_and_not_in_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let store = Store::create(&root).unwrap();
+        let request = add_proxy();
+        // Interruption before the pending intent: retry reuses the same immutable secret.
+        store.stage_proxy_secret(&request).unwrap();
+        drop(store);
+        let mut store = Store::open(&root).unwrap();
+        let id = applied(store.apply_config(&request).unwrap(), 2);
+        assert_eq!(
+            store.read_secret(request.request_id).unwrap(),
+            "private-password-fixture"
+        );
+        assert_eq!(fs::read_dir(root.join("secrets")).unwrap().count(), 1);
+        for path in [
+            root.join("manifest.json"),
+            store.record_path(request.request_id),
+        ] {
+            assert!(
+                !fs::read_to_string(path)
+                    .unwrap()
+                    .contains("private-password-fixture")
+            );
+        }
+        drop(store);
+        let mut store = Store::open(&root).unwrap();
+        assert_eq!(applied(store.apply_config(&request).unwrap(), 2), id);
+        let mut changed = request;
+        let ConfigAction::CreateManualProfile { node, .. } = &mut changed.action else {
+            panic!()
+        };
+        node.credentials.as_mut().unwrap().password = "different".into();
+        assert!(matches!(
+            store.apply_config(&changed),
+            Err(Error::Invalid("REQUEST_ID_CONFLICT"))
+        ));
+        assert_eq!(
+            store.read_secret(changed.request_id).unwrap(),
+            "private-password-fixture"
+        );
+    }
+
+    #[test]
+    fn proxy_pending_recovery_has_all_secret_dependencies_and_no_raw_password() {
+        for after_commit in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("store");
+            let mut store = Store::create(&root).unwrap();
+            let request = add_proxy();
+            store.stage_proxy_secret(&request).unwrap();
+            let record = stage(&store, &request);
+            assert!(
+                !fs::read_to_string(store.record_path(request.request_id))
+                    .unwrap()
+                    .contains("private-password-fixture")
+            );
+            if after_commit {
+                let Phase::Pending { mut target, .. } = record.phase else {
+                    panic!()
+                };
+                target.revision = 1;
+                store.commit_snapshot(1, *target).unwrap();
+            }
+            drop(store);
+            let mut store = Store::open(&root).unwrap();
+            applied(store.apply_config(&request).unwrap(), 2);
+            assert_eq!(store.load().unwrap().revision, 2);
+            assert_eq!(
+                store.read_secret(request.request_id).unwrap(),
+                "private-password-fixture"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_proxy_edits_never_stage_passwords_or_change_active_generation() {
+        use crate::core_state::CoreState;
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&temp.path().join("store")).unwrap();
+        let mut stale = add_proxy();
+        stale.expected_revision = 99;
+        assert!(matches!(
+            store.apply_config(&stale).unwrap(),
+            ConfigOutcome::Rejected { .. }
+        ));
+        assert!(
+            !store
+                .root()
+                .join(format!("secrets/{}.json", stale.request_id))
+                .exists()
+        );
+        let request = add_proxy();
+        let profile_id = applied(store.apply_config(&request).unwrap(), 2);
+        let generation = store.prepare_core_generation(&[profile_id]).unwrap();
+        let starting = CoreState::Starting {
+            generation: generation.id(),
+        };
+        store
+            .transition_core_state(&CoreState::Stopped {}, starting.clone())
+            .unwrap();
+        let ConfigAction::CreateManualProfile { node, .. } = request.action else {
+            panic!()
+        };
+        let update = ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 2,
+            action: ConfigAction::UpdateManualProfile { profile_id, node },
+        };
+        assert!(
+            matches!(store.apply_config(&update).unwrap(), ConfigOutcome::Rejected { code, .. } if code == "CORE_RECONFIGURATION_REQUIRED")
+        );
+        assert!(
+            !store
+                .root()
+                .join(format!("secrets/{}.json", update.request_id))
+                .exists()
+        );
+        assert_eq!(store.core_state().unwrap(), starting);
+        let rename = ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 2,
+            action: ConfigAction::RenameProfile {
+                profile_id,
+                name: "new display".into(),
+            },
+        };
+        applied(store.apply_config(&rename).unwrap(), 3);
+        assert!(store.core_generation_is_current(&generation).unwrap());
+        let remove = ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 3,
+            action: ConfigAction::RemoveProfile { profile_id },
+        };
+        assert!(
+            matches!(store.apply_config(&remove).unwrap(), ConfigOutcome::Rejected { code, .. } if code == "CORE_RECONFIGURATION_REQUIRED")
+        );
+        store
+            .transition_core_state(&starting, CoreState::Stopped {})
+            .unwrap();
+        let remove = ConfigRequest {
+            request_id: Uuid::new_v4(),
+            ..remove
+        };
+        applied(store.apply_config(&remove).unwrap(), 4);
+        assert!(store.load().unwrap().profiles.is_empty());
+        assert_eq!(
+            store.read_secret(request.request_id).unwrap(),
+            "private-password-fixture"
+        );
+    }
+
+    #[test]
+    fn immutable_secret_collision_and_broken_existing_secret_are_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::create(&temp.path().join("store")).unwrap();
+        let id = Uuid::new_v4();
+        store.put_secret_once(id, "first").unwrap();
+        assert!(matches!(
+            store.put_secret_once(id, "second"),
+            Err(Error::Invalid("SECRET_ID_CONFLICT"))
+        ));
+        assert_eq!(store.read_secret(id).unwrap(), "first");
+        let path = store.root().join(format!("secrets/{id}.json"));
+        fs::write(&path, b"broken").unwrap();
+        assert!(store.put_secret_once(id, "first").is_err());
+        assert_eq!(fs::read(path).unwrap(), b"broken");
+    }
+
+    #[test]
+    fn pending_proxy_edit_prevents_starting_an_old_generation() {
+        use crate::core_state::CoreState;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let mut store = Store::create(&root).unwrap();
+        let create = add_proxy();
+        let profile_id = applied(store.apply_config(&create).unwrap(), 2);
+        let old = store.prepare_core_generation(&[profile_id]).unwrap();
+        let ConfigAction::CreateManualProfile { mut node, .. } = create.action else {
+            panic!()
+        };
+        node.port += 1;
+        let update = ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 2,
+            action: ConfigAction::UpdateManualProfile { profile_id, node },
+        };
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(root.join("manifest.json"))
+            .unwrap();
+        assert!(store.apply_config(&update).is_err());
+        let starting_old = CoreState::Starting {
+            generation: old.id(),
+        };
+        assert!(
+            store
+                .transition_core_state(&CoreState::Stopped {}, starting_old.clone())
+                .is_err()
+        );
+        assert_eq!(store.core_state().unwrap(), CoreState::Stopped {});
+        drop(held);
+        assert!(matches!(
+            store.transition_core_state(&CoreState::Stopped {}, starting_old),
+            Err(Error::Invalid("CORE_CONFIG_CHANGED"))
+        ));
+        assert_eq!(store.core_state().unwrap(), CoreState::Stopped {});
+        applied(store.apply_config(&update).unwrap(), 3);
+        let current = store.prepare_core_generation(&[profile_id]).unwrap();
+        store
+            .transition_core_state(
+                &CoreState::Stopped {},
+                CoreState::Starting {
+                    generation: current.id(),
+                },
+            )
+            .unwrap();
     }
 
     #[test]

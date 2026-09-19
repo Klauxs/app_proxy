@@ -210,6 +210,23 @@ pub struct Credentials {
     pub password_secret_id: Uuid,
 }
 
+pub fn validate_proxy_credentials(
+    protocol: &ManualProtocol,
+    username: &str,
+    password: &str,
+) -> Result<()> {
+    if username.is_empty()
+        || username.contains('\0')
+        || password.contains('\0')
+        || (matches!(protocol, ManualProtocol::Http) && username.contains(':'))
+        || (matches!(protocol, ManualProtocol::Socks5)
+            && (username.len() > 255 || password.is_empty() || password.len() > 255))
+    {
+        return Err(ValidationError("INVALID_PROXY_CREDENTIALS"));
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {

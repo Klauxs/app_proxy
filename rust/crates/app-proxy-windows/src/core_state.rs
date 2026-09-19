@@ -275,6 +275,15 @@ impl Store {
     /// recording Running, or confirmed absence/termination before Stopped.
     /// A Starting record without an identity is unresolved, never auto-replayed.
     pub fn transition_core_state(&mut self, expected: &CoreState, next: CoreState) -> Result<()> {
+        // An accepted configuration intent precedes any new core start, even
+        // when a previous manifest replace failed. Never start an old candidate
+        // and let deferred configuration recovery silently change it later.
+        if let CoreState::Starting { generation } = &next {
+            self.recover_config_requests()?;
+            if !self.core_generation_is_current(&self.open_core_generation(*generation)?)? {
+                return Err(Error::Invalid("CORE_CONFIG_CHANGED"));
+            }
+        }
         if self.core_state()? != *expected {
             return Err(Error::Invalid("CORE_STATE_CHANGED"));
         }

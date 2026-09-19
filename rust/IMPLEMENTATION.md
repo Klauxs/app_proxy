@@ -13,7 +13,8 @@
 | 启动模板 | 纯合成已实现，独立 review 通过 | 原版/分身参数环境、直连/代理、秘密引用、路径变量；7 项模板测试；不表示代理就绪或可以启动 |
 | 实例数据目录 | 已实现，独立 review 通过 | store/LocalState 命名空间、归属/ACL/目录句柄、空白创建、保留数据；6 项目录测试 + 2 项模板子进程测试；真实包内访问待验证 |
 | 实例配置编辑 | 已实现，独立 review 通过 | 已接入 coordinator 与 CLI；7 项规则 + 4 项真实 CLI 写测试，物理去重、保留数据及列表脱敏；菜单及外部集成清理待实现 |
-| 实例 CLI / 列表摘要 | 已实现，独立 review 通过 | create/list/clone/rename/bind/remove/request，按 revision 和字节预算分页；尚无启动/代理创建/保护授权操作 |
+| 实例 CLI / 列表摘要 | 已实现，独立 review 通过 | create/list/clone/rename/bind/remove/request，按 revision 和字节预算分页；尚无启动/保护授权操作 |
+| 手动代理配置 / CLI | 已实现，独立 review 通过 | HTTP/SOCKS5 create/list/show/update/rename/remove/request；自动入口、认证分存与脱敏、引用及活动 generation 保护；运行中确认重配置和交互菜单待实现 |
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
 | 实例启动 | 待实现 | 统一状态机、安装解析和已运行判断 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
@@ -51,3 +52,4 @@
 - 共享 core 初始生命周期：独立审查及多轮增量复审通过。提交主题 `feat(rust): persist and supervise owned shared core processes`。4 项 generation/journal 契约、1 项原生双栈 PID 归属测试、真实 core 生命周期集成通过；全量 106 项通过，clippy/fmt 通过。修复探测配置竞态、profile 端口映射、恢复失败后丢失共享入口；尚无 coordinator 启动 RPC/启动许可、重配置回滚、无身份启动核对、持续通知及安装。
 - core 控制 RPC / CLI：独立审查和增量复审通过。提交主题 `feat(rust): coordinate durable shared core operations`。新增 11 项测试，全量 117 项通过、7 项顶层 ignored，clippy/fmt 通过。覆盖请求规范化、跨操作编号冲突、时钟回拨、终态保留/未决不清理、任务取消、回执占用、并发/丢 ACK 及真实 CLI 跨 host 重启。CLI 接入 start/stop/status/request；未决副作用不自动重放，历史结果与当前监听状态分开。尚无安装、重配置确认/回滚、持续健康通知或应用启动许可。
 - sing-box 一键安装 / 取消：独立审查和增量复审通过，提交主题 `feat(rust): install and cancel verified sing-box downloads`。固定官方 1.14.1 artifact，zip/EXE/DLL/LICENSE 校验，protected staging、版本/check、完整目录发布及安装回执；下载/校验移出配置锁而保留 store owner lease。真实受污染代理环境下 CLI 下载、安装、重启查询及复用通过（407.18 秒）；Windows PTY Ctrl+C 持久取消通过。修复长任务占满 16 个 IPC 槽导致查询/取消饥饿，增加独立后台计数和 32 个普通任务上限。全量 126 项通过、9 项顶层 ignored，clippy/fmt 通过；完整协议、应用与 Guard 验收未完成。
+- 手动代理配置 / CLI：独立审查与修复复审通过，提交主题 `feat(rust): manage manual proxy profiles and protected credentials`。新增 4 项编辑/认证规则、5 项秘密/事务/运行保护、2 项真实 CLI 测试；全量 137 项通过、9 项顶层 ignored，clippy/fmt 通过，两项真实 sing-box TLS/生命周期集成另行通过。审查发现并修复 pending 配置在旧内核启动后恢复提交的竞态，以及保存阶段遗漏协议认证限制。改名不重启，更新保持 ID/端口，移除检查实例/下载引用；密码独立原子存储，请求回执不含原文。当前活动 generation 编辑返回需重配置，具体影响确认与回滚仍待接入；不表示应用启动或 Guard 完成。
