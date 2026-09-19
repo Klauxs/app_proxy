@@ -697,6 +697,237 @@ impl Drop for GuardChild {
 }
 
 #[tokio::test]
+async fn guard_scan_distinguishes_original_compliant_and_misconfigured_without_stopping() {
+    for (isolated, matching) in [(false, false), (true, true), (true, false)] {
+        let fixture = Fixture::guarded();
+        fixture
+            .engine
+            .configuration
+            .lock()
+            .unwrap()
+            .prepare_instance_data(fixture.instance, None)
+            .unwrap();
+        let child = fixture.external_guard_target(isolated, matching);
+        fixture.events(1).await;
+        let scan = fixture
+            .engine
+            .observe_guard(fixture.instance)
+            .await
+            .unwrap();
+        match (isolated, matching, scan.observation) {
+            (false, _, GuardObservation::Absent) => {}
+            (true, true, GuardObservation::Compliant { process }) => {
+                assert_eq!(process, child.0.identity)
+            }
+            (true, false, GuardObservation::Correction { target }) => {
+                assert_eq!(target.process, child.0.identity);
+                assert_eq!(target.endpoint.port, 44193);
+                assert_eq!(
+                    scan.revision,
+                    fixture.engine.configuration.snapshot().unwrap().revision
+                );
+            }
+            _ => panic!("incorrect guard classification"),
+        }
+        assert!(process::is_running_exact(&child.0.identity).unwrap());
+        assert!(
+            fixture
+                .engine
+                .configuration
+                .lock()
+                .unwrap()
+                .launch_attempts()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn guard_scan_does_not_prepare_missing_data_and_pending_launches_are_deferred() {
+    let fixture = Fixture::guarded();
+    let data = fixture._root.path().join("store/instances");
+    assert!(!data.exists());
+    assert!(matches!(
+        fixture
+            .engine
+            .observe_guard(fixture.instance)
+            .await
+            .unwrap()
+            .observation,
+        GuardObservation::Absent
+    ));
+    assert!(!data.exists());
+    let request = fixture.request();
+    fixture
+        .engine
+        .configuration
+        .lock()
+        .unwrap()
+        .begin_launch(&request, fixture.engine.epoch)
+        .unwrap();
+    assert!(
+        matches!(fixture.engine.observe_guard(fixture.instance).await.unwrap().observation,
+        GuardObservation::Pending { attempt_id } if attempt_id == request.request_id)
+    );
+    assert!(!data.exists());
+}
+
+#[tokio::test]
+async fn guard_scan_preserves_confirmed_session_binding_after_configuration_changes() {
+    let fixture = Fixture::guarded();
+    fixture.edit(|m| {
+        m.applications[0].template_ref = Template::Environment;
+        m.instances[0].data = InstanceData::Original {};
+        m.instances[0].network = NetworkBinding::Direct {};
+        m.instances[0].guard.desired = Desired::Disabled;
+    });
+    let request = fixture.request();
+    fixture.engine.submit(request.clone()).await.unwrap();
+    let process = confirmed(fixture.result(request.request_id).await);
+    fixture.events(1).await;
+    fixture.edit(|m| {
+        m.applications[0].template_ref = Template::Chromium;
+        m.instances[0].network = NetworkBinding::Profile {
+            profile_id: m.profiles[0].id,
+        };
+        m.instances[0].guard.desired = Desired::Enabled;
+    });
+    let scan = fixture
+        .engine
+        .observe_guard(fixture.instance)
+        .await
+        .unwrap();
+    assert!(
+        matches!(scan.observation, GuardObservation::Session { process: observed, network: LaunchNetwork::Direct {} } if observed == process)
+    );
+    assert!(process::is_running_exact(&process).unwrap());
+    fixture.events(1).await;
+}
+
+#[tokio::test]
+async fn guard_scan_refuses_ambiguous_multiple_mains_and_disabled_instances() {
+    let fixture = Fixture::guarded();
+    let first = fixture.external_guard_target(true, false);
+    let second = fixture.external_guard_target(true, false);
+    fixture.events(2).await;
+    assert!(matches!(
+        fixture
+            .engine
+            .observe_guard(fixture.instance)
+            .await
+            .unwrap()
+            .observation,
+        GuardObservation::Blocked {
+            code: "GUARD_MULTIPLE_MAIN_PROCESSES"
+        }
+    ));
+    fixture.edit(|m| m.instances[0].guard.desired = Desired::Disabled);
+    assert!(matches!(
+        fixture
+            .engine
+            .observe_guard(fixture.instance)
+            .await
+            .unwrap()
+            .observation,
+        GuardObservation::Disabled
+    ));
+    assert!(process::is_running_exact(&first.0.identity).unwrap());
+    assert!(process::is_running_exact(&second.0.identity).unwrap());
+}
+
+#[tokio::test]
+async fn guard_scan_rechecks_edits_and_new_pending_work_before_returning_a_correction() {
+    for edit in [false, true] {
+        let fixture = Fixture::guarded();
+        let child = fixture.external_guard_target(true, false);
+        fixture.events(1).await;
+        let configuration = fixture.engine.configuration.clone();
+        let request = fixture.request();
+        let epoch = fixture.engine.epoch;
+        *fixture.engine.after_guard_scan.lock().unwrap() = Some(Arc::new(move || {
+            let mut store = configuration.lock().unwrap();
+            if edit {
+                let mut manifest = store.load().unwrap();
+                manifest.instances[0].guard.desired = Desired::Disabled;
+                store.commit(manifest.revision, manifest).unwrap();
+            } else {
+                store.begin_launch(&request, epoch).unwrap();
+            }
+        }));
+        let scan = fixture
+            .engine
+            .observe_guard(fixture.instance)
+            .await
+            .unwrap();
+        if edit {
+            assert!(matches!(
+                scan.observation,
+                GuardObservation::Blocked {
+                    code: "LAUNCH_CONFIG_CHANGED"
+                }
+            ));
+        } else {
+            assert!(matches!(scan.observation, GuardObservation::Pending { .. }));
+        }
+        assert!(process::is_running_exact(&child.0.identity).unwrap());
+    }
+}
+
+#[tokio::test]
+async fn guard_scan_timeout_cannot_accumulate_detached_resolvers() {
+    let fixture = Fixture::guarded();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    *fixture.engine.before_guard_resolution.lock().unwrap() = Some(Arc::new(move || {
+        entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(12))
+            .unwrap();
+    }));
+    let engine = fixture.engine.clone();
+    let id = fixture.instance;
+    let scan = tokio::spawn(async move { engine.observe_guard(id).await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(3), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        fixture.engine.observe_guard(id).await.unwrap().observation,
+        GuardObservation::Blocked {
+            code: "GUARD_RESOLUTION_BUSY"
+        }
+    ));
+    assert!(matches!(
+        scan.await.unwrap().observation,
+        GuardObservation::Blocked {
+            code: "GUARD_SCAN_TIMEOUT"
+        }
+    ));
+    assert!(matches!(
+        fixture.engine.observe_guard(id).await.unwrap().observation,
+        GuardObservation::Blocked {
+            code: "GUARD_RESOLUTION_BUSY"
+        }
+    ));
+    *fixture.engine.before_guard_resolution.lock().unwrap() = None;
+    release_tx.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while fixture.engine.guard_resolution.available_permits() == 0 {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(matches!(
+        fixture.engine.observe_guard(id).await.unwrap().observation,
+        GuardObservation::Absent
+    ));
+}
+
+#[tokio::test]
 async fn guard_stops_exact_misconfigured_clone_before_proxy_failure_and_never_falls_back() {
     let fixture = Fixture::guarded();
     let child = fixture.external_guard_target(true, false);

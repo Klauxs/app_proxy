@@ -36,6 +36,45 @@ fn original_does_not_create_or_adopt_any_data_directory() {
 }
 
 #[test]
+fn inspection_never_creates_missing_directories_and_pins_owned_existing_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let (store, original, isolated) = populated(&root);
+    assert!(
+        store
+            .inspect_instance_data(original, None)
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.inspect_instance_data(isolated, None).is_err());
+    assert!(!root.join("instances").exists());
+    let prepared = store
+        .prepare_instance_data(isolated, None)
+        .unwrap()
+        .unwrap();
+    let path = prepared.paths.root.clone();
+    let user_data = prepared.paths.user_data.clone();
+    let app_home = prepared.paths.app_home.clone();
+    drop(prepared);
+    let inspected = store
+        .inspect_instance_data(isolated, None)
+        .unwrap()
+        .unwrap();
+    assert!(fs::rename(&path, temp.path().join("moved")).is_err());
+    drop(inspected);
+    fs::remove_dir(&app_home).unwrap();
+    assert!(store.inspect_instance_data(isolated, None).is_err());
+    assert!(!app_home.exists());
+    assert!(user_data.exists());
+    fs::write(path.join(".app-proxy-rust-data.json"), b"invalid owner").unwrap();
+    assert!(store.inspect_instance_data(isolated, None).is_err());
+    assert_eq!(
+        fs::read(path.join(".app-proxy-rust-data.json")).unwrap(),
+        b"invalid owner"
+    );
+}
+
+#[test]
 fn isolated_is_blank_then_reused_and_remove_keeps_data() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("store");

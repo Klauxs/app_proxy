@@ -91,16 +91,16 @@ impl Store {
                 instance_id: None,
                 package_family: Some(package.family_name.clone()),
             };
-            handles.push(claim(&container, &owner)?);
+            handles.push(claim(&container, &owner, true)?);
             let base = container.join(manifest.store_id.to_string());
             owner.store_id = Some(manifest.store_id);
-            handles.push(claim(&base, &owner)?);
+            handles.push(claim(&base, &owner, true)?);
             base
         } else {
             self.root().to_owned()
         };
         let state = base.join("state");
-        handles.push(directory(&state, &manifest.owner_sid)?);
+        handles.push(directory(&state, &manifest.owner_sid, true)?);
         Ok(PackageControlRoot {
             root: state,
             _directories: handles,
@@ -112,14 +112,34 @@ impl Store {
         instance_id: Uuid,
         resolved_package: Option<&Package>,
     ) -> Result<Option<PreparedData>> {
-        self.prepare_data_with_local_folder(instance_id, resolved_package, local_app_data)
+        self.access_instance_data(instance_id, resolved_package, local_app_data, true)
     }
 
+    /// Open and pin existing owned directories without creating or adopting data.
+    pub fn inspect_instance_data(
+        &self,
+        instance_id: Uuid,
+        resolved_package: Option<&Package>,
+    ) -> Result<Option<PreparedData>> {
+        self.access_instance_data(instance_id, resolved_package, local_app_data, false)
+    }
+
+    #[cfg(test)]
     fn prepare_data_with_local_folder(
         &self,
         instance_id: Uuid,
         resolved_package: Option<&Package>,
         local_folder: impl FnOnce() -> Result<PathBuf>,
+    ) -> Result<Option<PreparedData>> {
+        self.access_instance_data(instance_id, resolved_package, local_folder, true)
+    }
+
+    fn access_instance_data(
+        &self,
+        instance_id: Uuid,
+        resolved_package: Option<&Package>,
+        local_folder: impl FnOnce() -> Result<PathBuf>,
+        create: bool,
     ) -> Result<Option<PreparedData>> {
         let manifest = self.load()?;
         let instance = manifest
@@ -187,26 +207,26 @@ impl Store {
                     schema_version: 1,
                     owner_sid: owner.owner_sid.clone(),
                 };
-                handles.push(claim(&container, &container_owner)?);
+                handles.push(claim(&container, &container_owner, create)?);
                 let base = container.join(namespace);
                 owner.package_family = Some(family_name.clone());
-                handles.push(claim(&base, &owner)?);
+                handles.push(claim(&base, &owner, create)?);
                 (base, relative_path)
             }
         };
         // Model validation has fixed this relative path to instances/<instance UUID>.
         let parent = base.join("instances");
-        handles.push(directory(&parent, &owner.owner_sid)?);
+        handles.push(directory(&parent, &owner.owner_sid, create)?);
         let root = base.join(relative);
         owner.instance_id = Some(instance_id);
-        handles.push(claim(&root, &owner)?);
+        handles.push(claim(&root, &owner, create)?);
         let paths = IsolatedPaths {
             user_data: root.join("user-data"),
             app_home: root.join("app-home"),
             root,
         };
-        handles.push(directory(&paths.user_data, &owner.owner_sid)?);
-        handles.push(directory(&paths.app_home, &owner.owner_sid)?);
+        handles.push(directory(&paths.user_data, &owner.owner_sid, create)?);
+        handles.push(directory(&paths.app_home, &owner.owner_sid, create)?);
         Ok(Some(PreparedData {
             paths,
             _directories: handles,
@@ -253,8 +273,8 @@ pub(crate) fn verify_package_control(
     Ok(())
 }
 
-fn directory(path: &Path, sid: &str) -> Result<OwnedHandle> {
-    if !path.try_exists()? {
+fn directory(path: &Path, sid: &str, create: bool) -> Result<OwnedHandle> {
+    if create && !path.try_exists()? {
         security::no_reparse(
             path.parent()
                 .ok_or(Error::Invalid("DATA_PARENT_REQUIRED"))?,
@@ -266,8 +286,8 @@ fn directory(path: &Path, sid: &str) -> Result<OwnedHandle> {
     Ok(handle)
 }
 
-fn claim(path: &Path, expected: &DataOwner) -> Result<OwnedHandle> {
-    let created = if !path.try_exists()? {
+fn claim(path: &Path, expected: &DataOwner, create: bool) -> Result<OwnedHandle> {
+    let created = if create && !path.try_exists()? {
         security::no_reparse(
             path.parent()
                 .ok_or(Error::Invalid("DATA_PARENT_REQUIRED"))?,
@@ -461,6 +481,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(same.paths.root.starts_with(local_state));
+    }
+
+    #[test]
+    fn inspecting_package_data_never_claims_missing_localstate_namespaces() {
+        let fixture = tempfile::tempdir().unwrap();
+        let local = fixture.path().join("local");
+        let package = package();
+        let local_state = local
+            .join("Packages")
+            .join(&package.family_name)
+            .join("LocalState");
+        std::fs::create_dir_all(&local_state).unwrap();
+        let (store, id) = populated(&fixture.path().join("store"));
+        assert!(
+            store
+                .access_instance_data(id, Some(&package), || Ok(local.clone()), false)
+                .is_err()
+        );
+        assert!(!local_state.join("AppProxyRust").exists());
+        let prepared = store
+            .prepare_data_with_local_folder(id, Some(&package), || Ok(local.clone()))
+            .unwrap()
+            .unwrap();
+        let expected = prepared.paths.root.clone();
+        drop(prepared);
+        let inspected = store
+            .access_instance_data(id, Some(&package), || Ok(local), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(inspected.paths.root, expected);
     }
 
     #[test]

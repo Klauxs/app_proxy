@@ -30,6 +30,7 @@
 | IFEO | 调试创建候选及普通创建前只读检查 | 普通 EXE 服务发现 Debugger 时拒绝误入；实际注册匹配/防递归/子进程/调用语义/恢复待实现，未管理原版不受干预 |
 | Guard/ETW | 待实现 | 默认范围、普通/提权分工、事件/扫描、身份未知、限流及未管理进程存活 |
 | Guard 纠正执行服务 | 已实现，独立 review 通过；自动触发待接入 | 精确误启动主进程、持久一次性停止许可、全局限流、辅助残留等待及停止后代理失败禁止直连；9 项新增回归通过，不自动监听或注册 IFEO |
+| Guard 只读扫描 | 已实现，独立 review 通过；监听接入待续 | 登记实例归属、历史会话绑定保留、未决/歧义保守处理，目录不创建；扫描结束复核 revision/未决请求，超时解析线程不累积 |
 | 精确进程正常关闭 | 平台能力已实现，独立 review 通过 | 同用户/session/完整身份、限时 WM_CLOSE、1.5 秒等待及显式强制结束，3 项真实隐藏窗口测试通过；实例归属授权、辅助进程收尾及 Guard/CLI 接入待续 |
 | Guard 代理参数证据 | 平台能力已实现，独立 review 通过 | 目标主进程的匹配/不匹配/未知，支持 HTTP literal 地址及裸地址等价；其他实例与辅助不提供纠正依据；运行健康、Guard 动作和监听待续 |
 | 中文菜单/快捷方式/维护 | 待实现 | 端到端创建启动、改名/绑定/克隆/移除、保护授权、入口修复及保留数据卸载 |
@@ -86,3 +87,5 @@
 - 精确进程正常关闭：独立 review 通过，提交主题 `feat(rust): close exact application processes with bounded waits`。先以查询权限核对身份并限时请求目标窗口关闭，等待 1.5 秒；仅调用方显式选择 force 才申请终止权限并再次核对，终止后最多等待 3 秒。单次消息最多 100ms、消息总预算 1 秒，窗口消息返回不构成退出证据。新增 3 项真实隐藏窗口测试，全量 209 项通过、21 项顶层 ignored；最终等待时间修订后 3 项定向复跑通过，审查方独立复跑通过，clippy/fmt/diff 通过。仅提供单进程能力，不按名/树终止，不代表实例停止、辅助清理或 Guard/IFEO 已完成。
 - Guard 代理参数证据：独立 review 和误判修复复审通过，提交主题 `feat(rust): inspect proxy arguments on exact managed main processes`。复用身份/目录/角色观测，仅目标 Main 提供 Matching/Mismatched/Unknown；辅助和其他实例不能成为纠正目标。复审修复 Chromium 裸 IP:port 与 HTTP URI 等价写法；命名 host、复杂映射/回退列表和未知 scheme 保留 Unknown。新增 1 项参数回归并扩展真实 child 契约，全量 210 项通过、21 项顶层 ignored，修复后 6 项归属测试和 clippy/fmt/diff 通过，审查方独立复跑通过。没有健康探测或停止动作，运行故障不得据此关闭应用；Guard 的会话绑定选择、限流、监听和执行集成待续。
 - Guard 纠正执行服务：独立 review 及增量复审通过，提交主题 `feat(rust): execute guarded instance correction with durable stop intent`。新增内部入口、一次性持久停止授权、跨 store 物理限流、精确关闭和辅助残留等待；代理失败不直连。停止前后取消/配置变更、迟到 worker、回执丢失恢复均有真实夹具回归。全量 219 项通过、21 项顶层 ignored；最终内存布局与测试锁作用域修订后 clippy 和 Guard 定向测试通过。尚未启用自动扫描/ETW/IFEO，无用户应用被关闭。
+
+- Guard 只读实例扫描：独立 review 及增量复审通过，提交主题 `feat(rust): scan guarded instances without disturbing managed sessions`。扫描保留 Confirmed 的历史网络绑定，排除未管理原版，未决/身份未知/多个主进程不输出纠正目标；完成后再次检查配置 revision 和新未决请求。新增只打开既有分身目录的接口，不创建或认领 store/LocalState 数据。独立复跑 6 项扫描和 2 项目录测试通过；全量 227 项通过、21 项顶层 ignored，clippy/fmt/diff 通过。解析工作线程持有单槽直到实际返回，5 秒扫描超时不会堆积后台解析。尚未接自动监听、授权、ETW 或 IFEO。

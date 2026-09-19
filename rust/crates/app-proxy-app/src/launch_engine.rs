@@ -20,6 +20,9 @@ use std::{
 };
 use uuid::Uuid;
 
+mod guard;
+pub use guard::{GuardObservation, GuardScan};
+
 pub struct LaunchEngine {
     configuration: Arc<Configuration>,
     manager: Arc<CoreManager>,
@@ -27,6 +30,11 @@ pub struct LaunchEngine {
     epoch: Uuid,
     active: Mutex<HashSet<Uuid>>,
     completed: tokio::sync::Notify,
+    guard_resolution: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    before_guard_resolution: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_guard_scan: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     before_dispatch: Mutex<Option<Arc<tokio::sync::Notify>>>,
     #[cfg(test)]
@@ -64,6 +72,11 @@ impl LaunchEngine {
             epoch,
             active: Mutex::new(HashSet::new()),
             completed: tokio::sync::Notify::new(),
+            guard_resolution: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(test)]
+            before_guard_resolution: Mutex::new(None),
+            #[cfg(test)]
+            after_guard_scan: Mutex::new(None),
             #[cfg(test)]
             before_dispatch: Mutex::new(None),
             #[cfg(test)]
