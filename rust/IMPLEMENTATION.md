@@ -11,7 +11,8 @@
 | IPC 传输 | 已实现，独立 review 通过 | 双向身份/普通权限/会话/映像验证、管道 ACL、1 MiB 帧与超时/取消；4 项真实管道 + 2 项帧测试 |
 | coordinator | 引导功能已实现，独立 review 通过 | status、单所有者竞启、协议握手、慢客户端隔离、重连、30 秒空闲退出；写请求去重/journal/实际任务恢复待实现 |
 | 启动模板 | 纯合成已实现，独立 review 通过 | 原版/分身参数环境、直连/代理、秘密引用、路径变量；7 项模板测试；不表示代理就绪或可以启动 |
-| 实例/启动 | 待实现 | 数据目录归属、实体操作、统一状态机和已运行判断 |
+| 实例数据目录 | 已实现，独立 review 通过 | store/LocalState 命名空间、归属/ACL/目录句柄、空白创建、保留数据；6 项目录测试 + 2 项模板子进程测试；真实包内访问待验证 |
+| 实例/启动 | 待实现 | 实体操作、统一状态机、安装解析和已运行判断 |
 | sing-box 管理/一键安装 | 待实现 | 自行启动、多个入口/出口共享进程、安装/取消、CONNECT/TLS、配置切换恢复 |
 | 订阅解析 | 待实现 | 六协议、URI/Base64/Clash/文本格式、兼容 fixtures、刷新保持选择 |
 | IFEO | 仅调试创建候选 | 实际注册匹配/防递归/子进程/调用语义/恢复；未管理原版不受干预 |
@@ -31,3 +32,4 @@
 - IPC 传输：独立审查通过，6 项 IPC 测试通过，clippy 通过。提交主题 `feat(rust): authenticate local named-pipe transport`。此批真实管道两端仍在同一测试进程；CLI/host 跨进程验证留给 coordinator 集成测试。
 - coordinator 引导：独立审查发现并修复客户端认证失败退出 owner 和空闲计时偏差；复审通过。6 项协议/跨进程测试覆盖竞启、重连、配置保留、短连接、慢客户端和空闲退出。提交主题 `feat(rust): bootstrap one coordinator for status requests`。测试中修复首次初始化竞态和 Windows 后台 host 继承 CLI 输出句柄；仅只读状态功能，不含应用启动/保护。
 - 启动模板：独立审查通过，20 项 core 测试（7 项新增模板行为）和 clippy 通过。提交主题 `feat(rust): compile instance launch arguments and environment`。原版清除分身变量，分身生成独立目录参数；已知路径变量只展开一次。目录归属、继承环境总量、代理就绪和实际应用隔离仍需平台验证。
+- 实例数据目录：独立审查通过，6 项目录/包命名空间夹具及 2 项真实模板子进程测试通过，clippy 通过。提交主题 `feat(rust): prepare owned isolated instance directories`。默认目录使用 Windows Known Folder；原版零创建、陌生目录拒绝、改名复用、移除保留。包夹具不证明真实 MSIX 可访问，子进程回执不证明 Codex/Claude 隔离或网络代理已经生效。

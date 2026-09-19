@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 pub mod identity;
+pub mod instance_data;
 pub mod ipc;
 pub mod package;
 pub mod process;

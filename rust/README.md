@@ -1,6 +1,6 @@
 **App Proxy Rust 版设计**
 
-状态：基础平台、配置模型/存储、本地管道和协调进程状态查询已实现。2026-09-19 已建立三个 crate 和两个可执行入口，通过普通/调试进程创建测试及 Claude 包内 Rust helper 实测。尚未实现日常菜单、应用实例启动、代理管理或 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
+状态：基础平台、配置模型/存储、本地管道、协调进程状态查询、启动模板和实例数据目录准备已实现。2026-09-19 已建立三个 crate 和两个可执行入口，通过普通/调试进程创建测试及 Claude 包内 Rust helper 实测。尚未实现日常菜单、应用实例启动、代理管理或 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
 
 **构建与验证**
 

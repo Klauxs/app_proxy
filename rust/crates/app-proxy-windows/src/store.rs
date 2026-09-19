@@ -93,6 +93,9 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
     pub fn create(root: &Path) -> Result<Self> {
         identity::assert_ordinary_user()?;
         absolute(root)?;
@@ -316,7 +319,7 @@ fn absolute(root: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn encode<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>> {
+pub(crate) fn encode<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>> {
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|_| Error::Invalid("STORE_SERIALIZE_FAILED"))?;
     if bytes.len() > limit {
@@ -324,18 +327,18 @@ fn encode<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     // serde errors can contain the offending value, so only expose a stable code.
     serde_json::from_slice(bytes).map_err(|_| Error::Invalid("INVALID_STORE_JSON"))
 }
-fn write_new(path: &Path, bytes: &[u8], sid: &str) -> Result<()> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8], sid: &str) -> Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     security::verify(file.as_raw_handle(), sid, false)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
 }
-fn read_protected(path: &Path, sid: &str, limit: usize) -> Result<Vec<u8>> {
+pub(crate) fn read_protected(path: &Path, sid: &str, limit: usize) -> Result<Vec<u8>> {
     security::no_reparse(path)?;
     let file = OpenOptions::new()
         .read(true)

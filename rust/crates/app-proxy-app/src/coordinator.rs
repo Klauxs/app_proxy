@@ -78,13 +78,7 @@ fn hello(store_id: Uuid, session_id: u32, epoch: Option<Uuid>) -> Hello {
 }
 
 pub fn default_home() -> Result<PathBuf> {
-    let base =
-        std::env::var_os("LOCALAPPDATA").ok_or(Error::Invalid("LOCAL_APP_DATA_UNAVAILABLE"))?;
-    let path = PathBuf::from(base).join("AppProxyRust");
-    if !path.is_absolute() {
-        return Err(Error::Invalid("LOCAL_APP_DATA_NOT_ABSOLUTE"));
-    }
-    Ok(path)
+    Ok(app_proxy_windows::instance_data::local_app_data()?.join("AppProxyRust"))
 }
 
 fn binaries() -> Result<(PathBuf, PathBuf)> {
