@@ -15,7 +15,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "process"] }
 app-proxy-core = { path = "crates/app-proxy-core" }
 app-proxy-windows = { path = "crates/app-proxy-windows" }
 

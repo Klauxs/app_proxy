@@ -132,17 +132,49 @@ fn generated_config_routes_two_authenticated_upstreams_in_one_real_process() {
     let compiled = singbox::compile(&manifest, &ids, |_| Ok("secret".into())).unwrap();
     let config = root.join("core.json");
     fs::write(&config, compiled.bytes()).unwrap();
-    assert!(
-        Command::new(&binary)
-            .args(["check", "-c"])
-            .arg(&config)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x08000000)
-            .status()
-            .unwrap()
-            .success()
-    );
+    // Exercise the production discovery and bounded check path on an owned
+    // fixture installation. The user's installed program is never changed.
+    let installed = root.join("bin/sing-box/1.14.1");
+    fs::create_dir_all(&installed).unwrap();
+    for name in ["sing-box.exe", "libcronet.dll"] {
+        fs::copy(binary.parent().unwrap().join(name), installed.join(name)).unwrap();
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let selected = runtime
+        .block_on(app_proxy_windows::singbox_binary::discover(&root))
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.version(), "1.14.1");
+    assert!(matches!(
+        selected.source(),
+        app_proxy_windows::singbox_binary::Source::Managed
+    ));
+    runtime.block_on(selected.check_config(&config)).unwrap();
+    let invalid_config = root.join("invalid.json");
+    fs::write(
+        &invalid_config,
+        br#"{"secret://password@example.invalid":true}"#,
+    )
+    .unwrap();
+    let error = runtime
+        .block_on(selected.check_config(&invalid_config))
+        .unwrap_err();
+    assert_eq!(error.to_string(), "CORE_PROBE_EXIT_FAILED");
+    let discovery = Command::new(env!("CARGO_BIN_EXE_app-proxy"))
+        .arg("--home")
+        .arg(&root)
+        .args(["discover", "sing-box"])
+        .creation_flags(0x08000000)
+        .output()
+        .unwrap();
+    assert!(discovery.status.success());
+    let summary: serde_json::Value = serde_json::from_slice(&discovery.stdout).unwrap();
+    assert_eq!(summary["found"], true);
+    assert_eq!(summary["configuration_checked"], false);
+    drop(selected);
     // A test-only unmatched inbound exercises the compiler's final rejection.
     let mut value: serde_json::Value = serde_json::from_slice(compiled.bytes()).unwrap();
     value["inbounds"].as_array_mut().unwrap().push(serde_json::json!({"type":"http","tag":"unmatched-fixture","listen":"127.0.0.1","listen_port":ports[2],"set_system_proxy":false}));

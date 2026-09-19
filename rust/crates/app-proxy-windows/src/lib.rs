@@ -7,6 +7,7 @@ pub mod instance_data;
 pub mod ipc;
 pub mod package;
 pub mod process;
+pub mod singbox_binary;
 mod storage_security;
 pub mod store;
 

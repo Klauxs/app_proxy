@@ -28,10 +28,10 @@ enum Commands {
     },
     /// 显示当前进程身份，确认普通权限运行环境
     Doctor,
-    /// 只读识别已安装的桌面应用
+    /// 识别已安装的桌面应用或探测 sing-box 程序文件
     Discover {
         #[arg(value_enum)]
-        app: App,
+        app: Discovery,
     },
     /// 运行隔离的开发验证，不注册 IFEO、不启动真实应用
     Probe {
@@ -52,6 +52,13 @@ impl App {
             Self::Codex => "codex",
         }
     }
+}
+
+#[derive(Clone, ValueEnum)]
+enum Discovery {
+    Claude,
+    Codex,
+    SingBox,
 }
 
 #[derive(Subcommand)]
@@ -120,7 +127,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Doctor => print(&identity::current()?),
-        Commands::Discover { app } => print(&package::discover(app.name())?),
+        Commands::Discover {
+            app: Discovery::SingBox,
+        } => {
+            let root = cli
+                .home
+                .map(Ok)
+                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let binary = runtime.block_on(app_proxy_windows::singbox_binary::discover(&root))?;
+            match binary {
+                Some(binary) => print(&serde_json::json!({
+                    "found": true, "version": binary.version(), "source": binary.source(),
+                    "executable": binary.executable(), "configuration_checked": false,
+                    "message": "已找到程序；具体代理配置仍须检查，尚未启动代理进程。"
+                })),
+                None => print(&serde_json::json!({"found": false,
+                    "message": "未找到可用的 sing-box；一键安装流程尚在实现中。"})),
+            }
+        }
+        Commands::Discover {
+            app: Discovery::Claude,
+        } => print(&package::discover("claude")?),
+        Commands::Discover {
+            app: Discovery::Codex,
+        } => print(&package::discover("codex")?),
         Commands::Probe {
             command: Probes::Process { debug_detach },
         } => print(&app_proxy_app::probe::process_probe(debug_detach)?),

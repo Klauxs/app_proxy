@@ -12,6 +12,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 .\target\debug\app-proxy.exe discover claude
+.\target\debug\app-proxy.exe discover sing-box
 .\target\debug\app-proxy.exe probe process --debug-detach
 .\target\debug\app-proxy.exe probe package claude
 .\target\debug\app-proxy.exe status --json
@@ -34,6 +35,8 @@ cargo fmt --all -- --check
 ```
 
 创建默认原版，必须选择 `--direct` 或 `--proxy <已登记代理ID>`；普通 EXE 使用 `--exe <绝对路径> --adapter codex|claude|chromium|environment`，只有已支持的 Codex/Claude 模板允许分身。应用位置和分身存储自动解析，不复制登录数据。移除只删除登记，保留数据；已有系统集成时先要求清理。每次写入前会输出请求编号，响应中断后查询原编号，不自动重新创建。首次登记应用和创建实例是两个请求，实例创建失败可能保留应用记录。列表为摘要，显示名最多 256 字符，不含参数、环境值和代理凭据；不是完整配置导出。代理创建、启动及 Guard 授权仍待后续实现。
+
+`discover sing-box` 自动探测 store 内完整版本目录、绝对 PATH、Scoop 和 WinGet Links 中的程序，执行 version 并输出位置/版本/来源，不创建 store，不接入外部服务。具体代理配置仍须执行 check；此命令不代表代理可用，也还没有接入安装提示。探测子进程每次限时 3 秒、总异步等待预算 20 秒；同步文件系统访问（例如网络盘）仍受 Windows I/O 超时约束。只接受稳定版本，Scoop 的转发 shim 不作为内核执行。
 
 `probe package claude` 仅在已安装 Claude 的包身份下启动本产品测试 helper，验证回执和独立临时目录读写，不启动 Claude 界面或修改其登录数据。`probe process --debug-detach` 验证调试创建和脱离，**不代表真实 IFEO 注册或 Electron 子进程兼容性已经通过**。
 
