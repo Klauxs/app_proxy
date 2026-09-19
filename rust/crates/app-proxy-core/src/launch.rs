@@ -52,7 +52,7 @@ impl LaunchPhase {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaunchNetwork {
     Direct {},
@@ -63,7 +63,7 @@ pub enum LaunchNetwork {
     },
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchBinding {
     pub dependency_digest: [u8; 32],

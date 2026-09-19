@@ -239,3 +239,15 @@ ToolHelp 快照只返回进程提示，WMI COM 查询仅接受同用户/同会�
 真实 sing-box 1.14.1 的 CLI 扩容/更新测试另行通过，新增 launch JSON 影响预览只生成计划、不重启共享进程，重放不替换计划。Windows PTY 手工测试在缺失内核安装提示处发送 Ctrl+C，命令立即退出，journal 只有原 CORE_BINARY_MISSING 失败，没有 dispatch 或新请求；未开始下载。全量 workspace 193 项通过、18 项顶层 ignored，最后旧协议扩展回归再通过，clippy/fmt 通过。
 
 此批只覆盖普通隔离 EXE 夹具与真实内核依赖流程；未进行真实 Codex/Claude 运行验收、MSIX 生产创建或 IFEO 注册。没有实测在成功的真实内核切换中按 Ctrl+C；该边界本批依据共享取消意图实现与独立源码复审，后续端到端验收仍需覆盖。
+
+**MSIX 一次性包请求与撤销（2026-09-20）**
+
+新增平台请求模块，消费已有本地 dispatch / 全局 AuthorizedSpawn，保存完整 owner/attempt/epoch/nonce、启动 binding、目标文件、helper 文件和发行者进程身份。请求和状态先在不可消费的 staging 目录完整落盘，再无覆盖地发布到 attempt 目录；发布同步返回后最终目录确实不存在才能出具未创建证据。目录、父目录和文件均校验归属/ACL/重解析；请求摘要、目录物理身份及原 journal 绑定阻止混用回执。
+
+helper 与撤销共用独占文件锁，覆盖最终能力核对、Consuming、创建和回执。Pending 可被持久撤销；Consuming 不因超时、helper 消失或重复调用而再次执行；Created 迟到取消保留原进程。创建前核对包 family/full name、helper 文件及 session，固定并复核目标映像；创建后通过保留的原生 child handle 核对完整包身份。身份或回执保存失败均保持未知。
+
+独立 review 发现并修复 UTC 回拨延长授权、部分发布无法核对及遗漏 child 包身份的问题。新增发行 tick 与精确发行者存活检查，单调时间包括睡眠/休眠；UTC 回跳到原有效窗口也不能延长 20 秒授权，发行者退出后晚 helper 不再创建。当前请求不序列化任意可重用执行 permit；helper 只能消费一次有效 Pending。
+
+8 项新增测试通过：撤销后重开/重放、过期与错包、gate 排他及 Consuming 不重试、nonce/物理目录绑定、真实夹具进程一次创建与晚取消、时钟回拨/旧发行者、request/state 实际占用写失败、创建后 child 校验或回执写失败保留未知。审查方独立复跑全部 8 项通过。包上下文在这些新测试中通过私有测试调用注入，子进程为真实普通 EXE；没有启动用户 Codex/Claude，也不把这些证据称为真实 MSIX 应用验收。生产 bridge/host/LaunchEngine 接入及真实包运行验证仍待下一批。
+
+最终全量 workspace 201 项通过、19 项顶层 ignored；clippy -D warnings、fmt 和 diff 检查通过。

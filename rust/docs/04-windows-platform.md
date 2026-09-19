@@ -46,6 +46,10 @@ request 消费采用独占 claim 文件/系统锁，helper 全程持有，确保
 
 初始 TTL 为 20 秒、外部等待 22 秒；到期只撤销尚未消费的能力。明确收到成功/失败且消除迟到风险后才能删除 request、claim 和 receipt。含 env/args 的文件不进诊断包，最终清理失败可记录路径 ID，不能打印内容。
 
+平台请求实现补充：完整 request/state 先写入 helper 不接受的临时目录，再无覆盖地原子发布到 attempt 目录；最终目录不存在时，已结束的同步发布可以返回明确未创建证据。最终目录存在但无法读取时保留未知。请求同时绑定发行者完整身份、发行时系统 tick 和 UTC 截止时间；helper 必须核对发行者仍存活，并检查跨进程 tick 差值，防止 UTC 回拨或重启后复用旧能力。Windows tick 包括睡眠与休眠时间，见 [Windows Time](https://learn.microsoft.com/en-us/windows/win32/sysinfo/windows-time)。创建后的完整包版本通过原生 child handle 查询，校验失败或写回执失败保留 consuming，不终止应用也不再次消费。
+
+此请求模块已有夹具验证；生产 `package-child` 入口、包激活桥接、LaunchEngine 接入和真实目标应用仍需后续验收，不能用平台请求测试代替 MSIX 完整启动证据。
+
 **4. 存储虚拟化**
 
 新实例先分配稳定 StorageLocation：普通目录或关闭写虚拟化的包采用 store；其他包采用 `%LOCALAPPDATA%\Packages\<family>\LocalState\AppProxyRust\<namespace>`。namespace 由 store_id 稳定派生，首次使用创建本产品专属归属标记。独立任务、pipe、ETW session 和 cache 同样使用 AppProxyRust 命名空间，不扫描/导入旧工具目录。

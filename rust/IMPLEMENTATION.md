@@ -5,7 +5,7 @@
 | 功能 | 当前状态 | 完成证据 / 下一项验证 |
 |---|---|---|
 | M0 普通进程/身份/调试创建候选 | 已实现，独立 review 通过 | `TEST-RESULTS.md`，普通/调试 child 契约测试；不等于完整 M0 通过 |
-| MSIX 包内 helper | 仅实验通过 | Claude 包内回执；生产启动、取消/迟到、应用实例仍待实现 |
+| MSIX 包内 helper | 探针及生产请求平台模块已实现，独立 review 通过；生产执行链待接入 | 原子发布、独占消费/撤销、截止时间和回执未知边界已验证；真实包身份/目标运行、bridge/host/LaunchEngine 串联待实现 |
 | 配置模型 | 基础模型已实现，独立 review 通过 | 严格 JSON、引用/路径/Guard/IFEO 校验；13 项 core 测试；当前节点仅手动 HTTP/SOCKS5，订阅与其他协议后续实现 |
 | 配置存储 | 基础存储已实现，独立 review 通过 | 归属/ACL、revision、锁、原子替换/上一份备份、不可变秘密与坏文件拒绝；10 项 store 测试；恢复界面与运行 journal 待实现 |
 | IPC 传输 | 已实现，独立 review 通过 | 双向身份/普通权限/会话/映像验证、管道 ACL、1 MiB 帧与超时/取消；4 项真实管道 + 2 项帧测试 |
@@ -75,3 +75,5 @@
 - coordinator 普通 EXE 启动 RPC：独立审查及历史会话修复复审通过，提交主题 `feat(rust): coordinate application launch requests over IPC`。协议 2.7 提供启动/查询/取消，启动与 core 控制共用同一 CoreManager；接纳先于 ACK，长任务不占连接槽。完成通知和 5 秒只读维护核对精确退出，未知保活。新增 3 项真实管道测试覆盖丢 ACK、重复/冲突、等待期间查询取消、应用存活及退出后 owner 空闲退出、旧 minor 拒绝；全量 189 项通过。随后修复历史登录会话被当前 session 限制阻断恢复，新增 1 项合成历史会话回归及 8 项启动状态/3 项管道回归通过，共 190 项默认行为已验证、17 项顶层 ignored，clippy/fmt/diff 通过。只读历史恢复仍要求同 SID/完整身份与创建时间，创建/终止/普通预留不放宽；没有实测切换 Windows 登录会话。CLI/菜单、MSIX、IFEO 转交、持续网络监控和真实应用验收待续。
 
 - 普通 EXE 启动 CLI：独立审查与取消/版本竞态修复复审通过，提交主题 `feat(rust): launch instances with inline dependency repair`。接入 launch/inspect/cancel、缺失内核安装、共享代理扩容影响确认；JSON/非交互返回待操作信息，终态重放不修复或重新创建。前台 Ctrl+C 意图跨提示/准备/应用持续保留，自动继续的 revision 在服务端接纳及最终派发均核对，协议 2.8 拒绝旧 host 忽略前提。新增 2 项真实 CLI 与 1 项 engine 竞争回归，旧协议覆盖扩展；全量 193 项通过、18 项顶层 ignored，真实 sing-box CLI 集成与 Windows PTY 提示取消另行通过，clippy/fmt/diff 通过。审查方独立复跑 CLI、revision 和协议测试通过。未实测成功内核切换中的 Ctrl+C，MSIX、IFEO/Guard、中文菜单及真实应用完整验收仍待实现。
+
+- MSIX 一次性包请求与撤销平台：独立审查与三项边界修复复审通过，提交主题 `feat(rust): persist one-use package launch capabilities`。消费现有 dispatch/global permit，完整 staging 原子发布、同一 gate 消费/撤销、nonce/原 journal/目录身份绑定；创建后包身份或回执失败保持未知。修复 UTC 回拨延寿、部分发布无法核对及遗漏 child 包身份，发行 tick 与原发行者精确存活共同限制授权。新增 8 项默认行为测试含实际文件占用与普通子进程，全量 201 项通过、19 项顶层 ignored；审查方独立复跑 8 项通过，clippy/fmt/diff 通过。新测试的包上下文为私有注入，真实包 helper/应用及 bridge/host/LaunchEngine 接入仍待完成，不能以此代替 MSIX 生产启动验收。

@@ -42,7 +42,8 @@ pub struct LaunchAdmission {
     pub is_new: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DispatchIdentity {
     pub owner: crate::instance_resource::ResourceOwner,
     pub dispatch_id: Uuid,

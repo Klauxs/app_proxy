@@ -14,6 +14,7 @@ pub mod instance_resource;
 pub mod ipc;
 pub mod launch_state;
 pub mod package;
+pub mod package_launch;
 pub mod process;
 pub mod process_query;
 pub mod singbox_binary;

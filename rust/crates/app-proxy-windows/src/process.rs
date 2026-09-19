@@ -39,6 +39,9 @@ pub struct NoProcessCreated {
     context: crate::launch_state::DispatchIdentity,
 }
 impl NoProcessCreated {
+    pub(crate) fn from_package_receipt(context: crate::launch_state::DispatchIdentity) -> Self {
+        Self { context }
+    }
     pub(crate) fn context(&self) -> crate::launch_state::DispatchIdentity {
         self.context
     }
@@ -184,6 +187,12 @@ fn quote_windows_word(word: &std::ffi::OsStr) -> Result<Vec<u16>> {
 }
 
 impl StartedProcess {
+    /// Query the package on the retained newly-created handle, never a reused PID.
+    pub(crate) fn package_full_name(&self) -> Result<Option<String>> {
+        // SAFETY: Child retains the process query handle for this entire call.
+        unsafe { identity::package_full_name_handle(self.child.as_raw_handle()) }
+    }
+
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         Ok(self.child.try_wait()?)
     }
@@ -329,7 +338,7 @@ pub fn spawn_for_attempt(
     result
 }
 
-fn spawn_checked(spec: SpawnSpec) -> std::result::Result<StartedProcess, (Error, bool)> {
+pub(crate) fn spawn_checked(spec: SpawnSpec) -> std::result::Result<StartedProcess, (Error, bool)> {
     identity::assert_ordinary_user().map_err(|e| (e, false))?;
     spec.environment.validate().map_err(|e| (e.into(), false))?;
     if !spec.exe.is_absolute()

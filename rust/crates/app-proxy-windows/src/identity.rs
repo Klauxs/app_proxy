@@ -97,6 +97,42 @@ pub fn package_family() -> Result<Option<String>> {
     }
 }
 
+/// Full versioned identity; family alone cannot authorize an old package helper.
+pub fn package_full_name() -> Result<Option<String>> {
+    // SAFETY: the current-process pseudo handle is valid and not owned here.
+    unsafe { package_full_name_handle(GetCurrentProcess()) }
+}
+
+pub(crate) unsafe fn package_full_name_handle(process: RawHandle) -> Result<Option<String>> {
+    use windows_sys::Win32::Storage::Packaging::Appx::GetPackageFullName;
+    // SAFETY: caller retains a process query handle; buffers follow the API sizes.
+    unsafe {
+        let mut length = 0;
+        let result = GetPackageFullName(process, &mut length, null_mut());
+        if result == APPMODEL_ERROR_NO_PACKAGE {
+            return Ok(None);
+        }
+        if result != ERROR_INSUFFICIENT_BUFFER {
+            return Err(Error::Windows {
+                operation: "GetPackageFullName",
+                code: result,
+            });
+        }
+        let mut buffer = vec![0u16; length as usize];
+        let result = GetPackageFullName(process, &mut length, buffer.as_mut_ptr());
+        if result != 0 {
+            return Err(Error::Windows {
+                operation: "GetPackageFullName",
+                code: result,
+            });
+        }
+        buffer.truncate(length.saturating_sub(1) as usize);
+        Ok(Some(
+            String::from_utf16(&buffer).map_err(|_| Error::Invalid("NON_UNICODE_PACKAGE"))?,
+        ))
+    }
+}
+
 pub fn file_identity(path: &Path) -> Result<FileIdentity> {
     let path = wide(path.as_os_str())?;
     // SAFETY: path is terminated, structures are sized, the returned handle is owned.
