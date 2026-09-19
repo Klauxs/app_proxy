@@ -2,6 +2,7 @@
 
 pub mod config_transaction;
 pub mod identity;
+pub mod installation;
 pub mod instance_data;
 pub mod ipc;
 pub mod package;

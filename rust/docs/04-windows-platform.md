@@ -22,6 +22,8 @@ ProcessIdentity 包含 PID、GetProcessTimes 创建时间、完整映像路径/�
 
 检查 EntryPoint 为 Windows.FullTrustApplication，读取具有正确 namespace 的文件虚拟化字段。AppContainer 不作为兼容承诺。包 EXE 原目录被用作 cwd 时跟随更新，用户显式 cwd 则保持。计划生成与执行之间包版本改变时重新解析/拒绝旧计划。
 
+平台安装解析返回持有只读文件句柄的短期结果，由句柄取得规范化路径及卷/文件身份，用于识别大小写路径和硬链接。准备阶段拒绝文件写入/删除共享，最终创建前仍复核 locator 和包版本；确认创建后释放该安装句柄，不阻碍应用生命周期内的更新。此解析只证明当前文件/安装身份，不证明目标程序可启动、多开或代理已生效。[GetFinalPathNameByHandleW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)。
+
 首版用受控 PowerShell 5.1 脚本执行 Appx 解析/激活，参数通过结构化输入或参数绑定传入，绝不把用户数据拼进 `-Command`。PowerShell 可执行文件来自 SystemRoot 固定路径，-NoProfile、-NonInteractive；输出只有版本化 JSON DTO，限制大小和超时。后续原生包查询通过相同 contract tests 后替换这个适配器，不改变业务接口。
 
 **3. 包上下文激活与回执**

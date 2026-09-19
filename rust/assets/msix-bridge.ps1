@@ -9,11 +9,13 @@ try {
         'Claude_pzs8sxrjxfjjc' = 'Claude'
         'OpenAI.Codex_2p2nqsd0c76g0' = 'App'
     }
-    if ($known[$request.family_name] -ne $request.app_id) { throw 'PACKAGE_NOT_FULL_TRUST' }
+    if ($request.operation -eq 'probe' -and $known[$request.family_name] -ne $request.app_id) { throw 'PACKAGE_NOT_FULL_TRUST' }
+    if ([string]::IsNullOrEmpty($request.family_name) -or $request.family_name.LastIndexOf('_') -lt 1) { throw 'APP_NOT_INSTALLED' }
     $name = $request.family_name.Substring(0, $request.family_name.LastIndexOf('_'))
     $stage = 'package_query'
     $packages = @(Get-AppxPackage -Name $name | Where-Object { $_.PackageFamilyName -eq $request.family_name })
-    if ($packages.Count -ne 1) { throw 'APP_NOT_INSTALLED' }
+    if ($packages.Count -eq 0) { throw 'APP_NOT_INSTALLED' }
+    if ($packages.Count -ne 1) { throw 'AMBIGUOUS_PACKAGE' }
     $package = $packages[0]
     $stage = 'manifest'
     $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
@@ -47,6 +49,6 @@ try {
     $result | ConvertTo-Json -Compress -Depth 8
 } catch {
     $code = [string]$_.Exception.Message
-    if ($code -notin @('APP_NOT_INSTALLED','PACKAGE_CHANGED','PACKAGE_NOT_FULL_TRUST')) { $code = 'PACKAGE_BRIDGE_FAILED' }
+    if ($code -notin @('APP_NOT_INSTALLED','AMBIGUOUS_PACKAGE','PACKAGE_CHANGED','PACKAGE_NOT_FULL_TRUST')) { $code = 'PACKAGE_BRIDGE_FAILED' }
     @{ error = $code; stage = $stage; system_code = $_.Exception.HResult } | ConvertTo-Json -Compress
 }

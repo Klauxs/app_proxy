@@ -25,6 +25,17 @@ pub fn discover(app: &str) -> Result<Package> {
         "codex" => ("OpenAI.Codex_2p2nqsd0c76g0", "App"),
         _ => return Err(Error::Invalid("UNKNOWN_APPLICATION")),
     };
+    resolve(family, app_id)
+}
+
+/// Read-only lookup for a saved stable package locator, repeated for each plan.
+pub fn resolve(family: &str, app_id: &str) -> Result<Package> {
+    if [family, app_id]
+        .iter()
+        .any(|s| s.is_empty() || s.len() > 256 || s.contains('\0'))
+    {
+        return Err(Error::Invalid("INVALID_PACKAGE_LOCATOR"));
+    }
     bridge(&serde_json::json!({"operation":"discover", "family_name":family, "app_id":app_id}))
 }
 
@@ -44,9 +55,16 @@ pub fn activate_probe(package: &Package, helper: &Path, request: &Path) -> Resul
 }
 
 fn bridge<T: serde::de::DeserializeOwned>(request: &impl Serialize) -> Result<T> {
+    bridge_script(request, BRIDGE)
+}
+
+fn bridge_script<T: serde::de::DeserializeOwned>(
+    request: &impl Serialize,
+    source: &str,
+) -> Result<T> {
     crate::identity::assert_ordinary_user()?;
     let mut script = tempfile::Builder::new().suffix(".ps1").tempfile()?;
-    script.write_all(BRIDGE.as_bytes())?;
+    script.write_all(source.as_bytes())?;
     script.flush()?;
     // PowerShell opens scripts without sharing write access. Close our writer first,
     // retaining only the automatic path cleanup guard.
@@ -105,6 +123,7 @@ fn bridge<T: serde::de::DeserializeOwned>(request: &impl Serialize) -> Result<T>
     if let Some(code) = value.get("error").and_then(|v| v.as_str()) {
         return Err(Error::Invalid(match code {
             "APP_NOT_INSTALLED" => "APP_NOT_INSTALLED",
+            "AMBIGUOUS_PACKAGE" => "AMBIGUOUS_PACKAGE",
             "PACKAGE_CHANGED" => "PACKAGE_CHANGED",
             "PACKAGE_NOT_FULL_TRUST" => "PACKAGE_NOT_FULL_TRUST",
             _ => "PACKAGE_BRIDGE_FAILED",
@@ -130,5 +149,85 @@ fn system_powershell() -> Result<std::path::PathBuf> {
             std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer))
                 .join("WindowsPowerShell/v1.0/powershell.exe"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_query(
+        root: &Path,
+        copies: usize,
+        entry_point: &str,
+        namespace: &str,
+        operation: &str,
+    ) -> Result<Package> {
+        let manifest = format!(
+            r#"<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:d6="{namespace}"><Properties><DisplayName>Fixture</DisplayName><d6:FileSystemWriteVirtualization>disabled</d6:FileSystemWriteVirtualization></Properties><Applications><Application Id="App" EntryPoint="{entry_point}" Executable="app.exe" /></Applications></Package>"#
+        );
+        let package = serde_json::json!({ "PackageFamilyName":"Fixture_publisher", "PackageFullName":"Fixture_1.0_x64__publisher", "InstallLocation":root });
+        let fixture =
+            serde_json::json!({ "packages": vec![package; copies], "manifest": manifest });
+        // Escape a PowerShell literal, not a command; test-only data never enters
+        // the production bridge source. Stub only read-only Appx queries.
+        let literal = serde_json::to_string(&fixture).unwrap().replace('\'', "''");
+        let source = format!(
+            "$script:Fixture = '{literal}' | ConvertFrom-Json\nfunction Get-AppxPackage {{ param($Name) $script:Fixture.packages }}\nfunction Get-AppxPackageManifest {{ param($Package) [xml]$script:Fixture.manifest }}\n{BRIDGE}"
+        );
+        bridge_script(
+            &serde_json::json!({"operation":operation,"family_name":"Fixture_publisher","app_id":"App"}),
+            &source,
+        )
+    }
+
+    #[test]
+    fn bridge_distinguishes_absent_ambiguous_and_non_full_trust_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("app.exe"), b"never executed").unwrap();
+        for (copies, entry, expected) in [
+            (0, "Windows.FullTrustApplication", "APP_NOT_INSTALLED"),
+            (2, "Windows.FullTrustApplication", "AMBIGUOUS_PACKAGE"),
+            (1, "Fixture.App", "PACKAGE_NOT_FULL_TRUST"),
+        ] {
+            let result = fixture_query(temp.path(), copies, entry, "urn:other", "discover");
+            assert!(matches!(result, Err(Error::Invalid(code)) if code == expected));
+        }
+        // General read-only lookup must not broaden the probe activation allowlist.
+        assert!(matches!(
+            fixture_query(
+                temp.path(),
+                1,
+                "Windows.FullTrustApplication",
+                "urn:other",
+                "probe"
+            ),
+            Err(Error::Invalid("PACKAGE_NOT_FULL_TRUST"))
+        ));
+    }
+
+    #[test]
+    fn bridge_resolves_other_full_trust_packages_and_uses_virtualization_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("app.exe"), b"never executed").unwrap();
+        for (namespace, isolated) in [
+            (
+                "http://schemas.microsoft.com/appx/manifest/desktop/windows10/6",
+                false,
+            ),
+            ("urn:other", true),
+        ] {
+            let result = fixture_query(
+                temp.path(),
+                1,
+                "Windows.FullTrustApplication",
+                namespace,
+                "discover",
+            )
+            .unwrap();
+            assert_eq!(result.family_name, "Fixture_publisher");
+            assert_eq!(result.exe, temp.path().join("app.exe"));
+            assert_eq!(result.isolated_storage, isolated);
+        }
     }
 }
