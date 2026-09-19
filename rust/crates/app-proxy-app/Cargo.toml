@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+tokio.workspace = true
 app-proxy-core.workspace = true
 app-proxy-windows.workspace = true
 serde.workspace = true

@@ -1,6 +1,6 @@
 **App Proxy Rust 版设计**
 
-状态：已进入 M0 平台验证实现。2026-09-19 已建立三个 crate 和两个可执行入口，通过普通/调试进程创建测试及 Claude 包内 Rust helper 实测。尚未实现日常菜单、配置仓库、代理管理或 Guard，不能作为正式启动器使用。详见 [本轮验证记录](D:/app_proxy/rust/TEST-RESULTS.md)。
+状态：基础平台、配置模型/存储、本地管道和协调进程状态查询已实现。2026-09-19 已建立三个 crate 和两个可执行入口，通过普通/调试进程创建测试及 Claude 包内 Rust helper 实测。尚未实现日常菜单、应用实例启动、代理管理或 Guard，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
 
 **构建与验证**
 
@@ -14,9 +14,12 @@ cargo fmt --all -- --check
 .\target\debug\app-proxy.exe discover claude
 .\target\debug\app-proxy.exe probe process --debug-detach
 .\target\debug\app-proxy.exe probe package claude
+.\target\debug\app-proxy.exe status --json
 ```
 
-本机 Rust 安装在项目 `.tools` 内，未修改系统 PATH；可使用 `./scripts/cargo.ps1 build --workspace --locked`。需要传递 Cargo 的 `--` 分隔符时用数组，例如 `./scripts/cargo.ps1 -CargoArgs @('clippy','--workspace','--all-targets','--locked','--','-D','warnings')`。
+本机 Rust 安装在项目 `.tools` 内，未修改系统 PATH；可使用 `./scripts/cargo.ps1 build --workspace --locked`。传递 Cargo 的 `-p` 或 `--` 等参数时用数组，避免 PowerShell 参数绑定冲突，例如 `./scripts/cargo.ps1 -CargoArgs @('clippy','--workspace','--all-targets','--locked','--','-D','warnings')`。
+
+`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前只返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。此阶段还没有配置写 RPC、请求持久化去重或运行 journal。
 
 `probe package claude` 仅在已安装 Claude 的包身份下启动本产品测试 helper，验证回执和独立临时目录读写，不启动 Claude 界面或修改其登录数据。`probe process --debug-detach` 验证调试创建和脱离，**不代表真实 IFEO 注册或 Electron 子进程兼容性已经通过**。
 
@@ -33,7 +36,7 @@ cargo fmt --all -- --check
 - 按当前功能需要实现命令、字段和恢复步骤。详细章节中的接口、CLI 清单及目录划分是设计参考，不要求提前逐项搭空壳；新增范围需另行讨论。
 - 保留与真实副作用有关的检查：不重复启动、不误杀进程、不覆盖他人配置、IFEO 不递归、配置失败可恢复。测试围绕这些行为与实际启动闭环，不为简单实现机械配套测试。
 
-目标日常链路：选择应用与实例 → 选择/配置代理 → 自动查找 sing-box，缺少则询问安装 → 准备代理 → 启动应用。Guard 在创建流程中完成必要授权；运行中代理故障只提示、保留应用。用户已确认开始实现，目前仅交付上述 M0 验证入口；后续按实际验收结果逐步补齐。
+目标日常链路：选择应用与实例 → 选择/配置代理 → 自动查找 sing-box，缺少则询问安装 → 准备代理 → 启动应用。Guard 在创建流程中完成必要授权；运行中代理故障只提示、保留应用。用户已确认开始实现，目前交付上述基础功能和验证入口；后续按实际验收结果逐步补齐。
 
 **阅读入口**
 

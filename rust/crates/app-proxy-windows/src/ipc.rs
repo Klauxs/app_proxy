@@ -63,6 +63,14 @@ pub struct Listener {
     next: NamedPipeServer,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AcceptError {
+    #[error(transparent)]
+    Listener(Error),
+    #[error(transparent)]
+    Peer(Error),
+}
+
 pub struct Connection<T> {
     stream: T,
     pub peer: ProcessIdentity,
@@ -79,12 +87,19 @@ impl Listener {
         Ok(Self { name, policy, next })
     }
 
-    pub async fn accept(&mut self) -> Result<Connection<NamedPipeServer>> {
-        self.next.connect().await?;
+    pub async fn accept(
+        &mut self,
+    ) -> std::result::Result<Connection<NamedPipeServer>, AcceptError> {
+        self.next
+            .connect()
+            .await
+            .map_err(|e| AcceptError::Listener(e.into()))?;
         // Reserve the next instance before handing out this one: no unowned-name gap.
-        let next = server(&self.name, &self.policy.owner_sid, false)?;
+        let next =
+            server(&self.name, &self.policy.owner_sid, false).map_err(AcceptError::Listener)?;
         let connected = std::mem::replace(&mut self.next, next);
-        let (peer, process) = authenticate(connected.as_raw_handle(), &self.policy, true)?;
+        let (peer, process) = authenticate(connected.as_raw_handle(), &self.policy, true)
+            .map_err(AcceptError::Peer)?;
         Ok(Connection {
             stream: connected,
             peer,

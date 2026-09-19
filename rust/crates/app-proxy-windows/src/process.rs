@@ -2,7 +2,7 @@ use crate::{Error, Result, identity, last_error};
 use app_proxy_core::{EnvPatch, ProcessIdentity};
 use std::ffi::OsString;
 use std::mem::zeroed;
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -30,6 +30,122 @@ pub struct SpawnSpec {
 pub struct StartedProcess {
     child: Child,
     pub identity: ProcessIdentity,
+}
+
+pub struct StartedHost {
+    process: OwnedHandle,
+    pub identity: ProcessIdentity,
+}
+impl StartedHost {
+    pub fn has_exited(&self) -> Result<bool> {
+        // SAFETY: the exact process handle remains owned throughout this zero-time wait.
+        match unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(last_error("WaitForCoordinator")),
+        }
+    }
+}
+
+/// Fixed coordinator entry. Inherit no handles: std::Command on stable Windows
+/// otherwise inherits the CLI's captured stdout, keeping its caller waiting for EOF.
+pub fn start_host(exe: &std::path::Path, home: &std::path::Path) -> Result<StartedHost> {
+    identity::assert_ordinary_user()?;
+    if !exe.is_absolute() || !home.is_absolute() {
+        return Err(Error::Invalid("ABSOLUTE_HOST_PATH_REQUIRED"));
+    }
+    let expected_image = identity::file_identity(exe)?;
+    let caller = identity::current()?;
+    let application = crate::wide(exe.as_os_str())?;
+    let cwd = crate::wide(
+        exe.parent()
+            .ok_or(Error::Invalid("HOST_DIRECTORY_REQUIRED"))?
+            .as_os_str(),
+    )?;
+    let mut command = Vec::new();
+    for word in [
+        exe.as_os_str(),
+        std::ffi::OsStr::new("serve"),
+        std::ffi::OsStr::new("--home"),
+        home.as_os_str(),
+    ] {
+        if !command.is_empty() {
+            command.push(b' ' as u16);
+        }
+        command.extend(quote_windows_word(word)?);
+    }
+    command.push(0);
+    if command.len() > 32767 {
+        return Err(Error::Invalid("HOST_COMMAND_TOO_LONG"));
+    }
+    // SAFETY: all buffers terminated and live; no inherited handles or security pointers.
+    unsafe {
+        let mut startup: STARTUPINFOW = zeroed();
+        startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut info: PROCESS_INFORMATION = zeroed();
+        if CreateProcessW(
+            application.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            std::ptr::null(),
+            cwd.as_ptr(),
+            &startup,
+            &mut info,
+        ) == 0
+        {
+            return Err(last_error("StartCoordinator"));
+        }
+        let process = OwnedHandle::from_raw_handle(info.hProcess);
+        let thread = OwnedHandle::from_raw_handle(info.hThread);
+        drop(thread);
+        let inspected = identity::inspect_handle(process.as_raw_handle());
+        match inspected {
+            Ok(actual)
+                if actual.image_file == expected_image
+                    && actual.user_sid == caller.user_sid
+                    && actual.session_id == caller.session_id =>
+            {
+                Ok(StartedHost {
+                    process,
+                    identity: actual,
+                })
+            }
+            _ => {
+                // Exact newly-created handle only; never terminate an unrelated owner.
+                TerminateProcess(process.as_raw_handle(), 1);
+                WaitForSingleObject(process.as_raw_handle(), 3000);
+                Err(Error::Invalid("COORDINATOR_IDENTITY_UNCONFIRMED"))
+            }
+        }
+    }
+}
+
+fn quote_windows_word(word: &std::ffi::OsStr) -> Result<Vec<u16>> {
+    let units = crate::wide(word)?;
+    let mut output = vec![b'"' as u16];
+    let mut slashes = 0;
+    for &unit in &units[..units.len() - 1] {
+        if unit == b'\\' as u16 {
+            slashes += 1;
+            continue;
+        }
+        output.extend(std::iter::repeat_n(
+            b'\\' as u16,
+            if unit == b'"' as u16 {
+                slashes * 2 + 1
+            } else {
+                slashes
+            },
+        ));
+        slashes = 0;
+        output.push(unit);
+    }
+    output.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
+    output.push(b'"' as u16);
+    Ok(output)
 }
 
 impl StartedProcess {

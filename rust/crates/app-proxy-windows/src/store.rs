@@ -23,6 +23,68 @@ struct Owner {
     owner_sid: String,
 }
 
+/// Read-only discovery lets clients find the owner without acquiring its write lock.
+pub struct StoreDescriptor {
+    pub store_id: Uuid,
+    pub owner_sid: String,
+}
+
+pub fn describe(root: &Path) -> Result<StoreDescriptor> {
+    identity::assert_ordinary_user()?;
+    absolute(root)?;
+    let sid = identity::current()?.user_sid;
+    let handle = security::directory(root, false)?;
+    security::verify(handle.as_raw_handle(), &sid, true)?;
+    if root.join(".initializing").try_exists()? {
+        return Err(Error::Invalid("STORE_INITIALIZATION_INCOMPLETE"));
+    }
+    let owner: Owner = decode(&read_protected(&root.join(MARKER), &sid, 4096)?)?;
+    if owner.format != FORMAT
+        || owner.schema_version != SCHEMA_VERSION
+        || owner.store_id.is_nil()
+        || owner.owner_sid != sid
+    {
+        return Err(Error::Invalid("STORE_HEADER_MISMATCH"));
+    }
+    Ok(StoreDescriptor {
+        store_id: owner.store_id,
+        owner_sid: owner.owner_sid,
+    })
+}
+
+pub struct StartupLock {
+    _file: File,
+    _directory: OwnedHandle,
+}
+
+/// Short client-side lock; held only while finding/starting the coordinator.
+pub fn try_startup_lock(root: &Path) -> Result<Option<StartupLock>> {
+    let descriptor = describe(root)?;
+    let directory = security::directory(&root.join("state"), false)?;
+    security::verify(directory.as_raw_handle(), &descriptor.owner_sid, false)?;
+    let path = root.join("state/startup.lock");
+    if path.try_exists()? {
+        security::no_reparse(&path)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    security::verify(file.as_raw_handle(), &descriptor.owner_sid, false)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(StartupLock {
+            _file: file,
+            _directory: directory,
+        })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 pub struct Store {
     root: PathBuf,
     owner: Owner,
