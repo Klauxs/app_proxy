@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod model;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -16,6 +18,7 @@ pub struct ProcessIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileIdentity {
     pub volume_serial: u32,
     pub file_index: u64,

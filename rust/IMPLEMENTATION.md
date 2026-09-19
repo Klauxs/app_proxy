@@ -6,7 +6,8 @@
 |---|---|---|
 | M0 普通进程/身份/调试创建候选 | 已实现，独立 review 通过 | `TEST-RESULTS.md`，普通/调试 child 契约测试；不等于完整 M0 通过 |
 | MSIX 包内 helper | 仅实验通过 | Claude 包内回执；生产启动、取消/迟到、应用实例仍待实现 |
-| 配置模型/存储 | 待实现 | 新 schema、归属/ACL、revision、锁、原子替换、坏文件拒绝与恢复 |
+| 配置模型 | 基础模型已实现，独立 review 通过 | 严格 JSON、引用/路径/Guard/IFEO 校验；13 项 core 测试；当前节点仅手动 HTTP/SOCKS5，订阅与其他协议后续实现 |
+| 配置存储 | 实现中，尚未独立 review | 归属/ACL、revision、锁、原子替换、坏文件拒绝；恢复流程仍待实现 |
 | coordinator/IPC | 待实现 | 单所有者、管道权限/对端验证、请求去重、重连/慢客户端/崩溃恢复 |
 | 实例/模板/启动 | 待实现 | 原版与空白实例、受管参数环境、实体操作、统一状态机和已运行判断 |
 | sing-box 管理/一键安装 | 待实现 | 自行启动、多个入口/出口共享进程、安装/取消、CONNECT/TLS、配置切换恢复 |
@@ -23,3 +24,4 @@
 每项记录具体检查、修复结果与 commit；独立 review 没有通过时不提交该功能。实验性代码的 commit 不表示相应生产功能或整批里程碑已经完成。
 
 - M0 基础代码：独立审查 `review_m0` 未发现提交阻塞问题，复跑 7 项测试通过、1 项需 Claude 的测试默认忽略；Claude 包内验证此前单独通过。提交主题 `feat(rust): add reviewed Windows process and package probes`。
+- 基础配置模型：独立审查发现并修复 Windows Chromium 参数别名绕过与嵌套未知字段遗漏；复审通过，13 项 core 测试通过。提交主题 `feat(rust): validate typed instance and proxy configuration`。仅配置校验，不表示运行时物理身份、订阅或持久化层已完成。
