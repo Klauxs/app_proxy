@@ -6,17 +6,23 @@
 
 保留当前 Codex/Claude 自动识别及代理创建串联。添加流程：选择 Codex/Claude/其他 → 确认原版或空白实例 → 名称 → 选择已配置代理/添加代理/明确直连 → 摘要 → 保存并完成附加操作。其他应用的路径、适配器、参数和 cwd 放高级输入。未识别或匹配多安装时让用户选择，不擅自选 EXE。
 
-没有代理记录时仍明确提供直连/返回；选择添加代理后先发现可复用服务，再配置订阅或手动上游。新 proxy 验证失败时保存它供修改，实例创建停在网络准备阶段并返回明确状态。不会自动改直连。
+没有代理记录时仍明确提供直连/返回；选择添加代理后配置订阅或手动上游，自动发现可用 sing-box 程序文件并用我们的配置启动。找不到可用程序时在当前终端流程提示“未找到可用的 sing-box，是否安装？”，仅提供“安装并继续（默认）/返回”。选择安装后自动下载、校验、安装并继续原流程；程序决定安装位置，不提供手动指定 EXE 或安装路径选项，不让用户手工解压或配置 PATH。不提供接入已有 sing-box 服务选项。新 proxy 验证失败时保存它供修改，实例创建停在网络准备阶段并返回明确状态。不会自动改直连。
 
-绑定代理的 Codex/Claude 预设默认选择 Guard，延续当前行为；其他支持 Chromium 代理参数的应用显式选用。创建摘要说明“误启动会关闭并代理重启”，所需 UAC 只发生在用户前台操作。取消授权不抹掉已创建实例，结果展示保护未启用和可重试动作。低层 instance create 在非交互场景若需要授权，返回 requires_action，不后台弹 UAC。
+绑定代理的 Codex/Claude 预设默认开启 Guard；受管原版包含 IFEO 启动前接管和 ETW 启动后检查，分身通过专用入口及实例检查保护。其他支持 Chromium 代理参数的应用显式选用。创建原版时说明原始入口会进入该原版，未被接管的受管实例误启动可能被关闭并代理重启；只创建分身则不处理未管理原版。所需 UAC 只发生在用户前台操作。取消授权不抹掉已创建实例，结果展示保护未完成和可重试动作。低层 instance create 在非交互场景若需要授权，返回 requires_action，不后台弹 UAC。
 
 实例列表至少展示名称、应用、原版/独立数据、网络绑定、运行状态、Guard 实际状态。菜单提供启动、详情、复制配置创建空白实例、改绑定、改名、高级设置、快捷方式、保护、移除登记。首版不做复制登录数据按钮。
+
+应用详情在 Guard 内展示适用组件的状态。IFEO 仅在受管原版启用 Guard 时注册并路由该原版，不提供独立日常开关；只创建分身时显示原版“未管理”，不注册 IFEO，也不要求补齐路由。原版 Guard 启用摘要预览机器级影响，包更新导致所需 IFEO stale 时显示保护不完整。高完整性/其他用户调用限制、激活载荷和默认实例规则见 [第九章](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。
+
+运行中代理故障只提示故障并保留应用，不自动切直连；启动前的代理验证失败仍阻止新目标创建。
 
 复制配置默认继承应用/模板、参数、环境设置和网络绑定，生成新 ID/目录；显示 Guard 默认建议，由本次前台流程完成授权/启用，不复制源实例的运行状态或隐式激活副作用。源实例的已保存 secret_ref 可复用，但不复制运行环境快照。
 
 绑定/参数编辑在当前运行中显示“下次启动生效”。original → isolated 或反向转换不能原地重解释已有数据，创建新实例并保留旧记录。删除默认保留数据，原始应用不卸载。
 
 **2. CLI 草案**
+
+以下是可用命令形态的参考，不是首批实现清单。优先完成中文菜单、快捷方式启动和必要的故障恢复入口；命令按实际自动化或维护需要加入，不把每个内部组件都变成用户选项。菜单与 CLI 共用业务函数，不为参数预留未实现能力。
 
 ```text
 app-proxy                         中文菜单
@@ -32,13 +38,15 @@ app-proxy instance bind <id> <proxy-id|direct>
 app-proxy launch <id> [--request-id <uuid>] [--json]
 app-proxy launch inspect|cancel <attempt-id>
 app-proxy instance stop <id>
-app-proxy proxy discover|list
+app-proxy proxy list
 app-proxy proxy add --file <配置.json>
 app-proxy proxy refresh|inspect|remove <id>
-app-proxy core verify|start|stop|restart|check
+app-proxy core discover|install|verify|start|stop|restart|check
 app-proxy doctor [--instance <id>|--proxy <id>] [--json]
 app-proxy guard enable|disable|status <id>
 app-proxy guard events enable|disable|status
+app-proxy ifeo status [<application-id>] --json
+app-proxy ifeo disable <application-id>
 app-proxy integration repair
 app-proxy uninstall [--keep-data]
 ```
@@ -46,6 +54,8 @@ app-proxy uninstall [--keep-data]
 统一支持 `--home <rust-store>`，默认 `%LOCALAPPDATA%\AppProxyRust`。首次启动只接受空目录或有效 Rust 归属标记，不读取旧工具配置。机密放受保护输入文件或交互输入，不放命令行。详细命令 flags 在实现时由 clap 定义并同步 help，但不能改变本设计中的业务语义。
 
 所有命令使用新模型，不提供旧 app 子命令兼容 alias。uninstall 默认保留数据，`--keep-data` 只是明确表达默认行为；首版没有 purge。只清理 Rust 归属可确认的入口、任务和托管组件。
+
+IFEO 解除注册成功并回读确认后才删除对应 host；解除失败则保留恢复材料。`ifeo disable` 与集成修复必须能在 coordinator/store 不可用时通过受保护安装记录完成前台恢复。
 
 **3. IPC 编码和请求**
 

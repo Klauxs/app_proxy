@@ -9,12 +9,17 @@
 | StoreHeader | format、schema_version=1、store_id、revision、owner_sid | UUID 标识不从当前目录名推导；移动需显式位置变更流程 |
 | Application | id、name、locator、template_ref、revision | 表达一个安装来源；实际 EXE 可随 MSIX 更新变化 |
 | Instance | id、application_id、name、data、args、env、cwd、network、guard、revision | ID 不随改名变化；数据模式不能在运行中切换 |
-| ProxyProfile | id、name、kind、endpoint、nodes/source 或外部限制、revision | managed 与 existing_singbox 的配置互斥 |
+| ProxyProfile | id、name、kind=managed、endpoint、selected_node_id、source/nodes、revision | 所有入口由自有 ManagedCore 提供；不登记其他工具运行的服务 |
+| IfeoRegistration | id、application_id、default_instance_id、desired、installed_target、归属和 generation | default_instance_id 只指向该应用已登记且开启 Guard 的原版；只有分身时没有注册；系统实际状态单独核验 |
 | LaunchAttempt | id、instance_id、阶段、配置摘要、deadline、身份结果 | 同一物理实例至多一个未决 attempt |
 | ProcessIdentity | pid、creation_time、user_sid、session_id、image_identity、证据 | PID 单独不能授权任何终止操作 |
 | RunningSession | launch_id、instance_key、identity、实际绑定快照、观测状态 | 配置改变不自动改写已运行会话的事实 |
 
 所有新实体使用 UUID，不保留旧 App.id 或旧路径别名。相同包身份共享 Application；普通 EXE 在规范化 locator 与模板相同后复用安装记录。不同模板指向同一实际程序时仍通过物理实例 key 检查重复管理，不靠 Application.id 隔离它们。
+
+`integrations.ifeo` 为 IFEO 注册数组，无注册时为空。主进程 LaunchAttempt 另记 `LaunchOrigin = interactive | shortcut | guard | ifeo`；辅助进程 continuation 使用独立恢复记录。IFEO 完整字段、机器级归属及默认实例规则见 [第九章](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。受保护的安装恢复清单独立于可写 manifest，不能仅凭 manifest 授权修改系统注册表。
+
+管理范围由显式登记的 Instance 决定：Application 存在不代表原版已受管理。只创建分身不自动创建原版记录、选择原版代理或要求补齐原版配置。Guard 配置保留在实例上；原版 Guard 驱动对应 IFEO 注册，分身 Guard 只管理可确认属于该分身的进程。
 
 **2. Tagged union 定义**
 

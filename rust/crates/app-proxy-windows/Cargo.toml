@@ -1,0 +1,23 @@
+[package]
+name = "app-proxy-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+app-proxy-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx",
+    "Win32_System_Threading", "Win32_System_Diagnostics_Debug",
+    "Win32_System_RemoteDesktop", "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
+] }
+
+[lints]
+workspace = true

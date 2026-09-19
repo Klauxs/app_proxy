@@ -1,8 +1,39 @@
-**App Proxy Rust 版详细设计**
+**App Proxy Rust 版设计**
 
-状态：设计草案，可进入实现评审。日期：2026-09-18。本目录目前只有设计和示例，没有 Rust 实现、可执行程序或编译结果。
+状态：已进入 M0 平台验证实现。2026-09-19 已建立三个 crate 和两个可执行入口，通过普通/调试进程创建测试及 Claude 包内 Rust helper 实测。尚未实现日常菜单、配置仓库、代理管理或 Guard，不能作为正式启动器使用。详见 [本轮验证记录](D:/app_proxy/rust/TEST-RESULTS.md)。
+
+**构建与验证**
+
+需要 Windows x64、Rust 1.98.1 和 Visual Studio C++ Build Tools。`Cargo.lock` 已固定依赖。常规环境在本目录执行：
+
+```powershell
+cargo build --workspace --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo fmt --all -- --check
+.\target\debug\app-proxy.exe discover claude
+.\target\debug\app-proxy.exe probe process --debug-detach
+.\target\debug\app-proxy.exe probe package claude
+```
+
+本机 Rust 安装在项目 `.tools` 内，未修改系统 PATH；可使用 `./scripts/cargo.ps1 build --workspace --locked`。需要传递 Cargo 的 `--` 分隔符时用数组，例如 `./scripts/cargo.ps1 -CargoArgs @('clippy','--workspace','--all-targets','--locked','--','-D','warnings')`。
+
+`probe package claude` 仅在已安装 Claude 的包身份下启动本产品测试 helper，验证回执和独立临时目录读写，不启动 Claude 界面或修改其登录数据。`probe process --debug-detach` 验证调试创建和脱离，**不代表真实 IFEO 注册或 Electron 子进程兼容性已经通过**。
 
 目标是全新设计一套 Rust 实现的实例启动器：普通用户选择应用、原版或空白实例以及代理即可启动；平台层处理进程身份、MSIX、快捷方式和 Guard。代理协议仍由 sing-box 实现。按用户要求，不承担旧版配置、命令、数据目录、任务或快捷方式兼容，不提供旧版迁移和回退。现有实现只作为功能经验与平台行为的参考。
+
+**从简原则**
+
+按用户指定的 [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills) 原则推进：先明确问题，采用满足需求的最小实现，只修改当前任务需要的内容，并用可验证结果判断完成。每个新增选项、模块或抽象都必须能说明它解决的当前需求；没有实际需求就不加。
+
+- 普通流程只让用户选择应用、原版/空白实例和代理。能自动确定的程序位置、目录、端口等不增加询问；实际歧义再提示。
+- 缺少 sing-box 时就在当前流程提供“安装并继续 / 返回”，程序管理安装位置；失败提供“重试 / 返回”。
+- Guard 是一项保护功能，Codex/Claude 受管原版默认包含 IFEO；只创建分身时不注册 IFEO、不处理未管理原版。组件状态供诊断，不扩展成一组日常开关，不增加默认路由编辑器。
+- 共用一套启动流程和一个状态所有者；内部业务优先使用普通函数与结构体，仅为真实的系统边界或故障测试需要引入接口。不建立通用插件、工作流或平台框架。
+- 按当前功能需要实现命令、字段和恢复步骤。详细章节中的接口、CLI 清单及目录划分是设计参考，不要求提前逐项搭空壳；新增范围需另行讨论。
+- 保留与真实副作用有关的检查：不重复启动、不误杀进程、不覆盖他人配置、IFEO 不递归、配置失败可恢复。测试围绕这些行为与实际启动闭环，不为简单实现机械配套测试。
+
+目标日常链路：选择应用与实例 → 选择/配置代理 → 自动查找 sing-box，缺少则询问安装 → 准备代理 → 启动应用。Guard 在创建流程中完成必要授权；运行中代理故障只提示、保留应用。用户已确认开始实现，目前仅交付上述 M0 验证入口；后续按实际验收结果逐步补齐。
 
 **阅读入口**
 
@@ -16,6 +47,7 @@
 | [06-product-and-protocol.md](D:/app_proxy/rust/docs/06-product-and-protocol.md) | 用户流程、CLI、IPC、事件、错误及诊断 |
 | [07-implementation-and-validation.md](D:/app_proxy/rust/docs/07-implementation-and-validation.md) | 从零实现的批次、接口验收、测试和发布门槛 |
 | [08-evidence-and-decisions.md](D:/app_proxy/rust/docs/08-evidence-and-decisions.md) | 当前源码基线、上游来源、决定及待验证事项 |
+| [09-ifeo-launch-interception.md](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md) | IFEO 启动前接管、默认实例、防递归、子进程、系统注册及验收 |
 | [manifest.json](D:/app_proxy/rust/examples/manifest.json) | 无凭据的配置示例，含原版和独立实例 |
 | [launch-events.ndjson](D:/app_proxy/rust/examples/launch-events.ndjson) | 启动事件协议示例，不是实测日志 |
 
@@ -23,6 +55,10 @@
 
 - 首发目标 Windows x64，先保持中文菜单与 CLI；GUI 和 macOS 实现后置，平台边界从第一版建立。
 - 三个 crate、两个普通发行入口，共用一个启动核心；用户态 coordinator 统一管理配置写入、启动任务和 Guard。
+- Guard 包含 IFEO 启动前接管和 ETW 启动后检查，Codex/Claude 代理预设默认开启。IFEO 仅在原版已登记且开启 Guard 时注册并路由原版；分身通过专用入口及实例检查保护。实际所需组件启用仍需授权和兼容验收，部分失败明确显示保护不完整。
+- 发行包不携带 sing-box；优先复用本机程序文件，缺少时一键安装。所有代理进程均由本工具用独立配置启动，不接入其他工具已运行的服务。
+- 同一 store 的多个代理共用一个自有 sing-box 进程，以不同本地入口路由到对应出口；多个应用实例可以绑定同一代理。
+- 运行期间代理故障只提示并保留应用，不自动改直连；新的代理绑定启动仍要求验证通过。
 - Rust 直接实现常规 Windows 集成。MSIX 首版保留受限 PowerShell 桥接，包内执行和回执改用 Rust helper。
 - 应用安装信息、适配模板、运行实例分别建模；改名不改 ID 或数据目录；复制配置默认创建空白数据。
 - Guard 默认沿用“检测到未按要求代理的进程就关闭”的保护意图；代理不可用时明确报告停止且阻止重启。首版不提供静默保留直连的替代策略。
@@ -33,4 +69,4 @@
 
 本次以 `D:\app_proxy` 的 `main`、提交 `a38a29865578035ba8ad0d85d0e319bbb63880e2` 及读取时工作区为基线。当前已经有 Codex/Claude 自动识别、串联代理创建和桌面预设默认 Guard；这些属于保留能力。更早的 [开源调研](D:/app_proxy/Launcher-开源调研与流程建议.md) 对创建菜单的描述早于该提交，以本文档为准。
 
-本文固定产品与接口边界，明确需要验证的平台风险。crate 版本、MSRV、Windows 最低 build、性能阈值在首轮技术验证后锁定；此处没有未经测试的兼容性和性能保证。
+本文记录已确定的产品规则；详细接口按实际实现需要收敛，不为未来假设预留功能。crate 版本、MSRV、Windows 最低 build、性能阈值在首轮技术验证后锁定；此处没有未经测试的兼容性和性能保证。

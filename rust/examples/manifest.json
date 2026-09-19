@@ -52,11 +52,23 @@
   "profiles": [
     {
       "id": "e3144c4f-8173-4392-8f77-6a26738995bb",
-      "name": "已有本地 sing-box",
+      "name": "自管代理（需配置真实上游）",
       "revision": 1,
-      "kind": "existing_singbox",
+      "kind": "managed",
       "endpoint": { "host": "127.0.0.1", "port": 18099 },
-      "verification_policy": "singbox_http_loopback"
+      "selected_node_id": "e99c02dc-f386-46f0-8db2-836b566fa3d5",
+      "source": {
+        "kind": "manual",
+        "nodes": [
+          {
+            "id": "e99c02dc-f386-46f0-8db2-836b566fa3d5",
+            "name": "示例 HTTP 上游",
+            "protocol": "http",
+            "host": "proxy.example",
+            "port": 8080
+          }
+        ]
+      }
     }
   ],
   "settings": {
@@ -65,5 +77,5 @@
     "health_policy": { "expected_statuses": [200, 204], "follow_redirects": false },
     "download_network": { "kind": "direct" }
   },
-  "integrations": { "shortcuts": [], "guard_login_task": null }
+  "integrations": { "shortcuts": [], "guard_login_task": null, "ifeo": [] }
 }

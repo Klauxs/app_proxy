@@ -2,9 +2,11 @@
 
 Windows 平台层由 Rust 实现，现有代码仅提供平台经验；首版 MSIX 采用下文限定的 PowerShell 桥接。平台返回明确成功、明确失败或 Unknown 三态事实，不把权限不足、参数不可读或包消失压缩成不存在。
 
+IFEO 注册、启动入口和防递归创建作为平台层独立模块，完整契约见 [第九章](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。原始入口、CLI/Guard 和包内 helper 最终创建目标时均受该契约约束；普通 CreateProcess 成功不能证明创建的是目标而非 IFEO host。
+
 **1. 进程创建与身份**
 
-普通 EXE 使用 Windows 参数转义规则构造 argv，cwd/env 独立传递；不经过 cmd.exe，不接受 .cmd/.bat 作为普通应用。实现选择 std::process::Command + Windows 扩展，或在需要精确句柄/创建行为时封装 CreateProcessW，但只保留一个生产实现路径。M0 验证后确定，不并行维护两个普通 EXE 后端。[Rust Windows 进程接口](https://doc.rust-lang.org/std/os/windows/process/trait.CommandExt.html)。
+普通 EXE 使用 Windows 参数转义规则构造 argv，cwd/env 独立传递；不经过 cmd.exe，不接受 .cmd/.bat 作为普通应用。平台统一封装一个生产 spawn 接口；无 IFEO 时的普通创建可选 std::process::Command + Windows 扩展，需要精确句柄或 IFEO 调试创建时封装 CreateProcessW。M0 同时验证普通与防递归模式后确定组合，不维护两套业务启动流程。[Rust Windows 进程接口](https://doc.rust-lang.org/std/os/windows/process/trait.CommandExt.html)。
 
 子进程句柄不继承不相关的文件/管道；关闭 launcher 不自动 kill 应用。控制台与 GUI subsystem、CREATE_NO_WINDOW 等标志区分 helper 和用户目标，不能用隐藏窗口选项误隐藏目标界面。spawn 成功只表示创建，随后必须查询身份。
 
@@ -72,6 +74,6 @@ coordinator 登录任务在 Guard desired enabled 且授权已完成时安装，
 
 **8. 分发与升级**
 
-首版继续支持固定目录便携安装，不宣称移动目录后已有入口自动修复。release 包包括 CLI、host、版本化 MSIX 桥接和可选 sing-box 目录及对应来源/许可证。新版本替换整个发行目录中的应用文件需先停止 coordinator/listener 或采用 side-by-side 安装；不在运行中覆盖同名 EXE。
+首版继续支持固定目录便携安装，不宣称移动目录后已有入口自动修复。release 包包括 CLI、host 和版本化 MSIX 桥接，不携带 sing-box。运行时一键安装的内核独立记录来源、版本和许可证。新版本替换整个发行目录中的应用文件需先停止 coordinator/listener 或采用 side-by-side 安装；不在运行中覆盖同名 EXE。
 
 提供 `integration repair`：核验新工具位置、修复本工具快捷方式及普通任务；提权 listener 需要更新时提示前台授权。数据根和实例 ID 保持。只有 coordinator 管理任务已停止且无未决 attempt 才允许版本切换；用户应用可否继续运行取决于是否能继承观测，不在首版升级流程中假定热接管。

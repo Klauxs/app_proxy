@@ -1,6 +1,10 @@
 **启动、并发和 Guard**
 
-CLI、快捷方式和 Guard 均向 coordinator 提交意图；LaunchEngine 是唯一生产启动流程。外部启动事件只触发检查，不直接授权终止进程。
+CLI、快捷方式、IFEO 主进程接管和 Guard 均向 coordinator 提交意图；LaunchEngine 是唯一生产实例启动流程。外部启动事件只触发检查，不直接授权终止进程。
+
+Guard 包含 IFEO 启动前接管和 ETW 进程创建后检查，Codex/Claude 代理预设默认启用这套保护；组件实际状态分别展示，不作为两个无关产品开关。所有来源的最终 spawn 都必须识别已安装 IFEO 规则并使用经验证的防递归机制。IFEO 辅助进程 continuation 不创建新的实例 attempt；Guard 排除已核验的内部创建状态，不能因暂未确认参数而二次纠正。详见 [第九章](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。
+
+Guard 仅保护已登记并启用的实例。IFEO 注册由已登记原版的 Guard 驱动；只登记分身时不注册 IFEO，ETW 扫描发现未管理原版也不采取动作。未管理不是 unknown 或失败，不要求用户补配原版。分身按已登记的独立数据目录及完整身份识别，不能按同名 EXE 扩大纠正范围。
 
 **1. 一次启动的状态机**
 
@@ -92,6 +96,8 @@ serve 启动后先获得 store 独占锁，完成 schema/归属校验和 journal
 
 首版只定义 `stop_unproxied`：发现同用户、同 session、同安装与同实例的主进程，没有要求的代理参数或存在冲突参数时，关闭该精确进程；代理和环境准备成功后重启。代理不可用时保持关闭并报告 `GUARD_STOPPED_PROXY_UNAVAILABLE`，不回退直连。
 
+已按要求启动的应用随后遇到代理故障，仅报告网络异常并保留应用，不触发 stop_unproxied，不自动改直连。关闭未按要求代理的误启动进程与运行中网络故障是两种不同事件；新的启动仍需代理验证通过。
+
 流程：ETW 提示或周期扫描 → 读取配置快照 → 实例归属和参数判断 → 检查限流及预留 → 重新验证身份 → 正常关闭 → 必要时精确终止 → 确认辅助进程消退 → 提交共用 LaunchEngine → 记录结果。可在关闭前做轻量配置检查，但不等待完整网络准备而扩大已知直连窗口。若检查已知代理不可用，仍按 stop_unproxied 关闭，并终止重启阶段。
 
 这是对现有保护意图的明确化，不解决网络层第一包泄漏；事件在创建之后发生。未来如要“能重启才替换”，必须添加单独 policy 并说明其保留直连的行为，不能暗改默认策略。
@@ -108,7 +114,7 @@ serve 启动后先获得 store 独占锁，完成 schema/归属校验和 journal
 
 **6. 监听和授权状态**
 
-Guard desired 配置与实际状态分离：disabled、needs_authorization、starting、active_etw、active_polling、blocked。绑定预设应用时默认提出 enabled；只有前台授权成功才从 needs_authorization 进入纠正状态。取消 UAC 保留实例和明确的未完成保护状态，后台不再次弹窗。
+Guard desired 配置与实际状态分离：disabled、needs_authorization、starting、active、degraded、blocked；组件分别记录 IFEO 状态及监听状态 active_etw/active_polling。Codex/Claude 绑定代理时默认 enabled，原版的前台授权流程包含 IFEO 注册与事件组件；只有分身时仅要求适用的事件检查组件。所需组件安装/检查通过才报告 active；原版需要 IFEO 而未就绪时报告 degraded。只管理分身时 IFEO 为 not_applicable，不因此降低保护状态。取消 UAC 保留实例和明确的未完成保护状态，后台不再次弹窗。
 
 ETW listener 验证成功后使用事件触发，并每 30 秒补漏扫描。已授权监听中断/协议不匹配时可退回约 2 秒扫描，30 秒尝试恢复；未知提权组件版本只报告需更新，不自动覆盖。所有时序是初始设置，需通过实机测量后确认。
 
@@ -122,7 +128,8 @@ ETW listener 验证成功后使用事件触发，并每 30 秒补漏扫描。已
 | 分身目录 | 对应实例的数据 | 启动失败、取消、移除登记都默认保留 |
 | 本次 helper/request | attempt | 撤销执行能力、核对回执后清理 |
 | 托管 sing-box | store core manager | 不随单个实例退出自动停止；显式 stop/reconfigure 才处理 |
-| 外部 sing-box | 原有启动器 | 只查询验证；从不 kill、restart 或重写配置 |
+| 其他工具运行的 sing-box | 原有启动器 | 不作为本产品代理入口；不接入、kill、restart 或重写配置 |
 | ETW session/listener | 已授权安装和当前用户/session | 仅维护自有命名空间；停止前校验归属 |
+| IFEO 注册及受保护入口 | 受管原版的 Guard，机器级安装清单记录所有者 | UI/协调进程退出不撤销；关闭或移除原版保护时解除，分身不要求保留它；保留第三方规则 |
 
 用 typed lease 表达所有权，单个 launch 的清理只释放其 lease。共享内核暂时无人使用也不在析构中自动关闭，以保持当前行为并避免干扰刚启动或外部复用本地入口的应用。

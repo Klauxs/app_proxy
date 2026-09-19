@@ -1,0 +1,26 @@
+[package]
+name = "app-proxy-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+app-proxy-core.workspace = true
+app-proxy-windows.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tempfile.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "app-proxy"
+path = "src/bin/app-proxy.rs"
+
+[[bin]]
+name = "app-proxy-host"
+path = "src/bin/app-proxy-host.rs"
+
+[lints]
+workspace = true
