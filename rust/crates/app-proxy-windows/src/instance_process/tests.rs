@@ -312,10 +312,117 @@ async fn exact_native_child_is_classified_without_adoption_or_termination() {
 #[test]
 #[ignore = "native instance attribution fixture run by parent"]
 fn attribution_child() {
+    if std::env::var_os("APP_PROXY_ATTRIBUTION_TREE").is_some() {
+        let mut environment = EnvPatch::default();
+        environment.unset.push("APP_PROXY_ATTRIBUTION_TREE".into());
+        let child = Child(
+            process::spawn(SpawnSpec {
+                exe: std::env::current_exe().unwrap(),
+                args: words(&[
+                    "--ignored",
+                    "--exact",
+                    "instance_process::tests::attribution_child",
+                    "--skip",
+                    "--type=renderer",
+                ])[1..]
+                    .to_vec(),
+                cwd: std::env::current_dir().unwrap(),
+                environment,
+                mode: CreationMode::Normal,
+            })
+            .unwrap(),
+        );
+        std::fs::write(
+            std::env::var_os("APP_PROXY_ATTRIBUTION_TREE").unwrap(),
+            serde_json::to_vec(&child.0.identity).unwrap(),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_secs(30));
+        return;
+    }
     std::fs::write(
         std::env::var_os("APP_PROXY_ATTRIBUTION_FIXTURE").unwrap(),
         b"ready",
     )
     .unwrap();
     std::thread::sleep(Duration::from_secs(30));
+}
+
+#[tokio::test]
+async fn auxiliary_inherits_only_live_exact_ancestry_and_keeps_its_role() {
+    let _query = process_query::QUERY_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let (_store, data) = prepared(&temp.path().join("store"));
+    let app = application();
+    let target = InstanceTarget::new(&app, Some(&data), Template::Codex).unwrap();
+    for isolated in [false, true] {
+        let receipt = temp.path().join(format!("tree-{isolated}"));
+        let mut environment = EnvPatch::default();
+        environment.set.insert(
+            "APP_PROXY_ATTRIBUTION_TREE".into(),
+            receipt.to_str().unwrap().into(),
+        );
+        environment.set.insert(
+            "APP_PROXY_ATTRIBUTION_FIXTURE".into(),
+            temp.path().join("ready").to_str().unwrap().into(),
+        );
+        let mut args = words(&[
+            "--ignored",
+            "--exact",
+            "instance_process::tests::attribution_child",
+        ])[1..]
+            .to_vec();
+        if isolated {
+            args.extend([
+                "--skip".into(),
+                format!("--user-data-dir={}", data.paths.user_data.display()).into(),
+            ]);
+        }
+        let mut parent = Child(
+            process::spawn(SpawnSpec {
+                exe: app.executable().to_owned(),
+                args,
+                cwd: temp.path().into(),
+                environment,
+                mode: CreationMode::Normal,
+            })
+            .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !receipt.exists() {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let child: ProcessIdentity =
+            serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+        struct Cleanup(ProcessIdentity);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = process::terminate_exact(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(child.clone());
+        let observed = target.inspect(&child).await.unwrap();
+        assert_eq!(observed.role, ProcessRole::Auxiliary);
+        assert_eq!(
+            observed.relation,
+            if isolated {
+                InstanceRelation::Target
+            } else {
+                InstanceRelation::Other
+            }
+        );
+        assert!(process::is_running_exact(&parent.0.identity).unwrap());
+        assert!(valid_parent(&child, &parent.0.identity));
+        let mut reused = parent.0.identity.clone();
+        reused.creation_time = child.creation_time + 1;
+        assert!(!valid_parent(&child, &reused));
+        let mut foreign = parent.0.identity.clone();
+        foreign.session_id += 1;
+        assert!(!valid_parent(&child, &foreign));
+        parent.0.terminate().unwrap();
+        assert!(process::is_running_exact(&child).unwrap());
+        // No live ancestor means the orphan cannot be excluded as another instance.
+        assert!(target.inspect(&child).await.is_err());
+    }
 }

@@ -261,3 +261,14 @@ CLI/RPC 共用的 LaunchEngine 现已为 MSIX 发布一次性请求，经现有 
 新增默认测试覆盖命名空间归属与复用、旧包同名映像候选、Pending/Created/Consuming/missing 的恢复以及同 attempt UUID 跨 store 回执拒绝。全量 workspace 205 项通过、20 项顶层 ignored；审查方独立复跑相关 15 项通过，clippy -D warnings、fmt/diff 通过。真实 Claude 生产 helper 的过期请求集成另行通过（24.13 秒），确认共享 NotCreated 回执及资源释放；测试在唯一临时 store 命名空间内执行并清理。没有通过该测试启动 Claude 应用，也未写 IFEO。
 
 上述真实包测试验证 helper 激活与回执共享，不证明实际 Codex/Claude 应用启动、分身隔离或网络代理。旧版本目前按相同映像名称保守纳入候选，未核对的候选阻止启动；精确跨版本包识别及真实应用端到端验收仍待完成。
+**实际 MSIX 分身与辅助祖先归属（2026-09-20）**
+
+环境：Windows 11 专业工作站版 10.0.26200，Rust 1.98.1；Claude 2.2553.1.0 / Claude_pzs8sxrjxfjjc / AppId Claude，隔离存储；Codex 26.915.4065.0 / OpenAI.Codex_2p2nqsd0c76g0 / AppId App，非隔离存储。全部使用单独临时 store、直连、新建空白分身，未登记原版、未写 IFEO、未复制登录数据。
+
+Claude 两分身实际主 PID 20448/45500，分别出现窗口，LocalState 自有命名空间下两个 user-data 均由应用写入 Preferences/Local State/Network 等文件；重复启动 A 返回原 attempt/PID。关闭窗口后 Claude 留在后台，随后只清理已核对创建时间、映像和父链的本次测试进程句柄。
+
+Codex 首次启动被 INSTANCE_PROCESS_UNKNOWN 拒绝。只读核对发现原版主进程 32152 没有分身参数，其 renderer/gpu/utility 子进程未带 user-data-dir。修复只在已识别 Auxiliary 且无自身目录时查询存活祖先；同映像/SID/session、严格更早创建时间、最大 8 层、共享 5 秒 deadline/worker slot，每层保留原生句柄并于返回前复核。自己的目录无效、不明角色、父退出/身份不符不产生排除结论，也不增加终止或 IFEO 授权。
+
+修复后 Codex 原版保持 PID 32152/原创建时间，分身主 PID 45480/42396 同时存在各自窗口。两个独立 user-data 均写入浏览器文件，两个 app-home 均写入各自 config.toml、installation_id 和 sqlite 状态；未读取文件秘密内容。重复启动 A 返回原 attempt/PID。验收后对本次分身尝试窗口关闭，再通过已核对且保留的测试进程句柄清理残留；原版仍存活。四个 Claude/Codex attempt 最终均 session_exited=true、resource_pending=false。
+
+新增真实父子 fixture 回归覆盖原版祖先→Other、目标祖先→Target、保持 Auxiliary 角色、父退出拒绝及复用/跨 session 身份拒绝。全量 206 项通过、20 项顶层 ignored；独立审查通过并复跑归属 5 项、查询 6 项，clippy -D warnings、fmt/diff 通过。实机检查没有登录、发送消息或验证真实代理流量，也未完成包升级、Guard/IFEO 或发布验收；不同目录写入与并存不能单独证明全部账户隔离行为。

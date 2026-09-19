@@ -5,7 +5,7 @@
 | 功能 | 当前状态 | 完成证据 / 下一项验证 |
 |---|---|---|
 | M0 普通进程/身份/调试创建候选 | 已实现，独立 review 通过 | `TEST-RESULTS.md`，普通/调试 child 契约测试；不等于完整 M0 通过 |
-| MSIX 包内 helper | 生产执行链及恢复已接入，独立 review 通过；真实应用验收待续 | bridge/host/LaunchEngine 串联、LocalState 请求共享、撤销/恢复和跨 store 回执拒绝通过；真实 Claude 过期 helper 通过，实际应用分身启动及隔离待验收 |
+| MSIX 包内 helper | 生产执行链及恢复已接入，独立 review 通过；完整验收待续 | Claude/Codex 各两个直连分身同时运行、目录写入隔离及重复请求复用通过；Codex 原版共存通过；登录、实际代理及更新验收待续 |
 | 配置模型 | 基础模型已实现，独立 review 通过 | 严格 JSON、引用/路径/Guard/IFEO 校验；13 项 core 测试；当前节点仅手动 HTTP/SOCKS5，订阅与其他协议后续实现 |
 | 配置存储 | 基础存储已实现，独立 review 通过 | 归属/ACL、revision、锁、原子替换/上一份备份、不可变秘密与坏文件拒绝；10 项 store 测试；恢复界面与运行 journal 待实现 |
 | IPC 传输 | 已实现，独立 review 通过 | 双向身份/普通权限/会话/映像验证、管道 ACL、1 MiB 帧与超时/取消；4 项真实管道 + 2 项帧测试 |
@@ -79,3 +79,4 @@
 - MSIX 一次性包请求与撤销平台：独立审查与三项边界修复复审通过，提交主题 `feat(rust): persist one-use package launch capabilities`。消费现有 dispatch/global permit，完整 staging 原子发布、同一 gate 消费/撤销、nonce/原 journal/目录身份绑定；创建后包身份或回执失败保持未知。修复 UTC 回拨延寿、部分发布无法核对及遗漏 child 包身份，发行 tick 与原发行者精确存活共同限制授权。新增 8 项默认行为测试含实际文件占用与普通子进程，全量 201 项通过、19 项顶层 ignored；审查方独立复跑 8 项通过，clippy/fmt/diff 通过。新测试的包上下文为私有注入，真实包 helper/应用及 bridge/host/LaunchEngine 接入仍待完成，不能以此代替 MSIX 生产启动验收。
 
 - MSIX 生产启动接入及恢复：独立审查与增量复审通过，提交主题 `feat(rust): integrate package launches and durable recovery`。bridge 激活 package-child，LaunchEngine 消费一次性能力并等待持久回执；取消/截止由同一 gate 撤销，未知保留应用。隔离存储包将请求发布至自有 LocalState/store UUID 命名空间，helper 不访问被包虚拟化的原 store。修复旧包映像候选遗漏；同 basename 的未核对旧版本保守阻止重复创建。新增 namespace、旧包候选、四种恢复状态和跨 store 同 attempt 回执拒绝 4 项默认测试，全量 205 项通过、20 项顶层 ignored；真实 Claude 过期 helper 集成另行通过（24.13 秒），不启动 Claude 应用。审查方独立复跑相关 15 项通过；clippy/fmt/diff 通过。真实应用分身启动、数据隔离、代理及 Guard/IFEO 验收仍待续。
+- 辅助进程存活祖先归属：真实 Codex 原版辅助进程无数据目录参数导致分身误拒绝，现通过同映像/SID/session/更早创建时间的存活祖先补充只读归属，最多 8 层共享查询预算，每层句柄返回时复核；无终止授权。独立 review 通过，审查方复跑 5 项归属及 6 项查询测试通过。新增真实父子进程回归，全量 206 项通过、20 项顶层 ignored，clippy/fmt/diff 通过。实际 Claude/Codex 各两个直连分身同开、独立目录写入、重复启动复用通过；Codex 原版一直存活。测试进程通过核对身份后的自有句柄清理，四个 attempt 均核对退出。提交主题 `fix(rust): resolve auxiliary ancestry before instance launch`。这些实机结果不等于登录、代理、Guard/IFEO 或完整发行验收。

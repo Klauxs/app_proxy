@@ -100,8 +100,8 @@ impl<'a> InstanceTarget<'a> {
             });
         }
         let data = self.data.map(|data| data.paths.user_data.clone());
-        process_query::inspect_with(expected, move |observed| {
-            let (role, relation) = classify(observed.arguments.as_deref(), data.as_deref())?;
+        process_query::inspect_with(expected, move |observed, deadline| {
+            let (role, relation) = classify_family(&observed, data.as_deref(), deadline, 0)?;
             Ok(InstanceObservation {
                 identity: observed.identity,
                 role,
@@ -118,6 +118,44 @@ impl<'a> InstanceTarget<'a> {
             self.data.map(|data| data.paths.user_data.as_path()),
         )
     }
+}
+
+/// Only a known auxiliary without its own directory may inherit a relation.
+/// Every ancestor remains pinned and is rechecked after the recursive query;
+/// an exited/reused parent, different image or missing arguments stays unknown.
+fn classify_family(
+    observed: &process_query::ProcessObservation,
+    data: Option<&Path>,
+    deadline: std::time::Instant,
+    depth: usize,
+) -> Result<(ProcessRole, InstanceRelation)> {
+    let result = classify(observed.arguments.as_deref(), data)?;
+    if result != (ProcessRole::Auxiliary, InstanceRelation::Unknown)
+        || depth >= 8
+        || !observed
+            .arguments
+            .as_deref()
+            .and_then(chromium_switches)
+            .is_some_and(|switches| switches.user_data.is_none())
+    {
+        return Ok(result);
+    }
+    let parent = identity::inspect(observed.parent_pid)?;
+    if !valid_parent(&observed.identity, &parent) {
+        return Ok(result);
+    }
+    process_query::inspect_on_thread(parent, deadline, |parent| {
+        let (_, relation) = classify_family(&parent, data, deadline, depth + 1)?;
+        Ok((ProcessRole::Auxiliary, relation))
+    })
+}
+
+fn valid_parent(child: &ProcessIdentity, parent: &ProcessIdentity) -> bool {
+    child.pid != parent.pid
+        && parent.creation_time < child.creation_time
+        && parent.user_sid == child.user_sid
+        && parent.session_id == child.session_id
+        && parent.image_file == child.image_file
 }
 
 fn classify(

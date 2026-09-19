@@ -99,7 +99,7 @@ pub fn snapshot() -> Result<Vec<ProcessHint>> {
 /// A timeout never proves absence. At most one native query can remain outstanding
 /// in this process even when COM outlives the caller's deadline.
 pub async fn inspect(expected: &ProcessIdentity) -> Result<ProcessObservation> {
-    inspect_with(expected, Ok).await
+    inspect_with(expected, |observed, _| Ok(observed)).await
 }
 
 /// Read-only candidate discovery for the current physical installation. Snapshot
@@ -163,7 +163,7 @@ async fn candidates_for(
 /// retained process handle and outstanding-work bound as the WMI query itself.
 pub(crate) async fn inspect_with<T: Send + 'static>(
     expected: &ProcessIdentity,
-    finish: impl FnOnce(ProcessObservation) -> Result<T> + Send + 'static,
+    finish: impl FnOnce(ProcessObservation, Instant) -> Result<T> + Send + 'static,
 ) -> Result<T> {
     identity::assert_ordinary_user()?;
     let caller = identity::current()?;
@@ -176,7 +176,7 @@ pub(crate) async fn inspect_with<T: Send + 'static>(
     }
     let expected = expected.clone();
     query_with(&QUERY_BUSY, QUERY_BUDGET, move |deadline| {
-        inspect_on_thread(expected, deadline, finish)
+        inspect_on_thread(expected, deadline, |observed| finish(observed, deadline))
     })
     .await
 }
@@ -214,7 +214,7 @@ async fn query_with<T: Send + 'static>(
         .map_err(|_| Error::Invalid("PROCESS_QUERY_INTERRUPTED"))?
 }
 
-fn inspect_on_thread<T>(
+pub(crate) fn inspect_on_thread<T>(
     expected: ProcessIdentity,
     deadline: Instant,
     finish: impl FnOnce(ProcessObservation) -> Result<T>,

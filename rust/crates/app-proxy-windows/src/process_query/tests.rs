@@ -199,7 +199,7 @@ async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
         wait_free(&QUERY_BUSY).await;
     }
     let child_identity = child.0.identity.clone();
-    let during_finish = inspect_with(&child.0.identity, move |_| {
+    let during_finish = inspect_with(&child.0.identity, move |_, _| {
         process::terminate_exact(&child_identity)?;
         Ok(())
     })
