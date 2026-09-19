@@ -19,7 +19,7 @@ cargo fmt --all -- --check
 
 本机 Rust 安装在项目 `.tools` 内，未修改系统 PATH；可使用 `./scripts/cargo.ps1 build --workspace --locked`。传递 Cargo 的 `-p` 或 `--` 等参数时用数组，避免 PowerShell 参数绑定冲突，例如 `./scripts/cargo.ps1 -CargoArgs @('clippy','--workspace','--all-targets','--locked','--','-D','warnings')`。
 
-`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前只返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑及持久化请求去重已在 core/store 层实现，尚未接入配置写 RPC；应用运行 journal 仍待实现。
+`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前只返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑、持久化请求去重和结果查询已接入 coordinator RPC；用户 CLI 写入口、菜单和应用运行 journal 仍待实现。开发版 IPC 已升级至 major 2，CLI 与 host 必须成套使用。
 
 `probe package claude` 仅在已安装 Claude 的包身份下启动本产品测试 helper，验证回执和独立临时目录读写，不启动 Claude 界面或修改其登录数据。`probe process --debug-detach` 验证调试创建和脱离，**不代表真实 IFEO 注册或 Electron 子进程兼容性已经通过**。
 

@@ -64,6 +64,45 @@ enum Phase {
 
 impl Store {
     pub fn apply_config(&mut self, request: &ConfigRequest) -> Result<ConfigOutcome> {
+        self.apply_config_checked(request, None)
+    }
+
+    /// Replay before doing read-only installation checks, which may no longer
+    /// succeed after a previously accepted request (for example after uninstall).
+    pub fn replay_config(&mut self, request: &ConfigRequest) -> Result<Option<ConfigOutcome>> {
+        if request.request_id.is_nil() {
+            return Err(Error::Invalid("INVALID_REQUEST_ID"));
+        }
+        let digest = digest_bytes(&store::encode(request, REQUEST_LIMIT)?);
+        self.recover_config_requests()?;
+        let header = self.load()?;
+        let _directory = self.request_directory(&header.owner_sid, false)?;
+        let Some(record) = self.read_record(request.request_id, &header)? else {
+            return Ok(None);
+        };
+        if record.request_digest != digest {
+            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
+        }
+        match record.phase {
+            Phase::Complete { outcome, .. } => Ok(Some(outcome)),
+            Phase::Pending { .. } => Err(Error::Invalid("CONFIG_REQUEST_PENDING")),
+        }
+    }
+
+    /// The coordinator computes a fixed-code rejection using a read-only
+    /// preflight outside its commit gate. Revision/dedup checks still win here.
+    pub fn apply_config_checked(
+        &mut self,
+        request: &ConfigRequest,
+        rejection: Option<&'static str>,
+    ) -> Result<ConfigOutcome> {
+        if rejection.is_some_and(|code| {
+            code.is_empty()
+                || code.len() > 96
+                || !code.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+        }) {
+            return Err(Error::Invalid("INVALID_REJECTION_CODE"));
+        }
         if request.request_id.is_nil() {
             return Err(Error::Invalid("INVALID_REQUEST_ID"));
         }
@@ -90,7 +129,15 @@ impl Store {
                 // Ensure the complete snapshot fits and all referenced secrets exist
                 // before a pending record can authorize changing the manifest.
                 store::encode(&target, MANIFEST_LIMIT)?;
-                if self.validate(&target).is_err() {
+                if let Some(code) = rejection {
+                    Phase::Complete {
+                        outcome: ConfigOutcome::Rejected {
+                            code: code.into(),
+                            current_revision,
+                        },
+                        completed_at: now()?,
+                    }
+                } else if self.validate(&target).is_err() {
                     Phase::Complete {
                         outcome: ConfigOutcome::Rejected {
                             code: "INVALID_CONFIG_DEPENDENCY".into(),

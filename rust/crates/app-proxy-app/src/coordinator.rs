@@ -1,5 +1,10 @@
-//! Bootstrap coordinator: authenticated status RPC and one owner per store.
-//! Mutating operations are added only together with their durable request journal.
+//! Authenticated coordinator RPC; configuration writes use durable request records.
+use crate::configuration::Configuration;
+use app_proxy_core::{
+    model::Manifest,
+    registry::{ConfigAction, ConfigRequest},
+};
+use app_proxy_windows::config_transaction::{ConfigOutcome, ConfigRequestStatus};
 use app_proxy_windows::{Error, Result, identity, ipc, process, store};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -8,7 +13,7 @@ use std::time::Duration;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
-const PROTOCOL_MAJOR: u32 = 1;
+const PROTOCOL_MAJOR: u32 = 2;
 const PROTOCOL_MINOR: u32 = 0;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
@@ -40,16 +45,88 @@ struct Request {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
-    Status,
+    Status {},
+    Configure {
+        expected_revision: u64,
+        action: ConfigAction,
+    },
+    RequestStatus {
+        request_id: Uuid,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Response {
     request_id: Uuid,
-    result: Status,
+    epoch: Uuid,
+    result: Reply,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Reply {
+    Status { status: Status },
+    Configured { outcome: ConfigOutcome },
+    RequestStatus { status: Option<ConfigRequestStatus> },
+    Error { code: String },
+}
+
+struct Shared {
+    identity: Status,
+    configuration: Configuration,
+}
+
+impl Shared {
+    fn idle_allowed(&self) -> Result<bool> {
+        Ok(self
+            .configuration
+            .snapshot()?
+            .instances
+            .iter()
+            .all(|i| i.guard.desired != app_proxy_core::model::Desired::Enabled))
+    }
+    fn update(&self, manifest: &Manifest) -> Status {
+        Status {
+            revision: manifest.revision,
+            applications: manifest.applications.len(),
+            instances: manifest.instances.len(),
+            profiles: manifest.profiles.len(),
+            ..self.identity.clone()
+        }
+    }
+    fn execute(&self, request: Request) -> Result<Reply> {
+        match request.operation {
+            Operation::Status {} => Ok(Reply::Status {
+                status: self.update(&self.configuration.snapshot()?),
+            }),
+            Operation::Configure {
+                expected_revision,
+                action,
+            } => {
+                let outcome = self.configuration.apply(&ConfigRequest {
+                    request_id: request.request_id,
+                    expected_revision,
+                    action,
+                });
+                // Even a failed receipt write may have committed the manifest.
+                self.update(&self.configuration.snapshot()?);
+                Ok(Reply::Configured { outcome: outcome? })
+            }
+            Operation::RequestStatus { request_id } => Ok(Reply::RequestStatus {
+                status: self.configuration.request_status(request_id)?,
+            }),
+        }
+    }
+}
+
+fn safe_error(error: Error) -> String {
+    match error {
+        Error::Invalid(code) => code.into(),
+        _ => "COORDINATOR_OPERATION_FAILED".into(),
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -103,7 +180,7 @@ pub async fn serve(root: PathBuf) -> Result<()> {
         identity::file_identity(&host)?,
     ])?;
     let mut listener = ipc::Listener::bind(manifest.store_id, policy)?;
-    let snapshot = Arc::new(Status {
+    let snapshot = Status {
         store_id: manifest.store_id,
         revision: manifest.revision,
         epoch: Uuid::new_v4(),
@@ -113,12 +190,16 @@ pub async fn serve(root: PathBuf) -> Result<()> {
         instances: manifest.instances.len(),
         profiles: manifest.profiles.len(),
         phase: "bootstrap".into(),
-    });
+    };
     // Desired guards keep the owner alive, even while their implementation is not yet available.
-    let idle_allowed = !manifest
+    let mut idle_allowed = !manifest
         .instances
         .iter()
         .any(|i| i.guard.desired == app_proxy_core::model::Desired::Enabled);
+    let shared = Arc::new(Shared {
+        identity: snapshot,
+        configuration: Configuration::new(owned),
+    });
     let mut clients = tokio::task::JoinSet::new();
     let mut idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
     loop {
@@ -127,28 +208,36 @@ pub async fn serve(root: PathBuf) -> Result<()> {
                 match accepted {
                     Ok(connection) => {
                         idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
-                        let snapshot = snapshot.clone();
-                        clients.spawn(async move { handle(connection, snapshot).await });
+                        let shared = shared.clone();
+                        clients.spawn(async move { handle(connection, shared).await });
                     }
                     Err(ipc::AcceptError::Peer(_)) => {},
                     Err(ipc::AcceptError::Listener(error)) => return Err(error),
                 }
             }
             _ = clients.join_next(), if !clients.is_empty() => {
-                if clients.is_empty() { idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT; }
+                if clients.is_empty() {
+                    let shared = shared.clone();
+                    // All accepted work is done. Read once here so a delayed
+                    // status response cannot overwrite a newer guard decision.
+                    idle_allowed = tokio::task::spawn_blocking(move || shared.idle_allowed()).await
+                        .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))??;
+                    idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+                }
             },
             _ = tokio::time::sleep_until(idle_deadline), if idle_allowed && clients.is_empty() => break,
         }
     }
     drop(listener);
-    drop(owned);
+    drop(shared);
     Ok(())
 }
 
 async fn handle(
     mut connection: ipc::Connection<NamedPipeServer>,
-    status: Arc<Status>,
+    shared: Arc<Shared>,
 ) -> Result<()> {
+    let status = &shared.identity;
     let request: Hello = connection.receive().await?;
     let rejection = if request.protocol_major != PROTOCOL_MAJOR {
         Some("PROTOCOL_VERSION_MISMATCH")
@@ -176,19 +265,42 @@ async fn handle(
     if request.protocol_major != PROTOCOL_MAJOR || request.request_id.is_nil() {
         return Err(Error::Invalid("INVALID_RPC_REQUEST"));
     }
-    match request.operation {
-        Operation::Status => {
-            connection
-                .send(&Response {
-                    request_id: request.request_id,
-                    result: (*status).clone(),
-                })
-                .await
-        }
-    }
+    let request_id = request.request_id;
+    let epoch = status.epoch;
+    // Do not cancel accepted work when the client disconnects. The handler stays
+    // registered until blocking preparation/commit completes, preventing idle exit.
+    let result = tokio::task::spawn_blocking(move || shared.execute(request))
+        .await
+        .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?;
+    connection
+        .send(&Response {
+            request_id,
+            epoch,
+            result: result.unwrap_or_else(|e| Reply::Error {
+                code: safe_error(e),
+            }),
+        })
+        .await
 }
 
 async fn query(store_id: Uuid, policy: &ipc::PeerPolicy, wait: Duration) -> Result<Status> {
+    let request = Request {
+        protocol_major: PROTOCOL_MAJOR,
+        request_id: Uuid::new_v4(),
+        operation: Operation::Status {},
+    };
+    match rpc(store_id, policy, wait, request).await? {
+        Reply::Status { status } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+async fn rpc(
+    store_id: Uuid,
+    policy: &ipc::PeerPolicy,
+    wait: Duration,
+    request: Request,
+) -> Result<Reply> {
     let mut connection = ipc::connect(store_id, policy, wait).await?;
     connection
         .send(&hello(store_id, policy.session_id, None))
@@ -212,24 +324,75 @@ async fn query(store_id: Uuid, policy: &ipc::PeerPolicy, wait: Duration) -> Resu
     {
         return Err(Error::Invalid("IPC_SERVER_HELLO_MISMATCH"));
     }
-    let request_id = Uuid::new_v4();
-    connection
-        .send(&Request {
-            protocol_major: PROTOCOL_MAJOR,
-            request_id,
-            operation: Operation::Status,
-        })
-        .await?;
+    let request_id = request.request_id;
+    connection.send(&request).await?;
     let response: Response = connection.receive().await?;
-    if response.request_id != request_id
-        || response.result.store_id != store_id
-        || Some(response.result.epoch) != server.epoch
-        || response.result.coordinator_pid != connection.peer.pid
-        || response.result.session_id != connection.peer.session_id
+    if response.request_id != request_id || Some(response.epoch) != server.epoch {
+        return Err(Error::Invalid("IPC_RESPONSE_MISMATCH"));
+    }
+    if let Reply::Status { status } = &response.result
+        && (status.store_id != store_id
+            || Some(status.epoch) != server.epoch
+            || status.coordinator_pid != connection.peer.pid
+            || status.session_id != connection.peer.session_id)
     {
         return Err(Error::Invalid("IPC_RESPONSE_MISMATCH"));
     }
+    if let Reply::Error { code } = &response.result {
+        return Err(Error::Invalid(match code.as_str() {
+            "REQUEST_ID_CONFLICT" => "REQUEST_ID_CONFLICT",
+            "INVALID_REQUEST_ID" => "INVALID_REQUEST_ID",
+            "CONFIG_REQUEST_PENDING" => "CONFIG_REQUEST_PENDING",
+            _ => "COORDINATOR_OPERATION_FAILED",
+        }));
+    }
     Ok(response.result)
+}
+
+/// On failure retain the same request ID and query its status; never manufacture
+/// a fresh ID to retry an operation whose response may have been lost.
+pub async fn configure(root: PathBuf, request: ConfigRequest) -> Result<ConfigOutcome> {
+    let operation = Operation::Configure {
+        expected_revision: request.expected_revision,
+        action: request.action,
+    };
+    match client_operation(root, request.request_id, operation).await? {
+        Reply::Configured { outcome } => Ok(outcome),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn request_status(
+    root: PathBuf,
+    request_id: Uuid,
+) -> Result<Option<ConfigRequestStatus>> {
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::RequestStatus { request_id },
+    )
+    .await?
+    {
+        Reply::RequestStatus { status } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+async fn client_operation(root: PathBuf, request_id: Uuid, operation: Operation) -> Result<Reply> {
+    let owner = status(root).await?;
+    let (_, host) = binaries()?;
+    let policy = ipc::PeerPolicy::current(vec![identity::file_identity(&host)?])?;
+    rpc(
+        owner.store_id,
+        &policy,
+        Duration::from_secs(1),
+        Request {
+            protocol_major: PROTOCOL_MAJOR,
+            request_id,
+            operation,
+        },
+    )
+    .await
 }
 
 /// Launch-on-demand status flow; no arbitrary commands or target processes are accepted.
@@ -301,9 +464,12 @@ async fn ensure_store(root: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn snapshot(id: Uuid) -> Arc<Status> {
+    fn snapshot() -> (tempfile::TempDir, Arc<Shared>) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store::Store::create(&temp.path().join("store")).unwrap();
+        let id = store.load().unwrap().store_id;
         let current = identity::current().unwrap();
-        Arc::new(Status {
+        let status = Status {
             store_id: id,
             revision: 1,
             epoch: Uuid::new_v4(),
@@ -313,10 +479,217 @@ mod tests {
             instances: 0,
             profiles: 0,
             phase: "bootstrap".into(),
-        })
+        };
+        (
+            temp,
+            Arc::new(Shared {
+                identity: status,
+                configuration: Configuration::new(store),
+            }),
+        )
     }
     fn policy() -> ipc::PeerPolicy {
         ipc::PeerPolicy::current(vec![identity::current().unwrap().image_file]).unwrap()
+    }
+
+    fn add_request(path: PathBuf) -> Request {
+        use app_proxy_core::model::*;
+        Request {
+            protocol_major: PROTOCOL_MAJOR,
+            request_id: Uuid::new_v4(),
+            operation: Operation::Configure {
+                expected_revision: 1,
+                action: ConfigAction::AddApplication {
+                    application: Application {
+                        id: Uuid::new_v4(),
+                        revision: 1,
+                        name: "fixture".into(),
+                        locator: ApplicationLocator::Exe { path },
+                        template_ref: Template::Codex,
+                    },
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn delayed_status_snapshots_cannot_change_current_guard_idle_policy() {
+        use app_proxy_core::{model::*, registry::*};
+        let (temp, shared) = snapshot();
+        let path = temp.path().join("fixture.exe");
+        std::fs::write(&path, b"not executed").unwrap();
+        shared.execute(add_request(path)).unwrap();
+        let mut manifest = shared.configuration.snapshot().unwrap();
+        let app_id = manifest.applications[0].id;
+        let mut example: Manifest =
+            serde_json::from_str(include_str!("../../../examples/manifest.json")).unwrap();
+        let profile = example.profiles.pop().unwrap();
+        let profile_id = profile.id;
+        let change = |revision, action| ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: revision,
+            action,
+        };
+        assert!(matches!(
+            shared
+                .configuration
+                .apply(&change(2, ConfigAction::AddProfile { profile }))
+                .unwrap(),
+            ConfigOutcome::Applied { .. }
+        ));
+        let instance_id = Uuid::new_v4();
+        assert!(matches!(
+            shared
+                .configuration
+                .apply(&change(
+                    3,
+                    ConfigAction::CreateInstance {
+                        instance: NewInstance {
+                            id: instance_id,
+                            application_id: app_id,
+                            name: "guarded".into(),
+                            data: NewData::Original {},
+                            network: NetworkBinding::Profile { profile_id },
+                            guard: None,
+                            args: vec![],
+                            env: SavedEnvironment::default(),
+                            cwd: WorkingDirectory::Application {}
+                        }
+                    }
+                ))
+                .unwrap(),
+            ConfigOutcome::Applied { .. }
+        ));
+        shared.update(&manifest); // Delayed snapshot from before enabling Guard.
+        assert!(!shared.idle_allowed().unwrap());
+        manifest = shared.configuration.snapshot().unwrap();
+        assert!(matches!(
+            shared
+                .configuration
+                .apply(&change(
+                    4,
+                    ConfigAction::BindInstance {
+                        instance_id,
+                        network: NetworkBinding::Direct {},
+                        guard: None
+                    }
+                ))
+                .unwrap(),
+            ConfigOutcome::Applied { .. }
+        ));
+        shared.update(&manifest); // Delayed snapshot from before disabling Guard.
+        assert!(shared.idle_allowed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn concurrent_pipe_replays_commit_once_and_status_reflects_the_edit() {
+        let (temp, shared) = snapshot();
+        let path = temp.path().join("fixture.exe");
+        std::fs::write(&path, b"not executed").unwrap();
+        let id = shared.identity.store_id;
+        let mut listener = ipc::Listener::bind(id, policy()).unwrap();
+        let owner = shared.clone();
+        let server = tokio::spawn(async move {
+            let mut clients = tokio::task::JoinSet::new();
+            for _ in 0..7 {
+                let pipe = listener.accept().await.unwrap();
+                clients.spawn(handle(pipe, owner.clone()));
+            }
+            while let Some(result) = clients.join_next().await {
+                result.unwrap().unwrap();
+            }
+        });
+        let request = add_request(path);
+        let bytes = serde_json::to_vec(&request).unwrap();
+        let mut clients = tokio::task::JoinSet::new();
+        for _ in 0..6 {
+            let request = serde_json::from_slice(&bytes).unwrap();
+            clients.spawn(async move {
+                rpc(id, &policy(), Duration::from_secs(1), request)
+                    .await
+                    .unwrap()
+            });
+        }
+        let mut entity = None;
+        while let Some(result) = clients.join_next().await {
+            let Reply::Configured {
+                outcome: ConfigOutcome::Applied { receipt },
+            } = result.unwrap()
+            else {
+                panic!("request rejected")
+            };
+            assert_eq!(receipt.revision, 2);
+            if let Some(previous) = entity {
+                assert_eq!(receipt.entity_id, previous);
+            }
+            entity = Some(receipt.entity_id);
+        }
+        let status = query(id, &policy(), Duration::from_secs(1)).await.unwrap();
+        assert_eq!(status.revision, 2);
+        assert_eq!(status.applications, 1);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lost_response_can_be_queried_and_changed_payload_cannot_reuse_id() {
+        let (temp, shared) = snapshot();
+        let path = temp.path().join("fixture.exe");
+        std::fs::write(&path, b"not executed").unwrap();
+        let id = shared.identity.store_id;
+        let mut listener = ipc::Listener::bind(id, policy()).unwrap();
+        let owner = shared.clone();
+        let request = add_request(path.clone());
+        let request_id = request.request_id;
+        let server = tokio::spawn(async move {
+            let _ = handle(listener.accept().await.unwrap(), owner.clone()).await;
+            (listener, owner)
+        });
+        let mut client = ipc::connect(id, &policy(), Duration::from_secs(1))
+            .await
+            .unwrap();
+        client
+            .send(&hello(id, shared.identity.session_id, None))
+            .await
+            .unwrap();
+        assert!(matches!(
+            client.receive::<Welcome>().await.unwrap(),
+            Welcome::Ready { .. }
+        ));
+        client.send(&request).await.unwrap();
+        // Intentionally discard the response. Closing a client does not undo its
+        // accepted write; the durable receipt is the authority on reconnect.
+        drop(client);
+        let (mut listener, owner) = server.await.unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                handle(listener.accept().await.unwrap(), owner.clone())
+                    .await
+                    .unwrap();
+            }
+        });
+        let lookup = Request {
+            protocol_major: PROTOCOL_MAJOR,
+            request_id: Uuid::new_v4(),
+            operation: Operation::RequestStatus { request_id },
+        };
+        assert!(matches!(
+            rpc(id, &policy(), Duration::from_secs(1), lookup)
+                .await
+                .unwrap(),
+            Reply::RequestStatus {
+                status: Some(ConfigRequestStatus::Complete {
+                    outcome: ConfigOutcome::Applied { .. }
+                })
+            }
+        ));
+        let mut changed = add_request(path);
+        changed.request_id = request_id;
+        assert!(matches!(
+            rpc(id, &policy(), Duration::from_secs(1), changed).await,
+            Err(Error::Invalid("REQUEST_ID_CONFLICT"))
+        ));
+        server.await.unwrap();
+        assert_eq!(shared.configuration.snapshot().unwrap().revision, 2);
     }
 
     #[tokio::test]
@@ -327,10 +700,10 @@ mod tests {
             "STORE_SESSION_CONFLICT",
             "INVALID_CLIENT_HELLO",
         ] {
-            let id = Uuid::new_v4();
-            let status = snapshot(id);
+            let (_temp, status) = snapshot();
+            let id = status.identity.store_id;
             let mut listener = ipc::Listener::bind(id, policy()).unwrap();
-            let mut request = hello(id, status.session_id, None);
+            let mut request = hello(id, status.identity.session_id, None);
             match expected {
                 "PROTOCOL_VERSION_MISMATCH" => request.protocol_major += 1,
                 "STORE_ID_MISMATCH" => request.store_id = Uuid::new_v4(),
@@ -356,8 +729,8 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_client_does_not_block_another_status_request() {
-        let id = Uuid::new_v4();
-        let status = snapshot(id);
+        let (_temp, status) = snapshot();
+        let id = status.identity.store_id;
         let mut listener = ipc::Listener::bind(id, policy()).unwrap();
         let server = tokio::spawn(async move {
             let stalled = listener.accept().await.unwrap();
