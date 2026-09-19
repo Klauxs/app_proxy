@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 /// Data only: a PID alone must never authorize a stop operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessIdentity {
     pub pid: u32,
     pub creation_time: u64,

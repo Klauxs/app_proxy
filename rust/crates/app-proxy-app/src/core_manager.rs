@@ -1,0 +1,289 @@
+//! One serialized core lifecycle per store owner. The coordinator must retain
+//! this manager and must not cancel accepted lifecycle work on IPC disconnect.
+use crate::{configuration::Configuration, proxy_health};
+use app_proxy_core::{ProcessIdentity, model::Endpoint};
+use app_proxy_windows::{
+    Error, Result, core_process::CoreProcess, core_state::CoreState, singbox_binary,
+};
+use serde::Serialize;
+use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+pub struct CoreManager {
+    root: PathBuf,
+    configuration: Arc<Configuration>,
+    gate: Mutex<()>,
+}
+#[derive(Serialize)]
+pub struct ReadyCore {
+    pub generation: Uuid,
+    pub process: ProcessIdentity,
+}
+
+impl CoreManager {
+    pub fn new(root: PathBuf, configuration: Arc<Configuration>) -> Self {
+        Self {
+            root,
+            configuration,
+            gate: Mutex::new(()),
+        }
+    }
+
+    pub async fn ensure(
+        &self,
+        profiles: &[Uuid],
+        required: Uuid,
+        target: &str,
+    ) -> Result<ReadyCore> {
+        self.ensure_with(profiles, required, |endpoint| async move {
+            proxy_health::check(&endpoint, target, &[200, 204])
+                .await
+                .map(|_| ())
+                .map_err(|_| Error::Invalid("CORE_PROXY_HEALTH_FAILED"))
+        })
+        .await
+    }
+
+    pub(crate) async fn ensure_with<F, Fut>(
+        &self,
+        profiles: &[Uuid],
+        required: Uuid,
+        probe: F,
+    ) -> Result<ReadyCore>
+    where
+        F: FnOnce(Endpoint) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        if !profiles.contains(&required) || required.is_nil() {
+            return Err(Error::Invalid("REQUIRED_PROFILE_MISSING"));
+        }
+        let _gate = self.gate.lock().await;
+        let mut requested_profiles = profiles.to_vec();
+        let mut state = self.configuration.lock()?.core_state()?;
+        if let CoreState::Running {
+            generation,
+            process,
+        } = &state
+            && CoreProcess::recover(process)?.is_none()
+        {
+            let down = CoreState::Down {
+                generation: *generation,
+            };
+            self.configuration
+                .lock()?
+                .transition_core_state(&state, down.clone())?;
+            state = down;
+        }
+        match state {
+            CoreState::Starting { .. } => Err(Error::Invalid("CORE_START_RESULT_UNKNOWN")),
+            CoreState::Running {
+                generation,
+                ref process,
+            } => {
+                let running = CoreProcess::attach(process)?;
+                if !running.is_running()? {
+                    return Err(Error::Invalid("CORE_PROCESS_DOWN"));
+                }
+                let active = {
+                    let store = self.configuration.lock()?;
+                    let active = store.open_core_generation(generation)?;
+                    if profiles
+                        .iter()
+                        .any(|id| !active.profiles().iter().any(|p| p.id == *id))
+                        || !store.core_generation_is_current(&active)?
+                    {
+                        return Err(Error::Invalid("CORE_RECONFIGURE_REQUIRES_CONFIRMATION"));
+                    }
+                    active
+                };
+                let endpoints: Vec<_> = active
+                    .profiles()
+                    .iter()
+                    .map(|p| p.endpoint.clone())
+                    .collect();
+                if !running.listeners_verified(&endpoints)? {
+                    return Err(Error::Invalid("CORE_LISTENER_OWNER_UNCONFIRMED"));
+                }
+                let endpoint = active
+                    .profiles()
+                    .iter()
+                    .find(|p| p.id == required)
+                    .ok_or(Error::Invalid("REQUIRED_PROFILE_MISSING"))?
+                    .endpoint
+                    .clone();
+                // A runtime failure preserves both the shared core and all apps.
+                probe(endpoint).await?;
+                if !self
+                    .configuration
+                    .lock()?
+                    .core_generation_is_current(&active)?
+                {
+                    return Err(Error::Invalid("CORE_CONFIG_CHANGED"));
+                }
+                if !running.listeners_verified(&endpoints)? {
+                    return Err(Error::Invalid("CORE_LISTENER_OWNER_UNCONFIRMED"));
+                }
+                Ok(ReadyCore {
+                    generation,
+                    process: process.clone(),
+                })
+            }
+            previous @ (CoreState::Stopped {} | CoreState::Down { .. }) => {
+                // Keep the recovery set durable across missing binaries, occupied
+                // ports, failed health checks and subsequent owner restarts.
+                if let CoreState::Down { generation } = &previous {
+                    let active = self
+                        .configuration
+                        .lock()?
+                        .open_core_generation(*generation)?;
+                    requested_profiles.extend(active.profiles().iter().map(|p| p.id));
+                    requested_profiles.sort();
+                    requested_profiles.dedup();
+                }
+                let candidate = self
+                    .configuration
+                    .lock()?
+                    .prepare_core_generation(&requested_profiles)?;
+                let binary = singbox_binary::discover(&self.root)
+                    .await?
+                    .ok_or(Error::Invalid("CORE_BINARY_MISSING"))?;
+                binary.check_config(candidate.config_path()).await?;
+                let endpoints: Vec<_> = candidate
+                    .profiles()
+                    .iter()
+                    .map(|p| p.endpoint.clone())
+                    .collect();
+                // Availability only. Ownership is checked after our spawn; a bind
+                // race never authorizes adoption or termination of its winner.
+                let reservations: Vec<_> = endpoints
+                    .iter()
+                    .map(|e| std::net::TcpListener::bind((e.host, e.port)))
+                    .collect::<std::io::Result<_>>()
+                    .map_err(|_| Error::Invalid("CORE_PORT_OCCUPIED"))?;
+                let starting = CoreState::Starting {
+                    generation: candidate.id(),
+                };
+                {
+                    let mut store = self.configuration.lock()?;
+                    if !store.core_generation_is_current(&candidate)? {
+                        return Err(Error::Invalid("CORE_CONFIG_CHANGED"));
+                    }
+                    store.transition_core_state(&previous, starting.clone())?;
+                }
+                drop(reservations);
+                // No await between spawn and the identity journal. If anything
+                // fails before identity is durable, Starting blocks blind retry.
+                let core = match CoreProcess::spawn(&binary, &candidate) {
+                    Ok(core) => core,
+                    Err(error) => {
+                        if matches!(error, Error::Io(_)) {
+                            self.configuration.lock()?.transition_core_state(
+                                &starting,
+                                CoreState::Down {
+                                    generation: candidate.id(),
+                                },
+                            )?;
+                        }
+                        return Err(error);
+                    }
+                };
+                let running = CoreState::Running {
+                    generation: candidate.id(),
+                    process: core.identity().clone(),
+                };
+                let recorded = self
+                    .configuration
+                    .lock()?
+                    .transition_core_state(&starting, running.clone());
+                if let Err(error) = recorded {
+                    core.stop()?;
+                    self.configuration.lock()?.transition_core_state(
+                        &starting,
+                        CoreState::Down {
+                            generation: candidate.id(),
+                        },
+                    )?;
+                    return Err(error);
+                }
+                let result = async {
+                    wait_listeners(&core, &endpoints).await?;
+                    let endpoint = candidate
+                        .profiles()
+                        .iter()
+                        .find(|p| p.id == required)
+                        .expect("required compiled profile")
+                        .endpoint
+                        .clone();
+                    probe(endpoint).await?;
+                    if !self
+                        .configuration
+                        .lock()?
+                        .core_generation_is_current(&candidate)?
+                    {
+                        return Err(Error::Invalid("CORE_CONFIG_CHANGED"));
+                    }
+                    if !core.listeners_verified(&endpoints)? {
+                        return Err(Error::Invalid("CORE_LISTENER_OWNER_UNCONFIRMED"));
+                    }
+                    Ok(ReadyCore {
+                        generation: candidate.id(),
+                        process: core.identity().clone(),
+                    })
+                }
+                .await;
+                if result.is_err() {
+                    core.stop()?;
+                    self.configuration.lock()?.transition_core_state(
+                        &running,
+                        CoreState::Down {
+                            generation: candidate.id(),
+                        },
+                    )?;
+                }
+                result
+            }
+        }
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        let _gate = self.gate.lock().await;
+        let state = self.configuration.lock()?.core_state()?;
+        match &state {
+            CoreState::Stopped {} => Ok(()),
+            CoreState::Down { .. } => self
+                .configuration
+                .lock()?
+                .transition_core_state(&state, CoreState::Stopped {}),
+            CoreState::Starting { .. } => Err(Error::Invalid("CORE_START_RESULT_UNKNOWN")),
+            CoreState::Running { process, .. } => {
+                if let Some(core) = CoreProcess::recover(process)? {
+                    core.stop()?;
+                }
+                self.configuration
+                    .lock()?
+                    .transition_core_state(&state, CoreState::Stopped {})
+            }
+        }
+    }
+
+    pub fn state(&self) -> Result<CoreState> {
+        self.configuration.lock()?.core_state()
+    }
+}
+
+async fn wait_listeners(core: &CoreProcess, endpoints: &[Endpoint]) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if !core.is_running()? {
+            return Err(Error::Invalid("CORE_EXITED_BEFORE_READY"));
+        }
+        if core.listeners_verified(endpoints)? {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::Invalid("CORE_LISTENER_TIMEOUT"));
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}

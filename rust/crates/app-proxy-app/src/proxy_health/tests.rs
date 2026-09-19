@@ -13,6 +13,7 @@ use tokio_rustls::{
 const HOST: &str = "health.app-proxy.invalid";
 const TARGET: &str = "https://health.app-proxy.invalid/check?secret=never-log-this";
 
+#[derive(Clone)]
 enum Reply {
     Https(Vec<u8>),
     PlainHttp,
@@ -47,6 +48,10 @@ async fn header(stream: &mut (impl AsyncRead + Unpin)) -> String {
 }
 
 async fn fixture(reply: Reply, cert_host: &str) -> Fixture {
+    fixture_repeat(reply, cert_host, 1).await
+}
+
+async fn fixture_repeat(reply: Reply, cert_host: &str, count: usize) -> Fixture {
     let cert = rcgen::generate_simple_self_signed(vec![cert_host.into()]).unwrap();
     let certificate = reqwest::Certificate::from_der(cert.cert.der()).unwrap();
     let config = ServerConfig::builder()
@@ -56,47 +61,50 @@ async fn fixture(reply: Reply, cert_host: &str) -> Fixture {
             PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into(),
         )
         .unwrap();
+    let config = Arc::new(config);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = Endpoint {
         host: "127.0.0.1".parse().unwrap(),
         port: listener.local_addr().unwrap().port(),
     };
     let task = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(5), async move {
-            let (mut tcp, _) = listener.accept().await.unwrap();
-            let connect = header(&mut tcp).await;
-            assert!(connect.starts_with(&format!("CONNECT {HOST}:443 HTTP/1.1\r\n")));
-            if matches!(reply, Reply::StallConnect) {
-                tokio::time::sleep(Duration::from_secs(4)).await;
-                return;
-            }
-            tcp.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                .await
-                .unwrap();
-            if matches!(reply, Reply::PlainHttp) {
-                let _ = tcp
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                    .await;
-                return;
-            }
-            let Ok(mut tls) = TlsAcceptor::from(Arc::new(config)).accept(tcp).await else {
-                return;
-            };
-            let get = header(&mut tls).await;
-            assert!(get.starts_with("GET /check?secret=never-log-this HTTP/1.1\r\n"));
-            match reply {
-                Reply::Https(bytes) => {
-                    let _ = tls.write_all(&bytes).await;
-                }
-                Reply::StallBody => {
-                    tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nx")
-                        .await
-                        .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async move {
+            for _ in 0..count {
+                let (mut tcp, _) = listener.accept().await.unwrap();
+                let connect = header(&mut tcp).await;
+                assert!(connect.starts_with(&format!("CONNECT {HOST}:443 HTTP/1.1\r\n")));
+                if matches!(reply, Reply::StallConnect) {
                     tokio::time::sleep(Duration::from_secs(4)).await;
+                    return;
                 }
-                _ => unreachable!(),
+                tcp.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .unwrap();
+                if matches!(reply, Reply::PlainHttp) {
+                    let _ = tcp
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    return;
+                }
+                let Ok(mut tls) = TlsAcceptor::from(config.clone()).accept(tcp).await else {
+                    return;
+                };
+                let get = header(&mut tls).await;
+                assert!(get.starts_with("GET /check?secret=never-log-this HTTP/1.1\r\n"));
+                match reply.clone() {
+                    Reply::Https(bytes) => {
+                        let _ = tls.write_all(&bytes).await;
+                    }
+                    Reply::StallBody => {
+                        tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nx")
+                            .await
+                            .unwrap();
+                        tokio::time::sleep(Duration::from_secs(4)).await;
+                    }
+                    _ => unreachable!(),
+                }
+                let _ = tls.shutdown().await;
             }
-            let _ = tls.shutdown().await;
         })
         .await
         .unwrap();
@@ -106,6 +114,228 @@ async fn fixture(reply: Reply, cert_host: &str) -> Fixture {
         certificate,
         task,
     }
+}
+
+#[tokio::test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX; owns only isolated fixture core processes"]
+async fn managed_core_persists_reuses_recovers_and_preserves_runtime_failures() {
+    use crate::{configuration::Configuration, core_manager::CoreManager};
+    use app_proxy_core::model::*;
+    use app_proxy_windows::{
+        Error as PlatformError, core_process::CoreProcess, core_state::CoreState, store::Store,
+    };
+    use std::{fs, path::PathBuf};
+    use uuid::Uuid;
+    struct Cleanup(Vec<CoreProcess>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                let _ = p.stop();
+            }
+        }
+    }
+    let mut cleanup = Cleanup(Vec::new());
+    let binary = PathBuf::from(
+        std::env::var_os("APP_PROXY_TEST_SING_BOX").expect("explicit validation binary"),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("owned");
+    let mut store = Store::create(&root).unwrap();
+    let installed = root.join("bin/sing-box/1.14.1");
+    fs::create_dir_all(&installed).unwrap();
+    for name in ["sing-box.exe", "libcronet.dll"] {
+        fs::copy(binary.parent().unwrap().join(name), installed.join(name)).unwrap();
+    }
+    let upstream = fixture_repeat(
+        Reply::Https(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()),
+        HOST,
+        3,
+    )
+    .await;
+    let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = Endpoint {
+        host: "127.0.0.1".parse().unwrap(),
+        port: reserved.local_addr().unwrap().port(),
+    };
+    let node = ManualNode {
+        id: Uuid::new_v4(),
+        name: "fixture".into(),
+        protocol: ManualProtocol::Http,
+        host: upstream.endpoint.host.to_string(),
+        port: upstream.endpoint.port,
+        credentials: None,
+    };
+    let id = Uuid::new_v4();
+    let mut manifest = store.load().unwrap();
+    manifest.profiles.push(ProxyProfile {
+        id,
+        name: "fixture".into(),
+        revision: 1,
+        kind: ProxyKind::Managed,
+        endpoint: endpoint.clone(),
+        selected_node_id: node.id,
+        source: ProxySource::Manual { nodes: vec![node] },
+    });
+    let second_reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut second = manifest.profiles[0].clone();
+    second.id = Uuid::new_v4();
+    second.endpoint.port = second_reserved.local_addr().unwrap().port();
+    let second_endpoint = second.endpoint.clone();
+    let second_id = second.id;
+    manifest.profiles.push(second);
+    store.commit(manifest.revision, manifest).unwrap();
+    let configuration = Arc::new(Configuration::new(store));
+    let manager = CoreManager::new(root.clone(), configuration.clone());
+    let probe = |endpoint: Endpoint| {
+        let cert = upstream.certificate.clone();
+        async move {
+            let client = client_builder(&endpoint)
+                .unwrap()
+                .tls_certs_only([cert])
+                .build()
+                .unwrap();
+            request(client, validate(TARGET, &[204]).unwrap(), &[204])
+                .await
+                .map(|_| ())
+                .map_err(|_| PlatformError::Invalid("FIXTURE_HEALTH_FAILED"))
+        }
+    };
+    // A foreign listener is not adopted or terminated, and no start is journaled.
+    assert!(matches!(
+        manager.ensure_with(&[id], id, &probe).await,
+        Err(PlatformError::Invalid("CORE_PORT_OCCUPIED"))
+    ));
+    assert_eq!(manager.state().unwrap(), CoreState::Stopped {});
+    assert!(
+        tokio::net::TcpStream::connect(reserved.local_addr().unwrap())
+            .await
+            .is_ok()
+    );
+    drop(reserved);
+    drop(second_reserved);
+    let ready = manager
+        .ensure_with(&[id, second_id], id, &probe)
+        .await
+        .unwrap();
+    cleanup.0.push(CoreProcess::attach(&ready.process).unwrap());
+    // Dropping the owner-side manager must not kill the shared core. Recover via
+    // the persisted full identity and exact native listener owner evidence.
+    drop(manager);
+    drop(configuration);
+    let configuration = Arc::new(Configuration::new(Store::open(&root).unwrap()));
+    let manager = CoreManager::new(root.clone(), configuration.clone());
+    let reused = manager.ensure_with(&[id], id, &probe).await.unwrap();
+    assert_eq!(ready.process, reused.process);
+    assert_eq!(ready.generation, reused.generation);
+    {
+        let mut store = configuration.lock().unwrap();
+        let mut manifest = store.load().unwrap();
+        manifest.profiles[0].name = "rename".into();
+        manifest.profiles[0].revision += 1;
+        store.commit(manifest.revision, manifest).unwrap();
+    }
+    assert_eq!(
+        manager
+            .ensure_with(&[id], id, &probe)
+            .await
+            .unwrap()
+            .process,
+        ready.process
+    );
+    assert!(
+        manager
+            .ensure_with(&[id], id, |_| async {
+                Err(PlatformError::Invalid("FIXTURE_NETWORK_DOWN"))
+            })
+            .await
+            .is_err()
+    );
+    assert!(cleanup.0[0].is_running().unwrap());
+    assert!(matches!(
+        manager.state().unwrap(),
+        CoreState::Running { .. }
+    ));
+    let change_port = |port| {
+        let mut store = configuration.lock().unwrap();
+        let mut manifest = store.load().unwrap();
+        let ProxySource::Manual { nodes } = &mut manifest.profiles[0].source;
+        nodes[0].port = port;
+        store.commit(manifest.revision, manifest).unwrap();
+    };
+    assert!(matches!(
+        manager
+            .ensure_with(&[id], id, |_| async {
+                change_port(1);
+                Ok(())
+            })
+            .await,
+        Err(PlatformError::Invalid("CORE_CONFIG_CHANGED"))
+    ));
+    assert!(cleanup.0[0].is_running().unwrap());
+    change_port(upstream.endpoint.port);
+    manager.stop().await.unwrap();
+    assert!(!cleanup.0[0].is_running().unwrap());
+    assert_eq!(manager.state().unwrap(), CoreState::Stopped {});
+    // Initial health failure cleans up only the newly created core, then leaves
+    // a retryable Down journal retaining its profiles. No app processes are used.
+    assert!(
+        manager
+            .ensure_with(&[id], id, |_| async {
+                Err(PlatformError::Invalid("FIXTURE_NETWORK_DOWN"))
+            })
+            .await
+            .is_err()
+    );
+    assert!(matches!(manager.state().unwrap(), CoreState::Down { .. }));
+    assert!(std::net::TcpListener::bind((endpoint.host, endpoint.port)).is_ok());
+    assert!(matches!(
+        manager
+            .ensure_with(&[id], id, |_| async {
+                change_port(1);
+                Ok(())
+            })
+            .await,
+        Err(PlatformError::Invalid("CORE_CONFIG_CHANGED"))
+    ));
+    assert!(matches!(manager.state().unwrap(), CoreState::Down { .. }));
+    change_port(upstream.endpoint.port);
+    // Controlled lifecycle-only health callbacks below isolate crash recovery
+    // from upstream availability; the earlier three requests used real TLS.
+    let before_crash = manager
+        .ensure_with(&[id, second_id], id, |_| async { Ok(()) })
+        .await
+        .unwrap();
+    let crashed = CoreProcess::attach(&before_crash.process).unwrap();
+    crashed.stop().unwrap();
+    let blocker =
+        std::net::TcpListener::bind((second_endpoint.host, second_endpoint.port)).unwrap();
+    assert!(matches!(
+        manager.ensure_with(&[id], id, |_| async { Ok(()) }).await,
+        Err(PlatformError::Invalid("CORE_PORT_OCCUPIED"))
+    ));
+    assert!(matches!(manager.state().unwrap(), CoreState::Down { .. }));
+    drop(manager);
+    drop(configuration);
+    drop(blocker);
+    let configuration = Arc::new(Configuration::new(Store::open(&root).unwrap()));
+    let manager = CoreManager::new(root, configuration);
+    let after_crash = manager
+        .ensure_with(&[id], id, |_| async { Ok(()) })
+        .await
+        .unwrap();
+    cleanup
+        .0
+        .push(CoreProcess::attach(&after_crash.process).unwrap());
+    assert_ne!(before_crash.process, after_crash.process);
+    assert!(
+        cleanup
+            .0
+            .last()
+            .unwrap()
+            .listeners_verified(&[endpoint, second_endpoint])
+            .unwrap()
+    );
+    manager.stop().await.unwrap();
 }
 
 async fn trusted(f: &Fixture, statuses: &[u16]) -> Result<Evidence, Error> {

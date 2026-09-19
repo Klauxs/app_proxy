@@ -17,10 +17,10 @@
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
 | 实例启动 | 待实现 | 统一状态机、安装解析和已运行判断 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
-| sing-box 管理/一键安装 | 待实现 | 自行启动、多个入口/出口共享进程、安装/取消、CONNECT/TLS、配置切换恢复 |
-| sing-box 配置生成 | 已实现，独立 review 通过 | 活动 profile 合并、固定入口→出口、末尾拒绝、HTTP/SOCKS5 认证及稳定配置；4 项规则测试和 1 项真实内核转发测试，尚未接入内核管理 |
+| sing-box 管理/一键安装 | 初始生命周期组件已实现，独立 review 通过；产品集成待续 | 自行启动/身份与双栈端口核验/共享重用/已记录进程恢复/显式停止已串联；coordinator RPC、启动许可、重配置确认/回滚、无身份启动核对、故障通知及安装/取消待实现 |
+| sing-box 配置生成 | 已实现，独立 review 通过 | 活动 profile 合并、固定入口→出口、末尾拒绝、HTTP/SOCKS5 认证及稳定配置；4 项规则测试和 1 项真实内核转发测试，已接入初始内核管理组件 |
 | sing-box 程序发现/检查 | 已实现，独立 review 通过 | 自动发现/真实 version、有界子进程输出及 check；CLI discover sing-box 已接入，安装及生产运行待实现 |
-| HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和 1 项真实 sing-box TLS 集成，待接入生产启动/运行监控 |
+| HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和真实 sing-box TLS/管理集成，已接初始内核管理，应用启动/运行监控待实现 |
 | 订阅解析 | 待实现 | 六协议、URI/Base64/Clash/文本格式、兼容 fixtures、刷新保持选择 |
 | IFEO | 仅调试创建候选 | 实际注册匹配/防递归/子进程/调用语义/恢复；未管理原版不受干预 |
 | Guard/ETW | 待实现 | 默认范围、普通/提权分工、事件/扫描、身份未知、限流及未管理进程存活 |
@@ -48,3 +48,4 @@
 - sing-box 配置生成：独立审查通过，4 项配置契约及 1 项 sing-box 1.14.1 真实进程测试通过。提交主题 `feat(rust): compile shared sing-box proxy configurations`。真实测试覆盖同一内核的双上游认证、未匹配入口拒绝和故障不串线；全量 91 项测试通过、4 项顶层 ignored（其中真实内核测试另行显式运行），clippy/fmt 通过。尚未实现生产内核生命周期、安装或 CONNECT/TLS 健康检查。
 - sing-box 程序发现/检查：独立审查发现并修复版本字符串排序错误，跨位数回归及增量复审通过。提交主题 `feat(rust): discover and validate sing-box binaries`。4 项单测、扩展后的真实内核集成、全量 95 项测试及 clippy/fmt 通过。只查找程序并执行 version/check，未实现安装、运行管理或网络健康检查；同步文件 I/O 不受异步超时强制取消。
 - HTTPS 代理健康检查：独立审查及真实 sing-box TLS 增量复审通过。提交主题 `feat(rust): verify HTTPS connectivity through explicit proxies`。6 项新行为测试通过，全量 101 项通过（6 项顶层 ignored，其中两个真实内核测试分别显式运行，另三个为父测试调用的 helper）；clippy/fmt 通过。真实 core→HTTP 上游→TLS 夹具验证 204 与 core 退出后失败，不表示生产生命周期、目标应用代理或 Guard 已完成。
+- 共享 core 初始生命周期：独立审查及多轮增量复审通过。提交主题 `feat(rust): persist and supervise owned shared core processes`。4 项 generation/journal 契约、1 项原生双栈 PID 归属测试、真实 core 生命周期集成通过；全量 106 项通过，clippy/fmt 通过。修复探测配置竞态、profile 端口映射、恢复失败后丢失共享入口；尚无 coordinator 启动 RPC/启动许可、重配置回滚、无身份启动核对、持续通知及安装。

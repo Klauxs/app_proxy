@@ -133,7 +133,7 @@ impl Configuration {
             store: Mutex::new(store),
         }
     }
-    fn lock(&self) -> Result<MutexGuard<'_, Store>> {
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Store>> {
         self.store
             .lock()
             .map_err(|_| Error::Invalid("CONFIGURATION_OWNER_FAILED"))

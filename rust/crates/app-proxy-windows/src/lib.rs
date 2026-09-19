@@ -1,6 +1,8 @@
 #![cfg(windows)]
 
 pub mod config_transaction;
+pub mod core_process;
+pub mod core_state;
 pub mod identity;
 pub mod installation;
 pub mod instance_data;
