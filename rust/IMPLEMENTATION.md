@@ -27,7 +27,7 @@
 | sing-box 程序发现/检查 | 已实现，独立 review 通过 | 自动发现/真实 version、有界子进程输出及 check；CLI discover sing-box 已接入，安装及生产运行待实现 |
 | HTTPS 代理健康检查 | 已实现，独立 review 通过 | 显式指定入口、CONNECT/TLS/主机名验证、无重定向、10 秒/1 MiB、错误脱敏；6 项本地行为测试和真实 sing-box TLS/管理集成，已接初始内核管理，应用启动/运行监控待实现 |
 | 订阅解析 | 待实现 | 六协议、URI/Base64/Clash/文本格式、兼容 fixtures、刷新保持选择 |
-| IFEO | 调试创建候选及普通创建前只读检查 | 普通 EXE 服务发现 Debugger 时拒绝误入；实际注册匹配/防递归/子进程/调用语义/恢复待实现，未管理原版不受干预 |
+| IFEO | 注册/恢复平台层已实现并通过独立 review，入口待接入 | 受保护归属及父值备份、精确路径过滤、持久断点恢复、冲突保留；15 项专项测试通过。尚无生产调用方写入规则，真实匹配/防递归/子进程/完整接管待验收 |
 | Guard/ETW | 监听 host、授权安装、普通侧监听监督、自动扫描与纠正触发已接入 | 调度/受控进程/状态/协议测试及独立 review 通过；真实提权事件链路、登录任务与 IFEO 仍待验收或实现 |
 | 原生 ETW 进程事件平台层 | 已实现，独立 review 通过；实际 kernel provider 采集待授权验证 | 固定 provider/事件、TDH 命名属性、1024 项有界提示队列、丢失统计、会话归属及退出；默认 4 项及真实空会话控制测试通过，当前权限启用 provider 返回 Win32 5；未接入提权部署或事件管道 |
 | 单向事件管道平台层 | 已实现，独立 review 通过；真实提权两端集成待续 | 独立名称及只读 logon ACL、双向用户/session/logon/映像/权限核对、严格消息和断线补扫；每批 128 条，队列送完才报告结束；5 项管道及 5 项 ETW 默认测试通过，部署与自动 Guard 尚未连接 |
@@ -46,6 +46,8 @@
 具体测试矩阵、平台限制和发布门槛仍以 `docs/07-implementation-and-validation.md` 与相关章节为准。用户最近确认的范围优先：不复用外部 sing-box 服务；只创建分身不接管原版；安装路径自动管理；运行中代理故障保留应用；从简实现。
 
 **review / commit 记录**
+
+- IFEO 注册与恢复平台层：独立审查及修复复审通过，提交主题 `feat(rust): persist owned IFEO registry rules and recovery`。注册只接受已登记、绑定代理且启用 Guard 的原版；固定受保护 host 与精确目标身份，跨 store 物理映像归属冲突拒绝。共享父项按 Windows Unicode 大小写规则分组，最后一个参与者解除后才恢复原始 UseFilter；Installing/Removing 仍参与归属。注册表事务在本机返回 6801，采用受保护单值 journal 发布、显式 flush 和逐项核对恢复。修复首记录发布窗口与无记录认领同名 filter 两项审查问题。全量 293 项通过、26 项 ignored；最后补数量上限回归，15 项专项及 clippy/fmt/diff 再次通过。未调用真实 HKLM 写入或 UAC，平台 API 暂不接入生产启用流程。
 
 - Guard 自动扫描与纠正触发：独立审查及增量复审通过，提交主题 `feat(rust): trigger guarded corrections from authorized scans`。合并事件/定时触发、公平有界实例队列、单扫描、授权与配置版本撤销、未知三次短重试后退避；同步持久接纳复用既有精确纠正执行。新增 6 项调度/状态/受控进程及 1 项双向协议测试，全量 280 项通过、26 项 ignored，clippy/fmt/diff 通过；最终提示与调度微调后 12 项监督、2 项 CLI 定向再次通过。修复旧 Ready 覆盖最新未知、秒级并列回执吞掉失败、未决状态覆盖失败诊断。协议 2.10 区分 starting/active/degraded/blocked；真实提权完整事件链路、IFEO 和登录任务待续。本批实际关闭的仅是隔离测试 EXE。
 

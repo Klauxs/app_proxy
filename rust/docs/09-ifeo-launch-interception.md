@@ -1,6 +1,6 @@
 **IFEO 启动前接管**
 
-补充日期：2026-09-19。用户确认的需求是：通过 IFEO Debugger 拦截原始 EXE 启动，再交给启动器注入实例与代理配置。M0 已有调试创建/脱离候选实验，但尚无 IFEO 注册或接管实现；本文是目标设计，不是应用级兼容性结论。
+补充日期：2026-09-19，实施状态更新：2026-09-20。用户确认的需求是：通过 IFEO Debugger 拦截原始 EXE 启动，再交给启动器注入实例与代理配置。已有调试创建/脱离候选实验及注册/恢复平台层；入口和完整接管尚未实现。本文是目标设计，不是应用级兼容性结论。
 
 **1. 在整体架构中的位置**
 
@@ -100,6 +100,12 @@ MSIX 继续按 family/AppId 作为稳定应用身份，但 IFEO 过滤绑定本�
 卸载顺序为先解除本产品注册并回读确认，再删除受保护入口。host 缺失、目录移动、版本不匹配或 store 损坏时，应由独立可运行的 `integration repair` / `ifeo disable` 前台流程恢复；其提权侧读取受保护安装记录，不要求 coordinator 成功启动。不能依靠已经损坏的 IFEO 入口自救。
 
 停用失败时保留 host 与恢复材料，并明确未解除接管。恢复旧值只在本产品当前值仍匹配且没有新所有者时执行。注册表、副本文件与 manifest 不具备全局事务性，各断点都必须可核对恢复。
+
+2026-09-20 平台实施补充：受保护记录位于 64 位视图 `HKLM\SOFTWARE\AppProxyRust\Ifeo`，`Registrations` 子键以 UUID 命名单个 REG_BINARY 保存 Installing/Active/Removing/Removed 状态；单值发布消除“建了空记录子项但未写入内容”的断点。父值备份绑定 EXE 名称和格式版本，记录原始 UseFilter 的类型和值。规则本身仍位于系统 IFEO 树的精确路径过滤项。只接受 UseFilter 缺失、DWORD 0 或 1；第三方 Debugger、未知值和冲突过滤项保留并报告。
+
+安装在持久 intent 后写 Owner/FilterFullPath，再启用 UseFilter，最后写 Debugger；解除先保存 Removing，再禁用自身 Debugger、删除仍匹配的自有过滤项，最后按共享参与者恢复父值并保存 Removed。管理员保护的全局 mutex 串行化本产品操作，不能使外部管理员写入成为全局事务；每步前后仍须核对，冲突不覆盖。逐级打开注册表项拒绝链接，受保护记录与 mutex 核对 owner/DACL。只读系统 ACL 核验接受 Windows 的 CREATOR_OWNER 继承占位，但实际 owner 仍须是管理员、SYSTEM 或 TrustedInstaller。[CREATOR_OWNER 说明](https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids)。
+
+本机注册表事务 API 实测返回 6801，因此生产实现不依赖 TxR。15 项专项测试在随机独占 HKCU 子树进行真实写入，并只读检查 HKLM ACL；覆盖 7 个安装、5 个解除持久断点及首次记录发布前中断。这些结果不替代真实 HKLM 过滤匹配、提权 mutex/ACL 或启动语义验收。已完成记录暂保留，最多 512 条；到达上限拒绝新增但允许已有规则核验/解除，后续维护需要处理历史记录整理。当前没有生产 CLI 启用规则，必须先接通并验收启动入口和 continuation。
 
 **8. 用户界面与诊断契约**
 

@@ -400,3 +400,15 @@ run 只供已核对普通 coordinator 使用，显式当前 session>0，空替�
 独立审查及修复复审通过。真实提权安装、普通监听监督、登录任务、自动 Guard 和 IFEO 仍待完成，不能据本批宣称保护已激活。
 
 最终全量 workspace 267 项通过、26 项顶层 ignored；新增等待夹具 child 由父测试显式运行。clippy -D warnings、fmt/diff 通过。测试 coordinator PID 23544 已核对空闲退出；未保留运行的测试应用或提权 helper。提交主题 `feat(rust): authorize guard listener installation from foreground`。
+
+**IFEO 注册与恢复平台层（2026-09-20）**
+
+新增平台注册 API，仅接受已登记、绑定代理且启用 Guard 的原版，固定受保护 host generation 与精确 EXE/fileID。实际规则使用 64 位 IFEO 视图的 UseFilter/FilterFullPath，跨 store 物理映像重复所有者拒绝；没有生产 CLI 调用这些写入，只有分身时不创建原版注册。
+
+受保护 HKLM 产品记录用 UUID 命名单个 REG_BINARY 发布 Installing/Active/Removing/Removed；持久 intent 先于过滤项，Debugger 最后启用。解除先保存 Removing，逐项验证自有内容后禁用 Debugger、删除自身过滤项，最后恢复共享父值。Unicode 同名父项使用 Windows ordinal 大小写比较，未完成登记也参与共享引用。最后一个参与者才恢复原值，第三方改动/过滤项、未知格式或保护权限不匹配均保留并报告。全局 mutex 核验管理员 owner 与精确权限；逐级 OPEN_LINK 拒绝注册表链接跳转。系统 ACL 的 CREATOR_OWNER 是继承占位，实际 owner 仍须可信。
+
+最初实际测试发现 Windows 注册表事务返回 6801，已移除 TxR 依赖。独立审查发现首次记录子键创建后、内容写入前的空洞，以及无记录时认领既有同名过滤项问题：分别改为单值发布和提前拒绝。记录和父过滤项数量上限均在新增前检查，512 条现存记录仍可解除，避免产品写出自身无法读取的状态。
+
+15 项专项测试全部通过并经独立复跑：原始 UseFilter 缺失/0/1 与 mitigation 保留，重复安装，第三方冲突和物理别名，Unicode 共享父项及新一轮备份，Installing/Removing 参与者，7 个安装和 5 个解除持久断点，首次 intent 发布前中断，陌生空过滤项拒绝、丢失父项不重建，注册表原生链接拒绝，容量满后解除，严格记录/路径/字符串，以及实际 HKLM 根 ACL 只读检查。所有写入限随机自有 HKCU 子树并清理；没有 UAC、实际 HKLM IFEO 修改或用户应用操作。
+
+全量 workspace 293 项通过、26 项顶层 ignored（.tools/ifeo-rules-final-tests.log）；随后补数量上限检查与回归，最终 15 项专项、workspace clippy -D warnings、fmt/diff 通过。真实提权 mutex/ACL、规则匹配、启动入口、Electron 辅助 continuation 与完整应用链路仍待验收，不能称 IFEO 已启用。
