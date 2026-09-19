@@ -45,13 +45,20 @@ fn bounded_queue_deduplicates_and_reports_overflow_decode_loss_and_end() {
     let batch = state.drain(epoch).unwrap();
     assert_eq!(batch.sequence, 2);
     assert_eq!(batch.epoch, epoch);
-    assert_eq!(batch.hints.len(), QUEUE_LIMIT);
+    assert_eq!(batch.hints.len(), BATCH_LIMIT);
     assert_eq!(batch.hints[0].event_time, 2);
     assert_eq!(batch.dropped, 1);
     assert_eq!(batch.decode_failures, 1);
     assert_eq!(batch.etw_events_lost, 2);
     assert_eq!(batch.etw_buffers_lost, 1);
     assert!(batch.full_scan_required && batch.ended.is_none());
+    let mut total = batch.hints.len();
+    while total < QUEUE_LIMIT {
+        let batch = state.drain(epoch).unwrap();
+        assert!(batch.hints.len() <= BATCH_LIMIT);
+        total += batch.hints.len();
+    }
+    assert_eq!(total, QUEUE_LIMIT);
     assert!(!state.drain(epoch).unwrap().full_scan_required);
     state.lost(0, 0); // Rollback/wrap is also uncertain.
     assert!(state.drain(epoch).unwrap().full_scan_required);
@@ -59,6 +66,29 @@ fn bounded_queue_deduplicates_and_reports_overflow_decode_loss_and_end() {
     let end = state.drain(epoch).unwrap();
     assert!(end.full_scan_required);
     assert_eq!(end.ended, Some(ERROR_CANCELLED));
+}
+
+#[test]
+fn ended_listener_delivers_every_queued_hint_in_bounded_batches_before_end() {
+    let state = State::new();
+    let epoch = Uuid::new_v4();
+    for pid in 1..=QUEUE_LIMIT as u32 {
+        state.push(hint(pid, 1, &image("😀.exe")).unwrap());
+    }
+    state.ended.store(ERROR_CANCELLED, Ordering::Release);
+    let mut pids = Vec::new();
+    for index in 0..QUEUE_LIMIT / BATCH_LIMIT {
+        let batch = state.drain(epoch).unwrap();
+        assert_eq!(batch.sequence, index as u64 + 1);
+        assert_eq!(batch.hints.len(), BATCH_LIMIT);
+        assert!(batch.full_scan_required);
+        assert_eq!(
+            batch.ended,
+            (index == QUEUE_LIMIT / BATCH_LIMIT - 1).then_some(ERROR_CANCELLED)
+        );
+        pids.extend(batch.hints.into_iter().map(|hint| hint.pid));
+    }
+    assert_eq!(pids, (1..=QUEUE_LIMIT as u32).collect::<Vec<_>>());
 }
 
 #[test]

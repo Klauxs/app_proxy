@@ -163,7 +163,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     }
 }
 
-async fn receive_frame<T: AsyncRead + Unpin, M: DeserializeOwned>(
+pub(crate) async fn receive_frame<T: AsyncRead + Unpin, M: DeserializeOwned>(
     stream: &mut T,
     timeout: Duration,
 ) -> Result<M> {
@@ -181,7 +181,7 @@ async fn receive_frame<T: AsyncRead + Unpin, M: DeserializeOwned>(
     .map_err(|_| Error::Invalid("IPC_FRAME_TIMEOUT"))?
 }
 
-async fn send_frame<T: AsyncWrite + Unpin, M: Serialize>(
+pub(crate) async fn send_frame<T: AsyncWrite + Unpin, M: Serialize>(
     stream: &mut T,
     message: &M,
     timeout: Duration,

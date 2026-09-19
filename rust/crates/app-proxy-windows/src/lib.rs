@@ -6,6 +6,7 @@ pub mod core_requests;
 pub mod core_state;
 pub mod core_update;
 pub mod etw;
+pub mod event_pipe;
 pub mod identity;
 pub mod ifeo;
 pub mod installation;

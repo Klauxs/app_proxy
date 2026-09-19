@@ -23,6 +23,9 @@ use windows_sys::{
 
 const PROVIDER: GUID = GUID::from_u128(0x22fb2cd6_0e7b_422b_a0c7_2fad1fd0e716);
 const QUEUE_LIMIT: usize = 1024;
+// At most 128 * 260 Unicode scalars plus metadata, safely below the pipe's
+// 1 MiB JSON budget even for four-byte characters or escaped ASCII.
+pub(crate) const BATCH_LIMIT: usize = 128;
 const RUNNING: u32 = u32::MAX;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -127,16 +130,19 @@ impl State {
             .checked_add(1)
             .ok_or(Error::Invalid("ETW_SEQUENCE_EXHAUSTED"))?;
         let ended = self.ended.load(Ordering::Acquire);
+        let count = queue.hints.len().min(BATCH_LIMIT);
+        let hints = queue.hints.drain(..count).collect();
         Ok(EventBatch {
             epoch,
             sequence: queue.sequence,
-            hints: queue.hints.drain(..).collect(),
+            hints,
             full_scan_required: std::mem::take(&mut queue.full_scan) || ended != RUNNING,
             dropped: queue.dropped,
             decode_failures: queue.decode_failures,
             etw_events_lost: self.events_lost.load(Ordering::Acquire),
             etw_buffers_lost: self.buffers_lost.load(Ordering::Acquire),
-            ended: (ended != RUNNING).then_some(ended),
+            // Deliver queued hints before sealing the stream.
+            ended: (ended != RUNNING && queue.hints.is_empty()).then_some(ended),
         })
     }
 }
