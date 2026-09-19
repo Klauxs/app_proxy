@@ -272,3 +272,10 @@ Codex 首次启动被 INSTANCE_PROCESS_UNKNOWN 拒绝。只读核对发现原版
 修复后 Codex 原版保持 PID 32152/原创建时间，分身主 PID 45480/42396 同时存在各自窗口。两个独立 user-data 均写入浏览器文件，两个 app-home 均写入各自 config.toml、installation_id 和 sqlite 状态；未读取文件秘密内容。重复启动 A 返回原 attempt/PID。验收后对本次分身尝试窗口关闭，再通过已核对且保留的测试进程句柄清理残留；原版仍存活。四个 Claude/Codex attempt 最终均 session_exited=true、resource_pending=false。
 
 新增真实父子 fixture 回归覆盖原版祖先→Other、目标祖先→Target、保持 Auxiliary 角色、父退出拒绝及复用/跨 session 身份拒绝。全量 206 项通过、20 项顶层 ignored；独立审查通过并复跑归属 5 项、查询 6 项，clippy -D warnings、fmt/diff 通过。实机检查没有登录、发送消息或验证真实代理流量，也未完成包升级、Guard/IFEO 或发布验收；不同目录写入与并存不能单独证明全部账户隔离行为。
+**精确进程正常关闭平台能力（2026-09-20）**
+
+新增 stop_exact：要求普通用户、同 SID/session 和完整进程身份，禁止停止自身；打开后核对创建时间，PID 已复用返回 AlreadyExited 且不影响新进程。保留查询句柄，枚举目标窗口并在每次关闭消息前重新核对窗口 PID；消息总预算 1 秒、单窗最多 100ms。使用 [SendMessageTimeoutW](https://learn.microsoft.com/zh-cn/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw) 的 BLOCK/ABORTIFHUNG/ERRORONEXIT，关闭请求为 best effort，只有进程句柄已 signaled 才报告退出。正常关闭等待 1.5 秒；force=false 返回 StillRunning。force=true 才申请终止权限、核对完整身份并终止该句柄，最多再等待 3 秒；不遍历或终止子进程。
+
+3 项真实隐藏窗口夹具测试通过：正常关闭/无关窗口保留/身份伪造及 PID 复用拒绝；窗口处理 WM_CLOSE 但保持存活时不误报退出、显式 force 后结束；窗口线程挂起时有限等待后精确结束。夹具只创建自己的不可见窗口，不关闭用户应用。独立 review 通过并复跑全部 3 项通过。全量 workspace 209 项通过、21 项顶层 ignored，最终 1.5 秒等待修订后定向测试再次通过；clippy -D warnings、fmt/diff 通过。
+
+该 API 的调用方仍必须证明实例归属和停止授权；结果仅针对一个进程，不表示辅助进程已消失。窗口句柄是瞬时对象，关闭消息只是尽力请求，不能作为可信管理授权或退出回执。实例级停机、Guard 动作/限流和用户命令仍待接入。
