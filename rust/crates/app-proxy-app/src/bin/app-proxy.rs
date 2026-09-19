@@ -14,6 +14,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 启动已登记实例，或查询/取消原启动请求
+    Launch(app_proxy_app::launch_cli::Command),
     /// 创建、查看和编辑手动代理配置
     Proxy {
         #[command(subcommand)]
@@ -108,6 +110,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     identity::assert_ordinary_user()?;
     let cli = Cli::parse();
     match cli.command {
+        Commands::Launch(command) => {
+            let root = cli
+                .home
+                .map(Ok)
+                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            runtime.block_on(app_proxy_app::launch_cli::run(root, command))?;
+            Ok(())
+        }
         Commands::Proxy { command, json } => {
             let root = cli
                 .home
@@ -158,7 +172,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 print(&status)
             } else {
                 println!(
-                    "协调进程已连接；配置版本 {}，应用 {}，实例 {}，代理 {}。\n当前为基础实现，尚未提供应用启动与保护。",
+                    "协调进程已连接；配置版本 {}，应用 {}，实例 {}，代理 {}。\n可使用 launch 启动普通 EXE；MSIX、Guard/IFEO 和日常菜单仍在实现中。",
                     status.revision, status.applications, status.instances, status.profiles
                 );
                 Ok(())

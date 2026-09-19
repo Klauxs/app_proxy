@@ -93,6 +93,10 @@ pub struct LaunchAttempt {
     /// Preserve a terminal receipt until the cross-store claim is synchronized.
     #[serde(default)]
     pub resource_pending: bool,
+    /// Optional precondition for an automatic foreground continuation. It is
+    /// fixed at first admission and cannot be loosened by request replays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
 }
 impl LaunchAttempt {
     pub fn reserves_instance(&self) -> bool {

@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 7;
+const PROTOCOL_MINOR: u32 = 8;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -78,6 +78,8 @@ enum Operation {
     Launch {
         instance_id: Uuid,
         origin: LaunchOrigin,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<u64>,
     },
     LaunchStatus {
         request_id: Uuid,
@@ -401,16 +403,20 @@ async fn handle(
     if let Operation::Launch {
         instance_id,
         origin,
+        expected_revision,
     } = request.operation
     {
         let engine = shared.launch.clone();
         let runtime = tokio::runtime::Handle::current();
         let admitted = tokio::task::spawn_blocking(move || {
-            runtime.block_on(engine.submit(LaunchRequest {
-                request_id,
-                instance_id,
-                origin,
-            }))
+            runtime.block_on(engine.submit_at_revision(
+                LaunchRequest {
+                    request_id,
+                    instance_id,
+                    origin,
+                },
+                expected_revision,
+            ))
         })
         .await
         .map_err(|_| Error::Invalid("LAUNCH_WORKER_FAILED"))?;
@@ -542,6 +548,16 @@ async fn rpc(
     {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
+    if matches!(
+        &request.operation,
+        Operation::Launch {
+            expected_revision: Some(_),
+            ..
+        }
+    ) && server.protocol_minor < 8
+    {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     let request_id = request.request_id;
     connection.send(&request).await?;
     let response: Response = connection.receive().await?;
@@ -565,6 +581,8 @@ async fn rpc(
             "CATALOG_ENTRY_TOO_LARGE" => "CATALOG_ENTRY_TOO_LARGE",
             "LAUNCH_ATTEMPT_NOT_FOUND" => "LAUNCH_ATTEMPT_NOT_FOUND",
             "LAUNCH_OPERATION_LIMIT" => "LAUNCH_OPERATION_LIMIT",
+            "LAUNCH_CONFIG_CHANGED" => "LAUNCH_CONFIG_CHANGED",
+            "INSTANCE_RESOURCE_BUSY" => "INSTANCE_RESOURCE_BUSY",
             "INSTANCE_NOT_FOUND" => "INSTANCE_NOT_FOUND",
             "INSTANCE_RUNNING_WITH_OTHER_CONFIG" => "INSTANCE_RUNNING_WITH_OTHER_CONFIG",
             "INSTANCE_RUNNING_IN_OTHER_SESSION" => "INSTANCE_RUNNING_IN_OTHER_SESSION",
@@ -643,12 +661,21 @@ pub async fn core_status(root: PathBuf) -> Result<crate::core_manager::CoreSnaps
 /// Keep the request ID across transport failures. Submission acknowledges the
 /// durable attempt; only its queried phase describes the launch result.
 pub async fn launch(root: PathBuf, request: LaunchRequest) -> Result<LaunchAttempt> {
+    launch_at_revision(root, request, None).await
+}
+
+pub(crate) async fn launch_at_revision(
+    root: PathBuf,
+    request: LaunchRequest,
+    expected_revision: Option<u64>,
+) -> Result<LaunchAttempt> {
     match client_operation(
         root,
         request.request_id,
         Operation::Launch {
             instance_id: request.instance_id,
             origin: request.origin,
+            expected_revision,
         },
     )
     .await?

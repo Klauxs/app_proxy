@@ -15,6 +15,68 @@ fn hold_replacement(path: &Path) -> std::fs::File {
 }
 
 #[tokio::test]
+async fn continuation_revision_is_fixed_at_admission_and_rechecked_at_dispatch() {
+    let fixture = Fixture::new(true);
+    let revision = fixture.engine.configuration.snapshot().unwrap().revision;
+    let stale = fixture.request();
+    assert!(matches!(
+        fixture
+            .engine
+            .submit_at_revision(stale.clone(), Some(revision - 1))
+            .await,
+        Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"))
+    ));
+    assert!(fixture.engine.status(stale.request_id).unwrap().is_none());
+    let gate = Arc::new(tokio::sync::Notify::new());
+    fixture.engine.hold_dispatch(gate.clone());
+    let guarded = fixture.request();
+    fixture
+        .engine
+        .submit_at_revision(guarded.clone(), Some(revision))
+        .await
+        .unwrap();
+    fixture.ready(guarded.request_id).await;
+    assert_eq!(
+        fixture
+            .engine
+            .submit(guarded.clone())
+            .await
+            .unwrap()
+            .expected_revision,
+        Some(revision)
+    );
+    // Even display-only edits, normally allowed by dependency_digest, invalidate
+    // a foreground continuation's explicit revision precondition.
+    fixture.edit(|m| m.instances[0].name = "changed during foreground repair".into());
+    gate.notify_one();
+    let failed = fixture.result(guarded.request_id).await;
+    assert!(
+        matches!(failed.phase, LaunchPhase::Failed { code } if code == "LAUNCH_CONFIG_CHANGED")
+    );
+    assert!(failed.dispatch_id.is_none());
+    assert_eq!(std::fs::read_dir(&fixture.events).unwrap().count(), 0);
+    let plain = fixture.request();
+    fixture.engine.submit(plain.clone()).await.unwrap();
+    fixture.ready(plain.request_id).await;
+    let guarded = fixture.request();
+    let current = fixture.engine.configuration.snapshot().unwrap().revision;
+    assert!(matches!(
+        fixture
+            .engine
+            .submit_at_revision(guarded.clone(), Some(current))
+            .await,
+        Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"))
+    ));
+    assert!(fixture.engine.status(guarded.request_id).unwrap().is_none());
+    fixture.engine.cancel(plain.request_id).unwrap();
+    gate.notify_one();
+    assert!(matches!(
+        fixture.result(plain.request_id).await.phase,
+        LaunchPhase::Cancelled {}
+    ));
+}
+
+#[tokio::test]
 async fn interrupted_reserved_preparation_is_reclaimed_after_its_local_history_expires() {
     for coordinator_restart in [true, false] {
         let fixture = Fixture::new(true);

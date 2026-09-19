@@ -2,6 +2,7 @@
 use crate::{
     coordinator,
     core_manager::CoreObserved,
+    foreground::Foreground,
     instance_cli::{Failure, fail},
 };
 use app_proxy_core::core_control::{CoreAction, CoreOutcome, CoreRequestStatus, InstallPhase};
@@ -141,6 +142,7 @@ pub(crate) fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> 
 }
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
+    let mut foreground = Foreground::new();
     let mut apply = false;
     let action = match command {
         Command::Status => {
@@ -217,48 +219,28 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
     };
     let mut action = action;
     action.normalize().map_err(|e| fail(2, e.0))?;
-    let (mut id, mut status, interrupted) = submit(root.clone(), action.clone(), json).await;
+    let (mut id, mut status, interrupted) =
+        submit(root.clone(), action.clone(), json, &mut foreground).await;
     if interrupted {
         output(id, &status, json)?;
-        return Err(fail(5, "已返回原流程；如安装结果未确认，请查询原编号。"));
+        return Err(fail(5, "已返回原流程；如操作结果未确认，请查询原编号。"));
     }
     if missing_binary(&status)
         && !json
         && std::io::stdin().is_terminal()
         && std::io::stderr().is_terminal()
     {
-        if !choose("未找到可用的 sing-box。", "安装并继续")? {
-            return Err(fail(5, "已返回；保留代理配置。"));
-        }
-        loop {
-            let (install_id, installed, interrupted) =
-                submit(root.clone(), CoreAction::Install {}, false).await;
-            output(install_id, &installed, false)?;
-            if interrupted {
-                return Err(fail(5, "已返回原流程；不会继续启动。"));
-            }
-            match &installed {
-                Some(CoreRequestStatus::Complete {
-                    outcome: CoreOutcome::Installed { .. },
-                    ..
-                }) => break,
-                Some(CoreRequestStatus::Complete {
-                    outcome: CoreOutcome::Failed { code },
-                    ..
-                }) => {
-                    eprintln!("安装失败：{code}");
-                    if !choose("可以重新下载安装。", "重试")? {
-                        return Err(fail(5, "已返回；保留代理配置。"));
-                    }
-                }
-                _ => return outcome(installed),
-            }
-        }
+        install_interactively(root.clone(), &mut foreground).await?;
         // Only the still-active client resumes a definitively failed start.
         // Completing installation alone never starts a core or an application.
-        let resumed = submit(root.clone(), action.clone(), false).await;
+        foreground.check()?;
+        let resumed = submit(root.clone(), action.clone(), false, &mut foreground).await;
         id = resumed.0;
         status = resumed.1;
+        if resumed.2 {
+            output(id, &status, json)?;
+            return Err(fail(5, "已返回；请查询原操作编号。"));
+        }
     }
     if matches!(&status, Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == "CORE_RECONFIGURE_REQUIRES_CONFIRMATION")
         && let CoreAction::Start { profiles, required } = action
@@ -266,7 +248,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         let catalog = coordinator::catalog(root.clone())
             .await
             .map_err(|e| fail(3, e.to_string()))?;
-        return prepare_and_apply(
+        return prepare_and_apply_with_foreground(
             root,
             CoreAction::PrepareExpand {
                 expected_revision: catalog.revision,
@@ -275,6 +257,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             },
             apply,
             json,
+            &mut foreground,
         )
         .await;
     }
@@ -286,20 +269,54 @@ fn missing_binary(status: &Option<CoreRequestStatus>) -> bool {
     matches!(status, Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == "CORE_BINARY_MISSING")
 }
 
-fn choose(message: &str, primary: &str) -> Result<bool, Failure> {
+pub(crate) fn interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+pub(crate) async fn install_interactively(
+    root: PathBuf,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    if !choose("未找到可用的 sing-box。", "安装并继续", foreground).await? {
+        return Err(fail(5, "已返回；保留代理配置。"));
+    }
+    loop {
+        let (id, installed, interrupted) =
+            submit(root.clone(), CoreAction::Install {}, false, foreground).await;
+        output(id, &installed, false)?;
+        if interrupted {
+            return Err(fail(5, "已返回原流程；不会继续启动。"));
+        }
+        match &installed {
+            Some(CoreRequestStatus::Complete {
+                outcome: CoreOutcome::Installed { .. },
+                ..
+            }) => return Ok(()),
+            Some(CoreRequestStatus::Complete {
+                outcome: CoreOutcome::Failed { code },
+                ..
+            }) => {
+                eprintln!("安装失败：{code}");
+                if !choose("可以重新下载安装。", "重试", foreground).await? {
+                    return Err(fail(5, "已返回；保留代理配置。"));
+                }
+            }
+            _ => return outcome(installed),
+        }
+    }
+}
+
+async fn choose(
+    message: &str,
+    primary: &str,
+    foreground: &mut Foreground,
+) -> Result<bool, Failure> {
     loop {
         eprint!("{message}\n1. {primary}（默认）  2. 返回\n请选择 [1/2]：");
         std::io::stderr()
             .flush()
             .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
-        let mut input = String::new();
-        if std::io::stdin()
-            .read_line(&mut input)
-            .map_err(|_| fail(10, "PROMPT_READ_FAILED"))?
-            == 0
-        {
-            return Ok(false);
-        }
+        let input = foreground.read_line().await?;
         match input.trim() {
             "" | "1" => return Ok(true),
             "2" => return Ok(false),
@@ -312,8 +329,12 @@ pub(crate) async fn submit(
     root: PathBuf,
     action: CoreAction,
     json: bool,
+    foreground: &mut Foreground,
 ) -> (Uuid, Option<CoreRequestStatus>, bool) {
     let id = Uuid::new_v4();
+    if foreground.is_cancelled() {
+        return (id, None, true);
+    }
     let installing = matches!(action, CoreAction::Install {});
     // Persist this in the caller's terminal before any request can be accepted.
     eprintln!("请求编号：{id}；结果不明时运行 core request {id} 查询。");
@@ -328,23 +349,19 @@ pub(crate) async fn submit(
     let started = tokio::time::Instant::now();
     let mut deadline = started + Duration::from_secs(if installing { 720 } else { 90 });
     let mut progress_at = started;
-    let interrupt = tokio::signal::ctrl_c();
-    tokio::pin!(interrupt);
     let mut interrupted = false;
-    let mut signal_available = true;
     while matches!(status, Some(CoreRequestStatus::Pending { .. }))
         && tokio::time::Instant::now() < deadline
     {
         tokio::select! {
-            signal = &mut interrupt, if installing && signal_available => {
-                signal_available = false;
-                if signal.is_ok() {
-                    interrupted = true;
+            _ = foreground.cancelled(), if !interrupted => {
+                interrupted = true;
+                if installing {
                     let cancel_id = Uuid::new_v4();
                     eprintln!("正在请求取消安装；取消请求编号 {cancel_id}。");
                     let _ = coordinator::control_core(root.clone(), cancel_id, CoreAction::CancelInstall { request_id: id }).await;
-                    deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-                }
+                } else { eprintln!("已停止后续操作；正在核对已接受的共享代理操作，应用会保留。"); }
+                deadline = tokio::time::Instant::now() + Duration::from_secs(20);
             }
             _ = tokio::time::sleep(Duration::from_millis(250)) => {}
         }
@@ -374,7 +391,7 @@ pub(crate) async fn submit(
             .ok()
             .flatten();
     }
-    (id, status, interrupted)
+    (id, status, interrupted || foreground.is_cancelled())
 }
 
 pub(crate) async fn prepare_and_apply(
@@ -383,7 +400,22 @@ pub(crate) async fn prepare_and_apply(
     apply: bool,
     json: bool,
 ) -> Result<(), Failure> {
-    let (request_id, status, _) = submit(root.clone(), action, json).await;
+    prepare_and_apply_with_foreground(root, action, apply, json, &mut Foreground::new()).await
+}
+
+async fn prepare_and_apply_with_foreground(
+    root: PathBuf,
+    action: CoreAction,
+    apply: bool,
+    json: bool,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    foreground.check()?;
+    let (request_id, status, interrupted) = submit(root.clone(), action, json, foreground).await;
+    if interrupted {
+        output(request_id, &status, json)?;
+        return Err(fail(5, "已停止后续操作；请查询原请求编号。"));
+    }
     let Some(CoreRequestStatus::Complete {
         outcome: CoreOutcome::Prepared { ref impact },
         ..
@@ -398,31 +430,12 @@ pub(crate) async fn prepare_and_apply(
             output(request_id, &status, true)?;
         }
     } else {
-        println!("计划 {plan_id}：候选检查通过；将重启共享代理。以下代理的连接会短暂中断：");
-        for id in &impact.affected_profiles {
-            println!("  代理 {id}");
-        }
-        for id in &impact.added_profiles {
-            println!("  新增代理 {id}");
-        }
-        println!("使用这些代理的已登记实例（不代表正在运行）：");
-        for id in &impact.bound_instances {
-            println!("  实例 {id}");
-        }
-        println!("应用进程保留；切换失败会尝试恢复旧代理。");
+        show_impact(impact);
     }
     let confirmed = if apply {
         true
-    } else if !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-        eprint!("1. 应用变更  2. 返回（默认）\n请选择 [1/2]：");
-        std::io::stderr()
-            .flush()
-            .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|_| fail(10, "PROMPT_READ_FAILED"))?;
-        answer.trim() == "1"
+    } else if !json && interactive() {
+        confirm_impact(foreground).await?
     } else {
         false
     };
@@ -432,7 +445,39 @@ pub(crate) async fn prepare_and_apply(
             format!("配置未切换；确认此计划可运行 core apply-update {plan_id}。"),
         ));
     }
-    let (id, status, _) = submit(root, CoreAction::ApplyUpdate { plan_id }, json).await;
+    foreground.check()?;
+    let (id, status, interrupted) =
+        submit(root, CoreAction::ApplyUpdate { plan_id }, json, foreground).await;
     output(id, &status, json)?;
+    if interrupted {
+        return Err(fail(5, "已停止后续操作；请查询原请求编号。"));
+    }
     outcome(status)
+}
+
+pub(crate) fn show_impact(impact: &app_proxy_core::core_control::UpdateImpact) {
+    println!(
+        "计划 {}：候选检查通过；将重启共享代理。以下代理的连接会短暂中断：",
+        impact.plan_id
+    );
+    for id in &impact.affected_profiles {
+        println!("  代理 {id}");
+    }
+    for id in &impact.added_profiles {
+        println!("  新增代理 {id}");
+    }
+    println!("使用这些代理的已登记实例（不代表正在运行）：");
+    for id in &impact.bound_instances {
+        println!("  实例 {id}");
+    }
+    println!("应用进程保留；切换失败会尝试恢复旧代理。");
+}
+
+pub(crate) async fn confirm_impact(foreground: &mut Foreground) -> Result<bool, Failure> {
+    eprint!("1. 应用变更  2. 返回（默认）\n请选择 [1/2]：");
+    std::io::stderr()
+        .flush()
+        .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
+    let answer = foreground.read_line().await?;
+    Ok(answer.trim() == "1")
 }

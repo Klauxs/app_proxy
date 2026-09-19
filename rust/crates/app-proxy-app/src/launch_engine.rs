@@ -68,6 +68,14 @@ impl LaunchEngine {
     /// Must be invoked on the coordinator runtime. Return of this ACK is not
     /// success; clients query the durable attempt until it reaches a result.
     pub async fn submit(self: &Arc<Self>, request: LaunchRequest) -> Result<LaunchAttempt> {
+        self.submit_at_revision(request, None).await
+    }
+
+    pub(crate) async fn submit_at_revision(
+        self: &Arc<Self>,
+        request: LaunchRequest,
+        expected_revision: Option<u64>,
+    ) -> Result<LaunchAttempt> {
         let mut active = self
             .active
             .lock()
@@ -111,7 +119,7 @@ impl LaunchEngine {
                 }
             }
         }
-        let admission = store.begin_launch(&request, self.epoch)?;
+        let admission = store.begin_launch_at_revision(&request, self.epoch, expected_revision)?;
         if admission.is_new {
             active.insert(admission.attempt.id);
             let job = Job {

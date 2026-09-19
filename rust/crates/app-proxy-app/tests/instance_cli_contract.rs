@@ -403,6 +403,56 @@ fn preview_case(expanding: bool) {
             "--json",
         ]
     };
+    if let Some(added) = &added {
+        let created = ok(
+            &root,
+            &[
+                "instance",
+                "create",
+                "--exe",
+                _temp.path().join("fixture.exe").to_str().unwrap(),
+                "--adapter",
+                "environment",
+                "--proxy",
+                added,
+                "--json",
+            ],
+        );
+        let instance = created["receipt"]["entity_id"].as_str().unwrap();
+        let preview = cli(&root, &["launch", instance, "--json"]);
+        assert_eq!(
+            preview.status.code(),
+            Some(5),
+            "{}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+        assert_eq!(
+            preview["attempt"]["phase"]["code"],
+            "CORE_RECONFIGURE_REQUIRES_CONFIRMATION"
+        );
+        assert!(preview["attempt"]["dispatch_id"].is_null());
+        assert_eq!(preview["requires_action"]["action"], "confirm_core_update");
+        let impact = &preview["requires_action"]["impact"];
+        assert_eq!(impact["affected_profiles"], serde_json::json!([profile]));
+        assert_eq!(impact["added_profiles"], serde_json::json!([added]));
+        assert!(core.0.is_running().unwrap());
+        let replay = cli(
+            &root,
+            &[
+                "launch",
+                instance,
+                "--request-id",
+                preview["request_id"].as_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert_eq!(replay.status.code(), Some(3));
+        assert_eq!(
+            ok(&root, &["core", "status", "--json"])["update"]["impact"]["plan_id"],
+            impact["plan_id"]
+        );
+    }
     let preview = cli(&root, &args);
     assert_eq!(preview.status.code(), Some(5));
     let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();

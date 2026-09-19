@@ -87,6 +87,15 @@ impl Store {
         request: &LaunchRequest,
         epoch: Uuid,
     ) -> Result<LaunchAdmission> {
+        self.begin_launch_at_revision(request, epoch, None)
+    }
+
+    pub fn begin_launch_at_revision(
+        &mut self,
+        request: &LaunchRequest,
+        epoch: Uuid,
+        expected_revision: Option<u64>,
+    ) -> Result<LaunchAdmission> {
         if request.request_id.is_nil() || request.instance_id.is_nil() || epoch.is_nil() {
             return Err(Error::Invalid("INVALID_LAUNCH_REQUEST"));
         }
@@ -114,6 +123,10 @@ impl Store {
                 is_new: false,
             });
         }
+        let revision = self.load()?.revision;
+        if expected_revision.is_some_and(|expected| expected != revision) {
+            return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
+        }
         if !self
             .load()?
             .instances
@@ -140,6 +153,14 @@ impl Store {
             .iter()
             .find(|a| a.instance_id == request.instance_id && a.reserves_instance());
         let is_new = existing.is_none();
+        if expected_revision.is_some()
+            && existing.is_some_and(|a| {
+                !matches!(a.phase, LaunchPhase::Confirmed { .. })
+                    && a.expected_revision != expected_revision
+            })
+        {
+            return Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"));
+        }
         let attempt = existing.cloned().unwrap_or(LaunchAttempt {
             id: request.request_id,
             instance_id: request.instance_id,
@@ -153,6 +174,7 @@ impl Store {
             dispatch_id: None,
             session_exited: false,
             resource_pending: false,
+            expected_revision,
         });
         if is_new {
             journal.attempts.push(attempt.clone());
@@ -243,6 +265,13 @@ impl Store {
         let attempt = attempt_mut(&mut journal, id, epoch, &LaunchPhase::ReadyToSpawn {})?;
         if attempt.cancel_requested {
             return Err(Error::Invalid("LAUNCH_CANCEL_REQUESTED"));
+        }
+        let revision = self.load()?.revision;
+        if attempt
+            .expected_revision
+            .is_some_and(|expected| expected != revision)
+        {
+            return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
         }
         let dispatch_id = Uuid::new_v4();
         attempt.dispatch_id = Some(dispatch_id);
@@ -539,6 +568,7 @@ impl Store {
                 || a.finished_at.is_some() != terminal
                 || a.finished_at.is_some_and(|at| at < a.accepted_at)
                 || (a.session_exited && !matches!(a.phase, LaunchPhase::Confirmed { .. }))
+                || a.expected_revision == Some(0)
                 || (a.resource_pending
                     && a.dispatch_id.is_none()
                     && !matches!(&a.phase, LaunchPhase::Failed { code } if code == "INSTANCE_RESOURCE_RELEASE_FAILED"))

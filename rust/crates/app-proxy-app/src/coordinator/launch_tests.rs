@@ -177,6 +177,7 @@ async fn lost_launch_ack_replays_once_preserves_application_and_owner_observes_e
             operation: Operation::Launch {
                 instance_id: fixture.instance,
                 origin: LaunchOrigin::Interactive,
+                expected_revision: None,
             },
         })
         .await
@@ -192,6 +193,7 @@ async fn lost_launch_ack_replays_once_preserves_application_and_owner_observes_e
             Operation::Launch {
                 instance_id: fixture.instance,
                 origin: LaunchOrigin::Interactive,
+                expected_revision: None,
             },
         )
         .await
@@ -207,7 +209,8 @@ async fn lost_launch_ack_replays_once_preserves_application_and_owner_observes_e
                 request_id,
                 Operation::Launch {
                     instance_id: fixture.instance,
-                    origin: LaunchOrigin::Guard
+                    origin: LaunchOrigin::Guard,
+                    expected_revision: None,
                 }
             )
             .await,
@@ -258,6 +261,7 @@ async fn launch_wait_does_not_hold_rpc_slots_and_cancellation_releases_idle_owne
                 Operation::Launch {
                     instance_id: fixture.instance,
                     origin: LaunchOrigin::Interactive,
+                    expected_revision: None,
                 },
             )
             .await
@@ -300,41 +304,44 @@ async fn launch_wait_does_not_hold_rpc_slots_and_cancellation_releases_idle_owne
 
 #[tokio::test]
 async fn launch_client_rejects_old_minor_before_sending_operation() {
-    let fixture = Fixture::new();
-    let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
-    let status = fixture.shared.identity.clone();
-    let server = tokio::spawn(async move {
-        let mut connection = listener.accept().await.unwrap();
-        connection.receive::<Hello>().await.unwrap();
-        let mut greeting = hello(status.store_id, status.session_id, Some(status.epoch));
-        greeting.protocol_minor = 6;
-        connection
-            .send(&Welcome::Ready { hello: greeting })
-            .await
-            .unwrap();
-        assert!(connection.receive::<Request>().await.is_err());
-    });
-    assert!(matches!(
-        fixture
-            .rpc(
-                Uuid::new_v4(),
-                Operation::Launch {
-                    instance_id: fixture.instance,
-                    origin: LaunchOrigin::Interactive
-                }
-            )
-            .await,
-        Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
-    ));
-    server.await.unwrap();
-    assert!(
-        fixture
-            .shared
-            .configuration
-            .lock()
-            .unwrap()
-            .launch_attempts()
-            .unwrap()
-            .is_empty()
-    );
+    for (minor, expected_revision) in [(6, None), (7, Some(1))] {
+        let fixture = Fixture::new();
+        let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+        let status = fixture.shared.identity.clone();
+        let server = tokio::spawn(async move {
+            let mut connection = listener.accept().await.unwrap();
+            connection.receive::<Hello>().await.unwrap();
+            let mut greeting = hello(status.store_id, status.session_id, Some(status.epoch));
+            greeting.protocol_minor = minor;
+            connection
+                .send(&Welcome::Ready { hello: greeting })
+                .await
+                .unwrap();
+            assert!(connection.receive::<Request>().await.is_err());
+        });
+        assert!(matches!(
+            fixture
+                .rpc(
+                    Uuid::new_v4(),
+                    Operation::Launch {
+                        instance_id: fixture.instance,
+                        origin: LaunchOrigin::Interactive,
+                        expected_revision,
+                    }
+                )
+                .await,
+            Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+        ));
+        server.await.unwrap();
+        assert!(
+            fixture
+                .shared
+                .configuration
+                .lock()
+                .unwrap()
+                .launch_attempts()
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

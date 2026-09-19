@@ -13,12 +13,12 @@
 | 启动模板 | 纯合成已实现，独立 review 通过 | 原版/分身参数环境、直连/代理、秘密引用、路径变量；7 项模板测试；不表示代理就绪或可以启动 |
 | 实例数据目录 | 已实现，独立 review 通过 | store/LocalState 命名空间、归属/ACL/目录句柄、空白创建、保留数据；6 项目录测试 + 2 项模板子进程测试；真实包内访问待验证 |
 | 实例配置编辑 | 已实现，独立 review 通过 | 已接入 coordinator 与 CLI；7 项规则 + 4 项真实 CLI 写测试，物理去重、保留数据及列表脱敏；菜单及外部集成清理待实现 |
-| 实例 CLI / 列表摘要 | 已实现，独立 review 通过 | create/list/clone/rename/bind/remove/request，按 revision 和字节预算分页；尚无启动/保护授权操作 |
+| 实例 CLI / 列表摘要 | 已实现，独立 review 通过 | create/list/clone/rename/bind/remove/request，按 revision 和字节预算分页；普通 EXE 启动已有独立 launch 命令，保护授权待实现 |
 | 手动代理配置 / CLI | 已实现，独立 review 通过 | HTTP/SOCKS5 create/list/show/update/rename/remove/request；自动入口、认证分存与脱敏、引用及活动 generation 保护；运行中更新已接确认/回滚，交互菜单待实现 |
 | 共享 core 手动上游重配置 | 已实现，独立 review 通过 | 检查候选、影响预览/具体计划确认、原程序切换、失败回滚、持久化阶段/回执恢复；活动集合移除、未知 Starting 的完整核对及未来应用启动许可仍待续 |
 | 共享 core 代理集合扩容 | 已实现，独立 review 通过 | 原集合并入新增入口、影响预览与明确确认、不改 manifest、失败恢复旧集合、已有子集复用同进程；真实 core/CLI 测试通过 |
 | 配置请求恢复/去重 | 已实现，独立 review 通过 | 8 项事务测试覆盖 pending 两侧恢复、结果重放、文件占用、损坏及配置回退；已接入配置 IPC，查询可恢复纯配置 pending |
-| 实例启动 | 普通 EXE LaunchEngine 服务及 RPC、持久状态、core 许可和跨 store 预留已实现，独立 review 通过；CLI/菜单待接入 | 去重/取消、实际夹具创建、外部占用拒绝、配置复核、双 journal 恢复及精确退出通过；真实 Codex/Claude、多实例完整验收、MSIX 与无可信回执的未知结果核对待实现 |
+| 实例启动 | 普通 EXE 服务、RPC/CLI、持久状态、core 许可和跨 store 预留已实现；菜单待接入 | 去重/取消、实际夹具创建、外部占用拒绝、配置复核、双 journal 恢复及精确退出通过；真实 Codex/Claude、多实例完整验收、MSIX 与无可信回执的未知结果核对待实现 |
 | 安装解析 | 已实现，独立 review 通过 | EXE 文件身份/别名、短期句柄、MSIX 稳定定位/旧计划拒绝；3 项安装 + 2 项桥接夹具测试，真实 Codex/Claude 只读发现通过；已接入登记，启动待实现 |
 | 进程只读查询 | 已实现，独立 review 通过 | 原生快照提示、完整身份句柄/WMI 创建时间复核、有界查询/取消及 Windows argv；已接普通 EXE 启动前占用检查，Guard、旧包及祖先链识别待续 |
 | 单进程实例归属 | 已实现，独立 review 通过 | 精确进程/EXE 硬链接、原版与分身目录物理身份、主/辅助/未知分类；4 项测试通过，全局占用扫描、旧 MSIX 身份核对、代理参数证据和 LaunchEngine/Guard 集成待续 |
@@ -73,3 +73,5 @@
 - 普通 EXE LaunchEngine 服务：独立审查及恢复修复复审通过，提交主题 `feat(rust): execute and recover ordinary application launches`。共享 core manager 准备代理、物理占用与配置摘要复核、一次性创建、独立后台任务、持久取消、失败不直连；外部进程只拒绝重复启动，不接管或终止。审查修复待提交配置未恢复、双 journal 确认/释放中断、未 ACK 证据被覆盖、未同步记录过期及无关恢复阻断历史重放；同 store 持锁 Reserved 可在旧准备记录过期后回收，旧 dispatch 不能用于新 owner。新增 12 项 engine 行为测试、1 项 IFEO 只读检查、1 项未同步保留与 1 项旧许可拒绝；全量 184 项通过后最终 2 项回归及对应 12/8 项套件通过，共 186 项默认行为已验证、17 项顶层 ignored；真实 sing-box 扩容/core 许可回归另行通过，clippy/fmt/diff 通过。创建的是隔离测试 EXE，未启动/停止用户 Codex/Claude，未写 HKLM IFEO；RPC/CLI、MSIX、IFEO continuation、运行监控及真实应用验收仍待实现。
 
 - coordinator 普通 EXE 启动 RPC：独立审查及历史会话修复复审通过，提交主题 `feat(rust): coordinate application launch requests over IPC`。协议 2.7 提供启动/查询/取消，启动与 core 控制共用同一 CoreManager；接纳先于 ACK，长任务不占连接槽。完成通知和 5 秒只读维护核对精确退出，未知保活。新增 3 项真实管道测试覆盖丢 ACK、重复/冲突、等待期间查询取消、应用存活及退出后 owner 空闲退出、旧 minor 拒绝；全量 189 项通过。随后修复历史登录会话被当前 session 限制阻断恢复，新增 1 项合成历史会话回归及 8 项启动状态/3 项管道回归通过，共 190 项默认行为已验证、17 项顶层 ignored，clippy/fmt/diff 通过。只读历史恢复仍要求同 SID/完整身份与创建时间，创建/终止/普通预留不放宽；没有实测切换 Windows 登录会话。CLI/菜单、MSIX、IFEO 转交、持续网络监控和真实应用验收待续。
+
+- 普通 EXE 启动 CLI：独立审查与取消/版本竞态修复复审通过，提交主题 `feat(rust): launch instances with inline dependency repair`。接入 launch/inspect/cancel、缺失内核安装、共享代理扩容影响确认；JSON/非交互返回待操作信息，终态重放不修复或重新创建。前台 Ctrl+C 意图跨提示/准备/应用持续保留，自动继续的 revision 在服务端接纳及最终派发均核对，协议 2.8 拒绝旧 host 忽略前提。新增 2 项真实 CLI 与 1 项 engine 竞争回归，旧协议覆盖扩展；全量 193 项通过、18 项顶层 ignored，真实 sing-box CLI 集成与 Windows PTY 提示取消另行通过，clippy/fmt/diff 通过。审查方独立复跑 CLI、revision 和协议测试通过。未实测成功内核切换中的 Ctrl+C，MSIX、IFEO/Guard、中文菜单及真实应用完整验收仍待实现。
