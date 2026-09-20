@@ -104,6 +104,10 @@ ETW 所属记录固定保存在受保护 store 目录的 `events-<session>.json`
 
 通过 Shell Link COM 创建 `.lnk`，目标是安装中的固定 `app-proxy-host.exe`，参数为 launch + instance ID + store locator。名字采用可读实例名加短 ID；用户改名可更新显示，但数据 ID 和 target 不变。图标从实际 EXE 完整提取到持久 cache，按内容 hash 命名，必要时调用 SHChangeNotify。
 
+原生平台已实现内存编码/回读、同目录原子不覆盖发布，以及按文件身份、内容 hash 和目标参数核验后使用同一句柄删除。发布/删除期间固定输出目录链，拒绝重解析点、硬链接和额外启动标志；不调用 Resolve 或运行链接。[Shell Link 接口](https://learn.microsoft.com/en-us/windows/win32/shell/links)。调用方仍须在外部写入前记录 intent，并保存发布 receipt；该集成事务、host launch 和菜单入口尚未接入。
+
+图标读取使用 [LoadLibraryExW 资源映射](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexw)，不执行目标代码。保留首个图标组的全部尺寸和原始图像载荷，ICO 存到受保护 state 的 `icon-<sha256>.ico`，已有内容不一致则保留并报冲突。源 EXE 禁止写/删，映射前后检查规范路径的文件身份；不要求 WindowsApps 祖先目录列举权限。不承诺源目录被并发替换又恢复时的原子快照，图标仅用于展示，不能作为启动/删除授权证据。输出目录仍完整固定。
+
 保存本工具创建的链接、task 名及预期 target/args。删除前核验仍属于本工具，用户已修改目标则保留并报告冲突。原有应用快捷方式不覆盖。
 
 coordinator 登录任务在 Guard desired enabled 且授权已完成时安装，以普通权限启动 serve；事件任务按需启动提权 listener，无需第二个独立登录触发器。任务验证涵盖 owner SID、RunLevel、action 路径、参数和协议版本，不仅看名称。

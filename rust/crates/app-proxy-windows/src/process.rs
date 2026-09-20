@@ -161,7 +161,7 @@ pub fn start_host(exe: &std::path::Path, home: &std::path::Path) -> Result<Start
     }
 }
 
-fn quote_windows_word(word: &std::ffi::OsStr) -> Result<Vec<u16>> {
+pub(crate) fn quote_windows_word(word: &std::ffi::OsStr) -> Result<Vec<u16>> {
     let units = crate::wide(word)?;
     let mut output = vec![b'"' as u16];
     let mut slashes = 0;

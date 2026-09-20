@@ -27,6 +27,7 @@ pub mod package_launch;
 pub mod process;
 pub mod process_query;
 pub mod process_stop;
+pub mod shortcuts;
 pub mod singbox_binary;
 pub mod singbox_install;
 mod storage_security;
