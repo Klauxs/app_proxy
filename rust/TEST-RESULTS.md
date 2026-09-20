@@ -1,6 +1,102 @@
+**2026-09-20 当前参数：ETW 刷新间隔改为 20 ms**
+
+按用户要求由 25 ms 调整为 20 ms，事件入队立即唤醒、固定时钟及 Skip 策略保持。监听相关 5 项回归及 Release 构建通过，fmt/diff check 通过，证据 .tools/guard-20ms/。本轮未更新管理员安装的监听副本，也未重跑真实应用测速或全量回归；下面的 50～117 ms 六次结果仍属于 25 ms 版本。
+
+**2026-09-20 最新优化：事件立即唤醒与合并准备记录，六次关闭均低于 120 ms**
+
+ETW 回调入队立即唤醒发送，固定 25 ms 刷新；事件任务复用已固定的程序/目录句柄，将两个进度状态写入合并到持久停止意图。取消、配置、精确身份、资源预留和恢复规则保持。默认回归合计 454 项通过、60 ignored，Release/Clippy/fmt/diff check 通过。真实 Codex 三次 49.799 / 95.200 / 104.073 ms（平均 83.0），Claude 84.694 / 114.441 / 117.405 ms（平均 105.5），六次均带代理重启，关闭前 WMI 全部为 0。修复测试清理工具的 PID 复用问题后确认 48 个测试应用进程退出；核心、辅助及协调服务停止，保护禁用、登录入口移除，原 Codex 保留。详见 [分段、开销与验证](docs/11-guard-wakeup-2026-09-20.md)。
+
+**2026-09-20 最新实测：原生逐事件路径六次均在 300 毫秒内关闭**
+
+管理员授权完成，生产 Release 对已安装 Codex/Claude 空白隔离实例各测试三次，均精确关闭并带代理重启。Codex 296.692 / 238.965 / 269.275 ms，Claude 212.738 / 249.387 / 273.367 ms；目标关闭前 WMI 全部 0 次，原生命令行读取 0.276～0.413 ms。上一轮默认回归合计 451 项通过、60 ignored，Release/Clippy/fmt/diff check 通过；本轮仅继续真实实测及文档收尾。50 个测试应用进程及核心/辅助/协调进程已退出，保护禁用、测试登录入口移除，原 Codex 保留，事件任务 Ready。六个样本不构成任意负载的延迟上限。详见 [实现、分段与验证](docs/10-guard-native-events-2026-09-20.md)。
+
+**2026-09-20 最新分段计时：WMI 是主要耗时**
+
+默认关闭的异步计时已加入。37 项 Guard 回归、6 项进程查询测试通过，Release/Clippy/fmt/diff check 通过；真实管理员安装 + active ETW 六次自动纠正均通过。Codex/Claude 创建到退出平均 730.1/1147.2 ms，WMI 分别 471.6/699.4 ms；Claude 三次均出现一次完整重采样。日志无丢弃，测试进程服务已清理，原 Codex 保留。详细口径与原始证据见 [分段实测](docs/08-guard-timing-2026-09-20.md)。未将先前 446 项全量回归标为本轮重新执行。
+
+**2026-09-20 前次实测：6 次自动纠正通过，未稳定低于 1 秒**
+
+重新发起 UAC 后安装及核验成功，生产 Release + active ETW 实测 Codex 创建到退出 **879.8283 / 772.9133 / 881.0244 ms**，Claude **1058.7017 / 1255.2256 / 981.7508 ms**。六次均完成确切目标关闭及带代理重启，脚本退出码 0，没有复现上轮退出竞态错误或残留阻塞；Claude 两次超过 1 秒，速度目标仍未完整通过。77 个测试应用进程、测试核心、辅助服务和协调进程已清理，两项保护已禁用，原 Codex 保留；监听计划任务保留为 Ready。证据 `.tools/guard-race/live/`，详见 [验收记录](ACCEPTANCE-2026-09-20.md)。本次仅补真实验证，代码回归仍为下述已完成的 446 项通过。
+
+**2026-09-20 前次修复：退出竞态回归通过，首次真实补测因授权取消未执行**
+
+关闭前遇到已知候选进程消失错误时，最多进行 3 次完整重新采样，总预算 5 秒；确切目标自行退出时不关闭、不重启。新的 Absent 扫描解除尚未授权停止的临时退出错误，保留历史记录和已发出停止意图的失败诊断。新增 4 项测试并扩充状态恢复断言。默认全量 **446 通过、0 失败、59 ignored**，Release/Clippy/fmt/diff check 通过，证据 `.tools/guard-race/`。Windows 管理员授权被取消，真实应用补测未启动，测试保护及协调进程已关闭。不能宣称已达到稳定 1 秒内，详见 [验收记录](ACCEPTANCE-2026-09-20.md)。
+
+**2026-09-20 前次实测：未通过稳定低于 1 秒及整轮纠正验收**
+
+原生查询当前包登记及清单摘要，只复用未变化的解析元数据；自有 ETW 每 100ms 校验归属并主动 FLUSH，Ready 事件合并等待缩短至 50ms。默认全量 **442 通过、0 失败、59 ignored**，额外 1 项已安装包原生/桥接一致性测试通过，Release/clippy/fmt/diff check 通过。随后真实 UAC + ETW 补验：Codex 创建到退出 784.2108 / 1135.3619 / 749.4272 ms，三次重启通过但一次超过 1 秒；Claude 首次 743.8501 ms 且重启通过，第二次关闭前因 `PROCESS_EXITED_DURING_INSPECTION` 失败，第三次因历史失败状态未就绪而没有启动。不能声明整轮通过；57 个测试应用进程已清理，原 Codex 保留。证据 `.tools/guard-subsecond/live/`，详见 [验收记录顶部](ACCEPTANCE-2026-09-20.md)。
+
+**2026-09-20 前次优化：Guard 快速关闭**
+
+Guard 核验目标后立即精确终止，跳过 WM_CLOSE/1.5 秒正常退出等待；关闭前主进程与辅助进程改为一次完整批量查询。新增立即停止身份/隔离测试，停止模块 4 项与 Guard 13 项通过。全量 **438 通过、0 失败、58 ignored**，Release/clippy/fmt/diff check 通过，证据 `.tools/guard-fast/`。首次 UAC 取消后，用户再次要求测速并完成授权；优化版原生创建到退出实测 Codex **2114.1952 ms**、Claude **3324.9240 ms**。Claude 带代理重启通过，Codex 关闭后因代理健康失败保持关闭，本次没有重启成功。测试保护和服务已关闭，原 Codex 保留；本次补测未修改生产代码或重复全量测试。详见 [验收记录顶部](ACCEPTANCE-2026-09-20.md)。
+
+**2026-09-20 前次修复：真实 Codex / Claude 自动纠正通过**
+
+修复候选进程逐个重复 WMI/祖先查询导致的 Codex 扫描超时，以及 Claude 主进程关闭后查询正在退出的辅助进程导致的 Win32 5。采用单轮批量查询和关闭前保留辅助进程句柄，身份与退出核验仍严格保留。相同 11 个候选的扫描实测 3430 ms → 265 ms。
+
+全量默认测试 **437 通过、0 失败、58 ignored**，Release 构建、clippy `--workspace --all-targets -- -D warnings`、fmt、diff check 通过。真实 Codex 26.915.4065.0 和 Claude 2.2553.1.0 均由生产 Guard 自动关闭未代理的空白隔离实例，再以正确代理参数重启；原用户 Codex 保留。证据 `.tools/guard-fix/` 和 `live/results.json`，完整范围、测试驱动修正及收尾见 [验收记录顶部](ACCEPTANCE-2026-09-20.md)。未据此声明账号业务、全产品发行验收完成，旧压缩包没有重新打包。
+
+**2026-09-20 修复前：真实应用 Guard 自动纠正未通过**
+
+真实 Codex/Claude 各一个空白隔离实例补验：Codex 启用检查持续扫描超时，另行不反复查询状态的实际未代理启动在 75 秒内没有纠正回执，目标仍存活；Claude 被 Guard 确认关闭，但重启准备返回 `LAUNCH_PREPARATION_FAILED`。这是当前 Release 的真实应用阻塞，不能用下述受控 EXE 的通过结论替代。证据 `.tools/real-guard/results.json`、`codex-live-result.json`，细节见 [验收记录顶部](ACCEPTANCE-2026-09-20.md)。22 个测试应用进程已清理，原 Codex 保留；测试 Guard/内核已停用。本轮仅补验和记录，未修改生产逻辑，也未重复全量默认测试。
+
+**2026-09-20 后续：管理员 ETW 与生产 Guard 受控 EXE 实测通过**
+
+管理员 ETW 3 项原生测试全部通过，补齐此前 Win32 5/UAC 取消导致的缺口；证据 `.tools/acceptance-extended/elevated-results.json`。当前 Release 在独立 store 中完成真实 UAC 受保护 helper 安装、事件任务启动及 `active_etw` 连接。受控隔离 EXE 未带代理启动后，被 Guard 精确关闭并以正确代理参数重启；实际请求经 sing-box 和受控上游到达独立目标。同映像未登记进程保持存活。故意断开上游后，Guard 关闭目标并报 `GUARD_STOPPED_PROXY_UNAVAILABLE`，没有直连回退。关闭 Guard、移除普通登录入口、停止测试内核通过。
+
+证据 `.tools/guard-e2e/correction-result.json`、`failure-result.json` 及同目录状态/清理记录，范围与测试驱动修正详见 [验收记录](ACCEPTANCE-2026-09-20.md)。本轮没有修改生产代码或重复默认全量回归；受控 EXE 的生产 Guard 验证不代表真实 Codex/Claude 全业务和真实登录触发已完成。以下记录按时间保留。
+
+**2026-09-20 后续：取消普通启动前外部进程占用扫描**
+
+全量串行默认回归 **437 通过、0 失败、58 ignored**（`.tools/no-startup-scan-tests.log`）。随后启动菜单列表改为只读配置，最终菜单默认回归 1 通过、5 ignored，并用 Release 交互实测四个实例选择列表只显示配置、可返回退出；最终 Release 构建、fmt、clippy `-D warnings` 和 diff 检查通过。启动菜单不再因展示运行状态触发进程扫描。
+
+按用户决定，普通交互/快捷方式启动不再预扫描外部进程是否已运行，由应用自己处理单实例和目录占用。本工具自有请求、可信会话及资源预留仍防重；Guard 纠正仍执行原有占用/身份核验。没有合入批量 WMI 优化。回归用例改为验证外部同映像进程不阻止启动、不会被接管、同一实例后续请求复用自己的可信会话。Release 实测 Claude/Codex 各两个实例全部启动及复用成功，此前失败的 Codex B 约 4.306 秒确认。日志 `.tools/no-startup-scan-real.log`，详情见 [验收记录更新](ACCEPTANCE-2026-09-20.md)。以下保留首次验证结果。
+
+**2026-09-20 完整验证补充：未通过全产品验收（首次结果，后续调整见上）**
+
+Release 全量默认测试 437 通过、0 失败、58 ignored；另 26 项扩展和 7 项交互通过。真实 Codex 第二个隔离实例三次启动前检查超时，管理员 ETW 因 UAC 取消未验证；登录业务、干净机器、实际包更新及性能矩阵仍未完成。诊断发现 21 个候选串行查询约 6.5 秒，超过启动检查 5 秒预算；生产缺陷尚未修复。当前压缩包仅为验证候选，不能视为正式覆盖包。详见 [本轮验收记录](ACCEPTANCE-2026-09-20.md)，以下为历史实施记录。
+
+**2026-09-20：共享代理内核收尾（当前批次）**
+
+工作区 `D:\app_proxy`，分支 `codex/entry-maintenance`。实现运行中移除未被实例或下载网络引用的代理：CLI/菜单先给出具体影响，JSON 默认返回计划及退出码 5；明确确认后切换共享内核，保留其他入口，失败恢复原集合，最后入口停止内核后才提交删除配置。恢复支持配置提交两侧的中断，具体计划及 revision 变化会拒绝旧确认。Down 保留恢复集合，需先显式 core stop 后移除。
+
+实现 `core recover-start`，创建前持久化 generation/创建者/映像/随机 Job 归属及原 Start 请求，原生创建时原子关联 Job，并仅继承只读 Job 租约。核对确认唯一原进程或确认无存活成员后，更新状态和原请求/同代未完成恢复回执；不自动启动或宣称代理健康。相同归属证据用于切换/回滚中断。旧版缺证据、原创建者未退出、错映像或多成员保留未知。IPC 3.20 对三种 core RPC 双向设版本门槛。
+
+默认新增 7 项测试：4 项原生创建归属（创建者真实退出、句柄关闭、无创建/已退出、证据冲突和多成员保留、回执代际隔离）、2 项删除计划与提交中断恢复、1 项协议双向拒绝。最终完整串行 `cargo test --workspace --locked --no-fail-fast -- --test-threads=1`：**437 通过、0 失败、58 顶层 ignored**（`.tools/core-finish-verified-tests.log`）。ignored 包括额外平台/桌面验收和子进程夹具，不能视为全产品验收通过。
+
+使用下载目录固定 sing-box 1.14.1 的副本，在独立临时 store、回环合成上游上另行执行 **5 项真实内核/CLI 测试，全部通过**。最终直接运行本轮编译的测试二进制：`app_proxy_app-d8692443b6257ab1.exe core_reconfigure::tests --ignored --test-threads=1`（4 项，`.tools/core-finish-real-final.log`）和 `instance_cli_contract-32f6cd528c547fe9.exe proxy_cli_recovers_start --ignored --test-threads=1`（1 项，`.tools/core-finish-cli-final.log`）。覆盖保留其他入口/删除最后入口、失败回滚、正常启动和切换阶段漏写 PID 的恢复、真实创建者进程退出后的 CLI 核对、预览与过期确认拒绝、owner 重开后历史回执，以及既有扩容、上游编辑与订阅切换回归。不是实际应用登录和公网代理隔离验收。
+
+故障注入初版发现只关闭父进程 Job 句柄无法保留可重开的名称，隐藏控制台还会带入 conhost；已通过显式租约、KILL_ON_JOB_CLOSE 和 DETACHED_PROCESS 修正并重跑。原生核验使用文件身份，避免 Windows 长路径前缀差异导致误报。测试失败留下的 4 个临时 store 内核按明确路径与 PID 核验后清理，用户已有发行目录内核未终止。旧版本订阅门槛错误优先级已修复。一次重新链接被尚未退出的前一轮测试 EXE 占用而失败，等待其结束后完成上述最终全量回归；未清理/重置构建产物。
+
+最终 workspace/all-targets clippy `-D warnings`（`.tools/core-finish-clippy.log`）、fmt 和 git diff --check 通过；真实 CLI help 已显示 recover-start 和 proxy remove --apply-to-running。未提交。剩余产品范围仍包括持续代理故障提示、保留数据卸载/诊断、真实 Guard/UAC/登录与账户/代理隔离、发行验收。IFEO、跨目录升级及登录任务被外部删除后的专用修复维持取消。
+
+以下为先前批次记录。
+
+**2026-09-20：取消 IFEO（当前范围）**
+
+按用户最新决定，取消 IFEO。删除注册/恢复、入口解析、调试创建脱离及相应实验命令；GuardStatus 不再含 IFEO，原版与分身共用事件监听和扫描就绪标准。保留 `creation_guard` 对系统既有 Debugger 的只读拒绝；本轮没有注册、删除或修改真实应用的 HKLM IFEO 规则。
+
+配置只保留固定空数组占位，保持原 manifest 序列化顺序和已有事务摘要。非空旧注册返回固定 `LEGACY_IFEO_CLEANUP_REQUIRED`，不回显输入、不覆盖原文件。IPC 升为 3.19，旧 major 双向握手拒绝；所有入口需使用同代二进制，未自动终止用户 coordinator。
+
+首轮全量 427 通过、2 失败、53 ignored（`.tools/no-ifeo-tests.log`）：新增旧 major 客户端测试暴露原通用握手错误，已改为明确版本错误；快捷方式夹具直接删除复现 Win32 32，现复用已有仅针对共享占用的有界夹具重试，未改变生产删除语义。最终 `cargo test --workspace --locked --no-fail-fast -- --test-threads=1` 全量通过：**430 项通过、0 失败、53 项顶层 ignored**（`.tools/no-ifeo-final-tests.log`）。IFEO 专项及调试脱离共移除 21 项默认测试，新增 1 项旧登记拒绝且保留文件的存储测试；因此数量相对上批 450 减少 20。最终 workspace/all-targets clippy `-D warnings`、fmt 和 diff 检查通过（`.tools/no-ifeo-final-clippy.log`）。CLI help 已核验不再提供 `--debug-detach`。真实 UAC/登录触发/完整产品验收仍未执行，本批未独立 review、未提交。
+
+以下为历史批次记录；其中 IFEO 的开发承诺和后续验收项已由本次取消决定取代。
+
 **Rust M0 首批实现验证 — 2026-09-19**
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
+
+**2026-09-20：导入后继续开发——快捷方式核验与丢失恢复**
+
+基线为 `8d03009`，当前工作区 `D:\app_proxy`、分支 `codex/entry-maintenance`。本机重新安装项目本地 Rust 1.98.1（`.tools/cargo` 和 `.tools/rustup`，未改系统 PATH），实际编译并验证。IPC 2.19 增加 ShortcutCheck、Repair/Repaired，所有快捷方式 RPC 双向要求 minor >= 19，防止旧端误解新恢复状态。`shortcut check/repair` 和中文“桌面快捷方式”菜单共用服务；核验不修复，恢复绑定原创建 ID/配置版本，独立持久请求记录先于外部发布。使用原位置、原 host、原图标；已有完整链接不换文件，修改/替换链接保留。完成回执是历史记录，重放不重新创建后来被删除的链接。新增文件身份仍由原 journal 管理，后续删除核对修复后的精确文件。
+
+新增 4 项 journal 默认测试覆盖核验无写入、每个发布断点恢复、历史回执/二次恢复、并发替换保留、请求冲突、版本/归属/缺失资产；新增 1 项跨进程 CLI 测试覆盖核验、恢复、重放、用户修改冲突及保留实例且不启动应用。既有协议测试扩展至 2.19 和 Check。真实 Windows PTY 中在桌面创建一个自有 fixture 入口，经核验和完整链接恢复再移除，原 `native_menu_creates_and_removes_desktop_shortcut` 显式通过；最终确认该 `.lnk` 不存在。此项不是 Shell 点击启动验收。
+
+首次默认并发测试中 6 项已有 LaunchEngine 用例因 `INSTANCE_CHECK_TIMEOUT` 失败；单项和后续串行执行通过，未放宽生产查询预算。串行全量又复现已有快捷方式变更用例的 Windows 共享冲突，其中平台用例捕获确切错误码 32；先前两次 CLI 删除未确认没有保留底层数值，不能单凭同类现象确定根因相同。未确认删除使用原请求恢复成功，连续 8 次单项复跑通过。针对已证实的文件占用，生产代码只对打开链接句柄的共享冲突进行最多约 250ms 重试；持续占用返回 `SHORTCUT_FILE_BUSY`，取得句柄后重新核验文件身份、内容和链接字段。后续全量捕获到另一种失败：已取得 DELETE 句柄后，ShortcutDelete 返回 Win32 5，检查文件不是只读。现对同一个已核验句柄上的失败删除标记进行最多约 250ms 重试（仅错误码 5/32，且文件非只读）；不改权限或属性、不重新按路径删除、不重复成功操作。夹具中的改名/清理仅对错误码 32 做最多 1 秒重试，其他错误和所有身份/内容断言保留。新增 2 项真实受控占用测试，覆盖共享句柄释放后继续、等待中改写仍拒绝删除，以及只读文件映射释放后的精确删除；既有持续占用测试断言有界失败。最终快捷方式平台专项 **32 项通过、1 项 ignored**（`.tools/shortcut-mapped-tests.log`）。
+
+最终 `cargo test --workspace --locked --no-fail-fast -- --test-threads=1` 完整通过：**450 项通过、0 失败、53 项顶层 ignored**，日志 `.tools/maintenance-release-check.log`。最终 workspace/all-targets clippy `-D warnings`、fmt 和 diff 检查通过。前面失败日志保留用于诊断，不以单项重跑代替此次完整回归。默认并发模式未重新宣称通过。
+
+本批只完成原位置丢失链接的维护，不包含跨发行目录升级、缺失 host/图标重建、登录入口修复、整体卸载、完整 UAC/登录链路或 IFEO 启用。IFEO 用户需求保留；命令行转发与 Chromium 挂起创建/沙箱句柄契约的限制已作官方资料与当前源码复核，见第九章，没有修改真实应用 IFEO。本批尚未独立 review、未提交。
 
 **2026-09-20：登录任务 RPC、Guard 启用与独立就绪状态**
 

@@ -8,11 +8,11 @@
 
 没有代理记录时仍明确提供直连/返回；选择添加代理后配置订阅或手动上游，自动发现可用 sing-box 程序文件并用我们的配置启动。找不到可用程序时在当前终端流程提示“未找到可用的 sing-box，是否安装？”，仅提供“安装并继续（默认）/返回”。选择安装后自动下载、校验、安装并继续原流程；程序决定安装位置，不提供手动指定 EXE 或安装路径选项，不让用户手工解压或配置 PATH。不提供接入已有 sing-box 服务选项。新 proxy 验证失败时保存它供修改，实例创建停在网络准备阶段并返回明确状态。不会自动改直连。
 
-绑定代理的 Codex/Claude 预设默认开启 Guard；受管原版包含 IFEO 启动前接管和 ETW 启动后检查，分身通过专用入口及实例检查保护。其他支持 Chromium 代理参数的应用显式选用。创建原版时说明原始入口会进入该原版，未被接管的受管实例误启动可能被关闭并代理重启；只创建分身则不处理未管理原版。所需 UAC 只发生在用户前台操作。取消授权不抹掉已创建实例，结果展示保护未完成和可重试动作。低层 instance create 在非交互场景若需要授权，返回 requires_action，不后台弹 UAC。
+绑定代理的 Codex/Claude 预设默认开启 Guard；原版与分身均通过 ETW 启动后检查保护。其他支持 Chromium 代理参数的应用显式选用。创建原版时说明误启动可能被关闭并代理重启；只创建分身则不处理未管理原版。系统原始入口不被接管，外部启动可能在检查前已经联网。所需 UAC 只发生在用户前台操作。取消授权不抹掉已创建实例，结果展示保护未完成和可重试动作。低层 instance create 在非交互场景若需要授权，返回 requires_action，不后台弹 UAC。
 
 实例列表至少展示名称、应用、原版/独立数据、网络绑定、运行状态、Guard 实际状态。菜单提供启动、详情、复制配置创建空白实例、改绑定、改名、高级设置、快捷方式、保护、移除登记。首版不做复制登录数据按钮。
 
-应用详情在 Guard 内展示适用组件的状态。IFEO 仅在受管原版启用 Guard 时注册并路由该原版，不提供独立日常开关；只创建分身时显示原版“未管理”，不注册 IFEO，也不要求补齐路由。原版 Guard 启用摘要预览机器级影响，包更新导致所需 IFEO stale 时显示保护不完整。高完整性/其他用户调用限制、激活载荷和默认实例规则见 [第九章](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。
+应用详情在 Guard 内展示监听和扫描状态。原版与分身采用相同就绪标准；只创建分身时原版显示“未管理”。取消 IFEO 后不再提供相关注册、解除、修复、命令或状态。
 
 运行中代理故障只提示故障并保留应用，不自动切直连；启动前的代理验证失败仍阻止新目标创建。
 
@@ -46,9 +46,6 @@ app-proxy core discover|install|verify|start|stop|restart|check
 app-proxy doctor [--instance <id>|--proxy <id>] [--json]
 app-proxy guard enable|disable|status <id>
 app-proxy guard events enable|disable|status
-app-proxy ifeo status [<application-id>] --json
-app-proxy ifeo disable <application-id>
-app-proxy integration repair
 app-proxy uninstall [--keep-data]
 ```
 
@@ -58,7 +55,8 @@ app-proxy uninstall [--keep-data]
 
 所有命令使用新模型，不提供旧 app 子命令兼容 alias。uninstall 默认保留数据，`--keep-data` 只是明确表达默认行为；首版没有 purge。只清理 Rust 归属可确认的入口、任务和托管组件。
 
-IFEO 解除注册成功并回读确认后才删除对应 host；解除失败则保留恢复材料。`ifeo disable` 与集成修复必须能在 coordinator/store 不可用时通过受保护安装记录完成前台恢复。
+
+2026-09-20 范围收敛：不做跨目录升级或移动后入口重定向，也不做 Windows 登录任务被外部删除后的专用检测、自愈或修复流程。这两项不再列为待办或发布门槛。保留固定目录使用、正常登录自启的创建/查询/移除，以及已接受但未完成操作的显式恢复。已有只读查询仍如实报告入口不可用，不能把历史创建回执当作当前就绪。
 
 **3. IPC 编码和请求**
 
@@ -70,7 +68,7 @@ IFEO 解除注册成功并回读确认后才删除对应 host；解除失败则�
 
 客户端取消订阅事件不取消任务。配置编辑用 expected_revision；冲突响应携带当前 revision 和冲突实体 ID，不回显完整配置或秘密。程序启动参数等敏感 payload 不写 access log。
 
-当前 Rust coordinator 协议为 2.18。启动、启动请求查询及显式取消要求服务端 minor 至少为 7，带 expected_revision 的启动要求至少为 8，Guard 状态要求至少为 10。订阅协议扩展后的 Catalog 要求两端 minor 至少为 11；订阅 Refresh/Select 配置动作和 PrepareSubscription 要求两端至少为 12；下载预览及 stage 要求至少为 13；保存节点列表要求至少为 14；独立只读 RuntimeStatus 要求两端至少为 15；ShortcutApply/Resume/Request/Status 要求两端至少为 16；InstanceSettings 和 EditInstance 要求两端至少为 17；LoginApply/Resume/Request/Status 要求两端至少为 18，原 GuardStatus 格式与门槛不变。版本不足时不接纳对应请求。旧客户端不会收到无法解析的新协议枚举，旧服务端也不会被当作支持新操作。新启动请求只包含已登记实例 ID、来源及可选版本条件，回执不含参数、环境值或凭据；接纳 ACK 不表示创建成功，客户端查询持久 attempt 阶段。订阅、快捷方式 CLI 和日常中文菜单已接入，菜单与 CLI 共用业务函数；独立运行状态已接入菜单列表和 instance inspect，配置、进程与保护证据分别展示；高级设置已接入同一配置事务、CLI 和菜单；维护入口仍按本章设计继续实现。
+当前 Rust coordinator 协议为 3.20。CoreStatus/CoreRequestStatus/ControlCore 双向要求 minor 至少为 20，覆盖 PrepareRemove、RecoverStart、ProfileRemoved、Reconciled 和移除影响字段。移除 GuardStatus.ifeo 和 Ifeo 启动来源属于不兼容变更，major 升为 3；旧 major 在握手时拒绝。更新需使用同一代 CLI/host/coordinator，不自动终止旧进程。启动、启动请求查询及显式取消要求服务端 minor 至少为 7，带 expected_revision 的启动要求至少为 8，Guard 状态要求至少为 10。订阅协议扩展后的 Catalog 要求两端 minor 至少为 11；订阅 Refresh/Select 配置动作和 PrepareSubscription 要求两端至少为 12；下载预览及 stage 要求至少为 13；保存节点列表要求至少为 14；独立只读 RuntimeStatus 要求两端至少为 15；ShortcutApply/Resume/Request/Status/Check 要求两端至少为 19（新增 Repair/Repaired，拒绝旧客户端误解恢复状态）；InstanceSettings 和 EditInstance 要求两端至少为 17；LoginApply/Resume/Request/Status 要求两端至少为 18，在 major 3 内 GuardStatus 门槛仍为 10。版本不足时不接纳对应请求。旧客户端不会收到无法解析的新协议枚举，旧服务端也不会被当作支持新操作。新启动请求只包含已登记实例 ID、来源及可选版本条件，回执不含参数、环境值或凭据；接纳 ACK 不表示创建成功，客户端查询持久 attempt 阶段。订阅、快捷方式 CLI 和日常中文菜单已接入，菜单与 CLI 共用业务函数；独立运行状态已接入菜单列表和 instance inspect，配置、进程与保护证据分别展示；高级设置已接入同一配置事务、CLI 和菜单；维护入口仍按本章设计继续实现。
 
 快捷方式 RPC 不接受可选文件位置或启动器参数。ShortcutApply 的外层请求 ID 与内层 ID 必须一致；Remove 还需 expected_creation，对显示的原创建进行原子核对。Status 返回当前登记及优先的待删除操作，Created 回执是历史证据，不证明文件现在仍在。Request 只读；Resume 使用原意图且不重做安装解析。断线/超时/Ctrl+C 不当作取消服务工作，JSON 未确认报告保留原 ID；没有记录也不推断锁外准备已经停止。实际工作单槽有界，忙时额外变更立即拒绝，状态连接仍可使用。
 
@@ -112,3 +110,5 @@ UI/CLI JSON 结果分开表达：
 NDJSON 日志采用字段白名单：时间、版本、store/instance/attempt ID、阶段、时长、错误类别、数字系统码、监听方式及队列丢弃计数。可保留本地监听端口用于排障；路径默认只显示类别和文件名，用户显式本机详情可看完整路径。日志每个文件 2 MiB、保留 5 份，容量限制不影响 journal。
 
 导出诊断包包含版本、脱敏配置摘要、最近阶段记录和监听状态；排除 secrets、订阅正文、sing-box 配置、用户数据、MSIX request、任意环境值与参数值。采集和保存仅本地，上传属于独立用户动作。核心原始错误默认不落盘，诊断应优先保留 stage、字段类别、节点序号及系统错误码，避免只有模糊失败。
+
+2026-09-20：shortcut check 只读核验原链接身份/内容、启动器文件和缓存图标；shortcut repair 使用独立 ID，在原位置恢复丢失链接。恢复绑定原创建与 revision，受持久状态和单变更槽保护；丢应答后查询或继续原请求。历史创建及恢复回执不重新发布后来被删除的链接。已修改/替换链接、坏图标、缺 host、移动 home 不自动覆盖或猜测修复；整体卸载仍待实现；跨目录升级和登录任务被删除后的修复已取消。

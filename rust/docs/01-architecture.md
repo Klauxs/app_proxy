@@ -10,7 +10,7 @@ GUI、macOS 平台实现、任意 AppContainer、网络驱动强制代理、任�
 
 不修改目标应用安装内容、签名、ACL、系统代理或系统环境。MSIX 数据目录可能属于应用包 LocalState，原包卸载/重置可能清除它；界面在实例详情中显示实际归属。
 
-IFEO 启动前接管属于 Guard，Codex/Claude 已登记且开启 Guard 的原版默认使用它；与 ETW 检查一起构成保护流程。只创建分身时不安装该 EXE 的 IFEO，不接管未管理原版；分身通过专用启动入口及针对实例的检查保护。默认开启表示期望状态，系统注册仍需前台授权，实际支持必须逐应用验收。它需要修改机器级 IFEO 注册项；上述不修改目标安装内容的约束不等于不写系统集成注册。机器级影响、防递归、子进程及 MSIX 边界见 [09-ifeo-launch-interception.md](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。
+2026-09-20 用户取消 IFEO。Guard 仅使用 ETW 启动后检查与已授权监听失效时的周期扫描；原版与分身都按实际监听/扫描证据判断状态。未管理原版保持不干预。通过本工具启动时先准备代理，从外部入口启动可能在检查前已执行或联网，Guard 不承诺启动前拦截。决定见 [第九章](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。
 
 **2. 进程拓扑**
 
@@ -19,9 +19,7 @@ flowchart TD
     CLI[app-proxy.exe CLI / 中文菜单] -->|用户态命名管道| C[app-proxy-host.exe serve]
     Link[桌面快捷方式] --> H[host launch --notify]
     H --> C
-    Original[原始应用启动入口] --> IFEO[Windows IFEO Debugger]
-    IFEO --> I[host ifeo-entry]
-    I --> C
+    Original[原始应用启动入口] --> EXE
     C --> E[共用 LaunchEngine]
     C --> G[Guard 策略与扫描]
     G --> E
@@ -35,9 +33,9 @@ flowchart TD
     P --> SB[本工具启动的 sing-box 实例]
 ```
 
-`app-proxy.exe` 是控制台入口，负责参数解析、中文菜单和结构化输出。`app-proxy-host.exe` 使用 Windows GUI subsystem，承担隐藏快捷方式入口、serve、package-child、ifeo-entry 和 events-listen 模式；共享库实现业务，二进制没有第二份逻辑。
+`app-proxy.exe` 是控制台入口，负责参数解析、中文菜单和结构化输出。`app-proxy-host.exe` 使用 Windows GUI subsystem，承担隐藏快捷方式入口、serve、package-child 和 events-listen 模式；共享库实现业务，二进制没有第二份逻辑。
 
-提权 ETW listener 使用安装到受管理员保护目录的 host 副本。检测到高完整性令牌时，只允许事件监听及固定安装维护模式，拒绝 serve、launch、package-child、ifeo-entry 和任意执行命令。目标应用始终由普通权限进程启动。初始提升运行的用户也不能绕过这项检查，需使用普通入口。IFEO 注册安装/解除属于固定维护模式；高权限运行目标不在首版 IFEO 支持范围内。
+提权 ETW listener 使用安装到受管理员保护目录的 host 副本。检测到高完整性令牌时，只允许事件监听及固定安装维护模式，拒绝 serve、launch、package-child 和任意执行命令。目标应用始终由普通权限进程启动。初始提升运行的用户也不能绕过这项检查，需使用普通入口。
 
 一个 store 在一个 Windows 用户下只允许一个 coordinator，首版只支持它所属的一个交互 session。第二个 session 打开同一 store 返回 `STORE_SESSION_CONFLICT`；另一会话需要独立 store。这是首版产品限制，不依赖隐藏的跨会话转发。
 
@@ -56,7 +54,7 @@ rust/
     app-proxy-core/src/
       model/ template/ storage/ launch/ guard/ proxy/ subscription/ protocol/
     app-proxy-windows/src/
-      process/ package/ identity/ paths/ ipc/ etw/ tasks/ shortcuts/ ifeo/
+      process/ package/ identity/ paths/ ipc/ etw/ tasks/ shortcuts/
     app-proxy-app/src/
       bin/app-proxy.rs
       bin/app-proxy-host.rs
@@ -80,7 +78,6 @@ rust/
 | PackageLauncher | validated plan + attempt capability → 包内回执 | 接受任意 shell 字符串 |
 | ProxyManager | profile ID + revision → ProxyLease / 失败 | 修改外部 sing-box |
 | GuardController | 进程事件/定时扫描 + 配置 → 纠正意图 | 第二套启动实现 |
-| IfeoIntegration / IfeoEntry | 注册安装/核验及受限启动输入 → 集成状态 / InterceptRequest | 第二套代理逻辑、按 EXE 名猜实例、任意提权执行 |
 | Store | 带期望 revision 的变更 → 新 revision / 冲突 | 等待网络、提权或应用退出 |
 
 表中组件表示职责边界，不要求每项都建立 trait、注册器或独立服务。内部业务优先使用普通函数和结构体；进程、网络、存储等确有替换测试需要的外部边界再用小接口。阻塞的 COM/WMI 调用在专用线程中执行，ETW 消费在线程中阻塞，均不阻塞异步任务执行器。取消异步等待不等于取消底层系统操作，后续章节规定迟到结果处理。
@@ -107,3 +104,10 @@ rust/
 coordinator 多一个轻量常驻进程，但消除了各入口长期竞争全局锁、各自启动内核与分散恢复的复杂性。采用 supervisor 风格的内部任务组织；一个实例失败不导致整个 coordinator 退出。
 
 产品主业务只在 Rust 内维护。首版 PowerShell 仅负责经测试的 Appx 查询/包上下文激活，可在原生替代通过相同契约测试后删除；它不承载代理配置、实例状态或 Guard 决策。
+
+
+2026-09-20 共享内核创建恢复：在写 Starting 前，将 store/generation、随机 Job 名、创建者完整身份、EXE 文件身份及原 Start 请求绑定写入受保护的 `state/core/start.json`。原生 CreateProcess 的 JOB_LIST 原子关联 Job；HANDLE_LIST 只继承该 Job 的只读查询句柄，子进程持有租约使名称可重开。Job 启用 KILL_ON_JOB_CLOSE，全部租约关闭后不会留下脱离归属的存活成员。使用 DETACHED_PROCESS 避免隐藏控制台引入额外 conhost 成员，不创建可见窗口。属性内存和句柄存活至创建完成。
+
+恢复只打开记录中的唯一 Job，要求历史和当前成员均唯一，再核对 SID、会话、创建时间及 EXE 文件身份并保留进程句柄；不按名称或端口扫描接管。新归属机制不依赖 IFEO。记录 Running 只证明归属，网络健康仍需单独检查。Job 缺失或确认无存活成员时可记 Down；缺少旧版 witness、记录冲突、原创建者仍运行或多成员则保留未知。状态查询不自动恢复，显式恢复绑定 generation，更新原请求和同代恢复请求回执。
+
+Windows 原生接口依据：[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[UpdateProcThreadAttribute](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)、[受限句柄继承](https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes)。实际生命周期以 Windows 子进程退出与真实 sing-box 回归结果共同验证。

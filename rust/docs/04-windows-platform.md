@@ -2,11 +2,11 @@
 
 Windows 平台层由 Rust 实现，现有代码仅提供平台经验；首版 MSIX 采用下文限定的 PowerShell 桥接。平台返回明确成功、明确失败或 Unknown 三态事实，不把权限不足、参数不可读或包消失压缩成不存在。
 
-IFEO 注册、启动入口和防递归创建作为平台层独立模块，完整契约见 [第九章](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。原始入口、CLI/Guard 和包内 helper 最终创建目标时均受该契约约束；普通 CreateProcess 成功不能证明创建的是目标而非 IFEO host。
+不实现 IFEO 注册、入口或防递归创建。平台在普通启动和包 helper 创建前只读检查系统 Debugger 重定向；发现时返回 `EXTERNAL_DEBUGGER_UNSUPPORTED`，不修改、绕过第三方规则。成功创建后仍核验精确目标身份。
 
 **1. 进程创建与身份**
 
-普通 EXE 使用 Windows 参数转义规则构造 argv，cwd/env 独立传递；不经过 cmd.exe，不接受 .cmd/.bat 作为普通应用。平台统一封装一个生产 spawn 接口；无 IFEO 时的普通创建可选 std::process::Command + Windows 扩展，需要精确句柄或 IFEO 调试创建时封装 CreateProcessW。M0 同时验证普通与防递归模式后确定组合，不维护两套业务启动流程。[Rust Windows 进程接口](https://doc.rust-lang.org/std/os/windows/process/trait.CommandExt.html)。
+普通 EXE 使用 Windows 参数转义规则构造 argv，cwd/env 独立传递；不经过 cmd.exe，不接受 .cmd/.bat 作为普通应用。平台统一使用 std::process::Command 和创建后身份核验，不提供调试创建模式。[Rust Windows 进程接口](https://doc.rust-lang.org/std/os/windows/process/trait.CommandExt.html)。
 
 子进程句柄不继承不相关的文件/管道；关闭 launcher 不自动 kill 应用。控制台与 GUI subsystem、CREATE_NO_WINDOW 等标志区分 helper 和用户目标，不能用隐藏窗口选项误隐藏目标界面。spawn 成功只表示创建，随后必须查询身份。
 
@@ -18,11 +18,11 @@ ProcessIdentity 包含 PID、GetProcessTimes 创建时间、完整映像路径/�
 
 单进程归属判断使用精确安装映像和分身 `user-data` 目录文件身份，名称、PID 或父 PID 不构成管理授权。Chromium 参数按 Windows 开关前缀/大小写与终止符识别，重复、空数据目录或 `single-argument` 等不能可靠解释的输入返回未知。主进程、辅助进程、角色未知与实例关系分别表示；辅助进程没有目录参数时不凭父 PID 推断归属。只登记分身的目标不会认领无分身参数的原版；原版目标遇显式数据目录仍需核对，因为该目录可能就是默认目录。
 
-已识别且没有自身目录参数的辅助进程可通过存活祖先补充只读归属：逐层核对同映像文件身份、SID/session 和严格更早的创建时间；最多 8 层，共享原 5 秒查询预算。每层持有原生句柄，递归返回后再次验证存活与完整身份。无法读取、父退出、PID 复用、角色不明或自身目录无效时不据此排除。继承归属不会把辅助进程提升为主进程，也不授予 Guard 或 IFEO 的执行权限。
+已识别且没有自身目录参数的辅助进程可通过存活祖先补充只读归属：逐层核对同映像文件身份、SID/session 和严格更早的创建时间；最多 8 层，共享原 5 秒查询预算。每层持有原生句柄，递归返回后再次验证存活与完整身份。无法读取、父退出、PID 复用、角色不明或自身目录无效时不据此排除。继承归属不会把辅助进程提升为主进程，也不授予 Guard 的执行权限。
 
 从外部命令行读取的目录只进行有界本地比较：拒绝 UNC/设备/相对路径和远端磁盘，从根向叶使用不跟随 reparse 的句柄并保留父目录 pin，遇链接或不可读保持未知。保留 verbatim DOS 路径语义，不能把尾点目录归一为其他目录。该比较与 WMI 共用同一个查询预算和进程句柄，比较后进程退出或身份变化就拒绝结果。此接口不证明全系统没有其他实例，不验证应用所有网络流量，也不授权自动终止。
 
-停止步骤为验证身份 → 获取并保留进程句柄 → 对属于该 PID 的窗口尝试正常关闭 → 等待 → 再验证 → 通过该句柄终止。窗口消息发送本身必须限时。禁止按进程名杀、直接 /T 杀整棵未验证进程树、为方便开启全局调试权限。
+普通停止步骤为验证身份 → 获取并保留进程句柄 → 对属于该 PID 的窗口尝试正常关闭 → 等待 → 再验证 → 通过该句柄终止。窗口消息发送本身必须限时。Guard 对已确认未代理的目标使用立即终止策略，跳过窗口消息与正常退出等待，仍核对完整身份、持有精确句柄并确认退出。禁止按进程名杀、直接 /T 杀整棵未验证进程树、为方便开启全局调试权限。
 
 **2. MSIX 解析与稳定定位**
 
@@ -32,7 +32,7 @@ ProcessIdentity 包含 PID、GetProcessTimes 创建时间、完整映像路径/�
 
 平台安装解析返回持有只读文件句柄的短期结果，由句柄取得规范化路径及卷/文件身份，用于识别大小写路径和硬链接。准备阶段拒绝文件写入/删除共享，最终创建前仍复核 locator 和包版本；确认创建后释放该安装句柄，不阻碍应用生命周期内的更新。此解析只证明当前文件/安装身份，不证明目标程序可启动、多开或代理已生效。[GetFinalPathNameByHandleW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)。
 
-首版用受控 PowerShell 5.1 脚本执行 Appx 解析/激活，参数通过结构化输入或参数绑定传入，绝不把用户数据拼进 `-Command`。PowerShell 可执行文件来自 SystemRoot 固定路径，-NoProfile、-NonInteractive；输出只有版本化 JSON DTO，限制大小和超时。后续原生包查询通过相同 contract tests 后替换这个适配器，不改变业务接口。
+Appx 解析每次用原生 API 查询当前用户的包登记、完整包名和安装路径，并重新计算有大小上限的清单内容摘要；仅在这些信息都未变化时复用清单解析结果，最多保留 16 项，按用户、family 和 app_id 分开。不缓存进程身份/参数或长期持有安装句柄。卸载、歧义、清单读取失败、EXE 缺失均返回错误，不回退过期结果。首次或内容变化时使用受控 PowerShell 5.1 解析清单，并在解析后再次校验登记与摘要；包激活仍通过同一脚本。参数采用结构化输入，固定 SystemRoot 路径、-NoProfile、-NonInteractive、有界 JSON 和超时。[原生当前用户包查询](https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-findpackagesbypackagefamily)、[原生安装路径查询](https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getpackagepathbyfullname)。
 
 **3. 包上下文激活与回执**
 
@@ -62,7 +62,7 @@ request 消费采用独占 claim 文件/系统锁，helper 全程持有，确保
 
 **5. ETW listener 与权限分离**
 
-普通 coordinator 负责判断和启动；提权 listener 只消费 kernel process provider 并发送事件。它不接受任意文件写入、执行程序、终止进程或变更目标环境的 RPC。提供的数据为 protocol version、epoch、sequence、PID、映像短名、事件时间；创建时间/用户/session/参数由普通侧重新查询。
+普通 coordinator 负责判断和启动；提权 listener 只消费 kernel process provider 并发送事件。它不接受任意文件写入、执行程序、终止进程或变更目标环境的 RPC。事件管道 v2 提供 epoch、sequence、PID、CreateTime、映像短名及事件时间。普通侧 OpenProcess 固定确切对象并核对创建时间/用户/session/映像，以 NtQueryInformationProcess 的 ProcessCommandLineInformation（60）取得参数，检查长度及返回缓冲区边界。命令行保留在普通侧内存，不进入事件管道或计时日志；同一进程句柄一直保留到停止。当前 provider 不提供命令行，失败时保守诊断并请求后台补扫。
 
 使用当前用户/store/session 绑定的固定 ETW session 名，创建前检查同名 session 的 GUID/属性，不抢占别人的 session。StartTrace/EnableTrace/OpenTrace/ProcessTrace/CloseTrace 及 TDH 解码封装在专用线程；丢事件、回调异常、缓冲区超限都转为 degraded 并触发补漏扫描。低流量刷新策略在 Rust 实现后实测，不声称换语言自动降低 ETW 的系统刷新延迟。[StartTraceW](https://learn.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-starttracew)。
 
@@ -72,7 +72,7 @@ request 消费采用独占 claim 文件/系统锁，helper 全程持有，确保
 
 部署平台采用不可变 generation：固定位置为系统 Known Folder Program Files 下的 AppProxyRust/Guard/用户摘要/store/generation，不接受手动安装目录。普通前台先固定同发行目录的 host 文件及所有父目录，记录 fileID、大小和 SHA256，并持续持有句柄直到提权安装结束；这些预期值通过固定 UAC 参数传递，不在提权侧从可写请求重新计算。提权侧只能复制自身映像路径对应且匹配该预期的文件，并验证仍存活的普通请求进程属于同一 SID/session。
 
-每代 helper 与记录由管理员拥有，显式受保护 DACL 仅授予系统/管理员完全控制，普通 Users 只读/执行；不修补或覆盖陌生目录的 ACL。新 generation 和文件独占创建，内容同步后回读大小/hash/fileID/记录绑定，并保留验证句柄。目录、重解析点及文件硬链接异常拒绝。此阶段不切换任务或 IFEO；失败残留不作为有效安装，也不自动递归清除。任务注册事务必须在后续另行核验，不能用 generation 存在替代 Guard active。
+每代 helper 与记录由管理员拥有，显式受保护 DACL 仅授予系统/管理员完全控制，普通 Users 只读/执行；不修补或覆盖陌生目录的 ACL。新 generation 和文件独占创建，内容同步后回读大小/hash/fileID/记录绑定，并保留验证句柄。目录、重解析点及文件硬链接异常拒绝。此阶段不切换任务；失败残留不作为有效安装，也不自动递归清除。任务注册事务必须在后续另行核验，不能用 generation 存在替代 Guard active。
 
 前台监听安装固定调用同发行目录的 host `guard-install --ticket <hex>`。ticket 为有界严格 JSON 的小写十六进制编码，仅含版本/store/普通 issuer 完整身份/UAC 前来源期望，不含写入位置或任意执行命令。ShellExecuteEx 使用固定 runas、NOASYNC、NOCLOSEPROCESS 及隐藏 helper 窗口；操作系统安全提示仍显示。只在交互式 Guard 启用流程中用户选择安装后调用，不从查询或后台循环发起。[ShellExecuteEx 标志契约](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)。
 
@@ -90,7 +90,7 @@ UAC 等待放在独立前台线程；Ctrl+C 可以结束等待并让普通 issue
 
 **6. 命名管道协议边界**
 
-受保护 host 的 `event-listen --store UUID --generation UUID` 入口先核验提升权限、deployment 和自身映像，持有普通 coordinator 映像的身份/hash pin 后创建事件管道。在统一 30 秒截止前等待普通 coordinator 认证；陌生连接不会延长截止。只有认证通过才恢复/开启 ETW。每 250ms 发送提示或空心跳，满批次继续排空，结束标记在最后一批发送。管道断开/写入超时/查询错误时退出并停止自有 trace，用户应用不受影响。此入口没有接收控制命令、启动应用或终止应用的能力。
+受保护 host 的 `event-listen --store UUID --generation UUID` 入口先核验提升权限、deployment 和自身映像，持有普通 coordinator 映像的身份/hash pin 后创建事件管道。在统一 30 秒截止前等待普通 coordinator 认证；陌生连接不会延长截止。只有认证通过才恢复/开启 ETW。每 20ms 按固定时钟核验自有 session 的 GUID/名称/属性后以原 handle 执行 `EVENT_TRACE_CONTROL_FLUSH`，发送提示或空心跳；错过的周期跳过，不突发追赶。ETW 回调仅入有界队列并通知发送循环，发送循环立即排空，事件通知不额外触发原生刷新。积压事件不能饿死定时核验，结束标记在最后一批发送。刷新在控制侧执行，不在 ETW 回调里执行；不刷新未核验归属的会话，也不将配置间隔宣称为实际延迟上限。管道断开/写入超时/查询错误时退出并停止自有 trace，用户应用不受影响。此入口没有接收控制命令、启动应用或终止应用的能力。[ControlTrace 刷新接口](https://learn.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-controltracew)。
 
 ETW 所属记录固定保存在受保护 store 目录的 `events-<session>.json`，跨 helper generation 共享。写入句柄拒绝其他写入和删除，并保留至 trace 停止后。新 epoch 必须在 StartTrace 前同步到磁盘；崩溃后只在持有相同独占句柄、记录绑定 SID/store/session 且旧 epoch 与查询返回 GUID 一致时恢复。查询返回的 WNODE_HEADER.HistoricalContext 是会话 handle；再用该 handle 核对名称/GUID/实时模式/无日志文件，之后才停止。未知会话、损坏记录和身份冲突均保留并报错，不按名称直接删除。[Windows WNODE_HEADER 契约](https://learn.microsoft.com/en-us/windows/win32/etw/wnode-header)。旧 trace 停止后才写下一 epoch，部分写入不能丢失一个仍存活 trace 的所有权记录。
 
@@ -122,7 +122,7 @@ coordinator 登录任务在 Guard desired enabled 且授权已完成时安装，
 
 登录任务平台、持久事务与 Guard 启用入口已接入。Prepared 从已核验监听组件和同发行版 coordinator 映像派生固定路径；调用方经 Store::begin_login 在注册前持久保存 Registration。固定 action 为 `serve --home <原数据目录> --expected-store <UUID>`，Windows 参数转义保留空格和尾反斜线，拒绝 `%`/`$(` 替换形式。host 在 store 锁内、恢复任何未完成配置前核对 UUID；目录缺失不创建，目录改绑另一 store 时不恢复其配置。注册不自动执行任务，只创建缺失项或复用完整相同项；现存冲突保留。历史读取和空闲解除只依赖原归属记录，不要求原 host、store 或提权监听器仍存在，不调用 Stop。
 
-启用 Guard 时先检查登录 RPC 能力，监听组件就绪后自动登记普通用户登录入口，目录仍自动选择；已有未完成请求只提示原 ID，使用 `guard login resume <ID>` 显式恢复。`guard login status/request/remove` 分别核验当前入口、查询历史回执、解除本工具登记的空闲入口。关闭 Guard 不自动删除任务或应用。当前运行保护与下次登录就绪分开显示；登录查询失败不阻止查看或关闭 Guard。就绪核验同时检查原 home 的 store/SID 与当前 home 物理路径、精确任务定义/ACL、受保护 coordinator 映像及监听任务，历史 Created 不构成就绪证据。COM 查询限一个实际 worker、3 秒应答预算；超时不释放仍运行的 worker 槽。变更独立单槽、掉应答后继续保活记账；终态完整请求重放先于变更槽。创建完成前后仅本次配置/创建回执推进确认版本，状态跨版本时提示重新核对。真实登录触发、提权授权全链和集成修复/卸载仍待验收。
+启用 Guard 时先检查登录 RPC 能力，监听组件就绪后自动登记普通用户登录入口，目录仍自动选择；已有未完成请求只提示原 ID，使用 `guard login resume <ID>` 显式恢复。`guard login status/request/remove` 分别核验当前入口、查询历史回执、解除本工具登记的空闲入口。关闭 Guard 不自动删除任务或应用。当前运行保护与下次登录就绪分开显示；登录查询失败不阻止查看或关闭 Guard。就绪核验同时检查原 home 的 store/SID 与当前 home 物理路径、精确任务定义/ACL、受保护 coordinator 映像及监听任务，历史 Created 不构成就绪证据。COM 查询限一个实际 worker、3 秒应答预算；超时不释放仍运行的 worker 槽。变更独立单槽、掉应答后继续保活记账；终态完整请求重放先于变更槽。创建完成前后仅本次配置/创建回执推进确认版本，状态跨版本时提示重新核对。真实登录触发、提权授权全链和保留数据卸载仍待验收；登录任务被删除后的修复不在范围内。
 
 `state/login-task.json` 保存原 Create/Remove 请求、固定 Registration 和完成阶段。全局 revision 检查及 intent 写入在短配置锁内；Job/Completion 连续持有独立 `login-operation.lock` 和 store owner lease，在配置锁外执行 COM，原生操作完成后重新持短锁合并准确的 manifest.guard_login_task 并保存回执。其他登录变更立即返回 Busy，不能让迟到创建越过删除；历史查询不执行 OS 操作，就绪查询只读核验，终态重放也不等待新任务或恢复无关配置。中断后仅显式按原 ID 恢复：已存在精确任务可补记账，确定缺失才要求仍启用 Guard 和重新核验授权；全部 Guard 已关闭时拒绝重新登记缺失任务，已产生的外部结果仍可记账供清理。删除必须绑定原 Create ID，可以取消未完成创建，历史 Create 不会重建后来已解除的任务。活动归属长期保留，解除历史保留七天；最多 256 项/2 MiB，接纳创建前预留完整终态字节，容量不能阻止已接受工作的完成或清理。config/core/launch/shortcut/login 请求 ID 双向互斥。
 
@@ -134,6 +134,8 @@ coordinator 登录任务在 Guard desired enabled 且授权已完成时安装，
 
 **8. 分发与升级**
 
-首版继续支持固定目录便携安装，不宣称移动目录后已有入口自动修复。release 包包括 CLI、host 和版本化 MSIX 桥接，不携带 sing-box。运行时一键安装的内核独立记录来源、版本和许可证。新版本替换整个发行目录中的应用文件需先停止 coordinator/listener 或采用 side-by-side 安装；不在运行中覆盖同名 EXE。
+首版继续支持固定目录便携安装，不宣称移动目录后已有入口自动修复。release 包包括 CLI、host 和版本化 MSIX 桥接，不携带 sing-box。运行时一键安装的内核独立记录来源、版本和许可证。固定目录内更新前需先停止 coordinator/listener，再成套替换发行文件；不在运行中覆盖同名 EXE，不提供跨目录升级或 side-by-side 切换流程。
 
-提供 `integration repair`：核验新工具位置、修复本工具快捷方式及普通任务；提权 listener 需要更新时提示前台授权。数据根和实例 ID 保持。只有 coordinator 管理任务已停止且无未决 attempt 才允许版本切换；用户应用可否继续运行取决于是否能继承观测，不在首版升级流程中假定热接管。
+2026-09-20 范围收敛：不做跨目录升级或移动后入口重定向，也不做 Windows 登录任务被外部删除后的专用检测、自愈或修复流程。这两项不再列为待办或发布门槛。保留固定目录使用、正常登录自启的创建/查询/移除，以及已接受但未完成操作的显式恢复。已有只读查询仍如实报告入口不可用，不能把历史创建回执当作当前就绪。
+
+不提供通用 `integration repair` 命令。既有 shortcut repair 仅处理原位置丢失的快捷方式，不扩展为迁移程序或登录任务重建。版本替换仍需无未决 attempt，并核对协议/配置版本；不假定热接管。
