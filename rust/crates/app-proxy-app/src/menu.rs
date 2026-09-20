@@ -231,15 +231,24 @@ pub async fn run(root: PathBuf) -> Result<(), Failure> {
 async fn select_instance(
     root: &Path,
     foreground: &mut Foreground,
+    with_status: bool,
 ) -> Result<(CatalogPage, Uuid), Failure> {
     let snapshot = catalog(root).await?;
     if snapshot.instances.is_empty() {
         return Err(fail(2, "尚无实例，请先添加。"));
     }
     let mut options = Vec::new();
-    println!("正在读取实例及保护状态…");
+    if with_status {
+        println!("正在读取实例及保护状态…");
+    }
     for instance in &snapshot.instances {
         foreground.check()?;
+        // Choosing what to launch needs configuration only. Read-only process
+        // observations belong to management, not the ordinary launch path.
+        if !with_status {
+            options.push(instance_label(&snapshot, instance));
+            continue;
+        }
         let status = coordinator::guard_status(root.into(), instance.id)
             .await
             .ok();
@@ -266,7 +275,7 @@ async fn select_instance(
     Ok((snapshot, id))
 }
 async fn launch(root: &Path, foreground: &mut Foreground) -> Result<(), Failure> {
-    let (snapshot, id) = select_instance(root, foreground).await?;
+    let (snapshot, id) = select_instance(root, foreground, false).await?;
     launch_confirmed(root, &snapshot, id, foreground).await
 }
 async fn launch_confirmed(
@@ -412,7 +421,7 @@ async fn add_instance(root: &Path, foreground: &mut Foreground) -> Result<(), Fa
     if guarded {
         println!("默认开启保护；授权后会检查并纠正不符合代理要求的误启动主进程。");
         if !isolated {
-            println!("此记录将管理原版；当前 IFEO 启动前接管尚未完成验证，不能报告完整保护。");
+            println!("此记录将管理原版；Guard 在启动后检查，误启动可能被关闭并通过代理重启。");
         } else {
             println!("只管理这个分身，不接管未登记的原版。");
         }
@@ -473,7 +482,7 @@ async fn finish_instance(
 }
 
 async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(), Failure> {
-    let (snapshot, id) = select_instance(root, foreground).await?;
+    let (snapshot, id) = select_instance(root, foreground, true).await?;
     let instance = snapshot.instances.iter().find(|i| i.id == id).unwrap();
     let action = fixed(
         "管理实例",

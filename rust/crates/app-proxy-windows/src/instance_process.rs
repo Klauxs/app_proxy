@@ -55,6 +55,37 @@ pub struct InstanceTarget<'a> {
     template: Template,
 }
 impl<'a> InstanceTarget<'a> {
+    /// Fast Guard main attribution. No candidate enumeration, ancestor query or
+    /// WMI call. The caller retains this exact process through stop dispatch.
+    pub fn inspect_pinned(
+        &self,
+        process: &crate::native_process::PinnedProcess,
+        endpoint: SocketAddr,
+    ) -> Result<InstanceObservation> {
+        process.verify()?;
+        if process.identity().image_file != *self.application.image()
+            || self.template == Template::Environment
+            || !endpoint.ip().is_loopback()
+            || endpoint.port() == 0
+        {
+            return Err(Error::IdentityMismatch);
+        }
+        let (role, relation) = classify(
+            process.arguments(),
+            self.data.map(|d| d.paths.user_data.as_path()),
+        )?;
+        let proxy = if role == ProcessRole::Main && relation == InstanceRelation::Target {
+            proxy_arguments(process.arguments(), endpoint)
+        } else {
+            ProxyArguments::Unknown
+        };
+        Ok(InstanceObservation {
+            identity: process.identity().clone(),
+            role,
+            relation,
+            proxy,
+        })
+    }
     pub fn new(
         application: &'a ResolvedApplication,
         data: Option<&'a PreparedData>,
@@ -85,6 +116,62 @@ impl<'a> InstanceTarget<'a> {
             return Err(Error::Invalid("INVALID_PROXY_ENDPOINT"));
         }
         self.inspect_with_proxy(expected, Some(endpoint)).await
+    }
+
+    /// One bounded WMI query for this scan's exact candidates. Parent rows are
+    /// shared only within this call; every native identity is still rechecked.
+    pub async fn inspect_candidates(
+        &self,
+        candidates: &[ProcessIdentity],
+        endpoint: Option<SocketAddr>,
+    ) -> Result<Vec<InstanceObservation>> {
+        if endpoint.is_some_and(|e| !e.ip().is_loopback() || e.port() == 0) {
+            return Err(Error::Invalid("INVALID_PROXY_ENDPOINT"));
+        }
+        let mut result = Vec::new();
+        let mut queried = Vec::new();
+        for expected in candidates {
+            if expected.image_file != *self.application.image()
+                || self.template == Template::Environment
+            {
+                result.push(self.inspect_with_proxy(expected, endpoint).await?);
+            } else {
+                queried.push(expected.clone());
+            }
+        }
+        if queried.is_empty() {
+            return Ok(result);
+        }
+        let data = self.data.map(|data| data.paths.user_data.clone());
+        let inputs = queried.clone();
+        let inspected = process_query::inspect_group_with(&queried, move |batch, deadline| {
+            inputs
+                .into_iter()
+                .map(|expected| {
+                    batch.inspect(expected, deadline, |observed| {
+                        let (role, relation) =
+                            classify_family(batch, &observed, data.as_deref(), deadline, 0)?;
+                        let proxy =
+                            if role == ProcessRole::Main && relation == InstanceRelation::Target {
+                                endpoint.map_or(ProxyArguments::Unknown, |endpoint| {
+                                    proxy_arguments(observed.arguments.as_deref(), endpoint)
+                                })
+                            } else {
+                                ProxyArguments::Unknown
+                            };
+                        Ok(InstanceObservation {
+                            identity: observed.identity,
+                            role,
+                            relation,
+                            proxy,
+                        })
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .await?;
+        result.extend(inspected);
+        Ok(result)
     }
 
     async fn inspect_with_proxy(
@@ -133,20 +220,24 @@ impl<'a> InstanceTarget<'a> {
             });
         }
         let data = self.data.map(|data| data.paths.user_data.clone());
-        process_query::inspect_with(expected, move |observed, deadline| {
-            let (role, relation) = classify_family(&observed, data.as_deref(), deadline, 0)?;
-            let proxy = if role == ProcessRole::Main && relation == InstanceRelation::Target {
-                endpoint.map_or(ProxyArguments::Unknown, |endpoint| {
-                    proxy_arguments(observed.arguments.as_deref(), endpoint)
+        let process = expected.clone();
+        process_query::inspect_group_with(std::slice::from_ref(expected), move |batch, deadline| {
+            batch.inspect(process, deadline, |observed| {
+                let (role, relation) =
+                    classify_family(batch, &observed, data.as_deref(), deadline, 0)?;
+                let proxy = if role == ProcessRole::Main && relation == InstanceRelation::Target {
+                    endpoint.map_or(ProxyArguments::Unknown, |endpoint| {
+                        proxy_arguments(observed.arguments.as_deref(), endpoint)
+                    })
+                } else {
+                    ProxyArguments::Unknown
+                };
+                Ok(InstanceObservation {
+                    identity: observed.identity,
+                    role,
+                    relation,
+                    proxy,
                 })
-            } else {
-                ProxyArguments::Unknown
-            };
-            Ok(InstanceObservation {
-                identity: observed.identity,
-                role,
-                relation,
-                proxy,
             })
         })
         .await
@@ -165,6 +256,7 @@ impl<'a> InstanceTarget<'a> {
 /// Every ancestor remains pinned and is rechecked after the recursive query;
 /// an exited/reused parent, different image or missing arguments stays unknown.
 fn classify_family(
+    batch: &process_query::Inspection,
     observed: &process_query::ProcessObservation,
     data: Option<&Path>,
     deadline: std::time::Instant,
@@ -185,8 +277,8 @@ fn classify_family(
     if !valid_parent(&observed.identity, &parent) {
         return Ok(result);
     }
-    process_query::inspect_on_thread(parent, deadline, |parent| {
-        let (_, relation) = classify_family(&parent, data, deadline, depth + 1)?;
+    batch.inspect(parent, deadline, |parent| {
+        let (_, relation) = classify_family(batch, &parent, data, deadline, depth + 1)?;
         Ok((ProcessRole::Auxiliary, relation))
     })
 }

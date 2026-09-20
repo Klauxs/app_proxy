@@ -8,7 +8,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const HEARTBEAT: Duration = Duration::from_millis(250);
+const HEARTBEAT: Duration = Duration::from_millis(20);
 
 pub async fn run(store: Uuid, generation: Uuid) -> Result<()> {
     identity::assert_elevated_user()?;
@@ -23,8 +23,16 @@ pub async fn run(store: Uuid, generation: Uuid) -> Result<()> {
     // No trace is created or recovered before an authenticated ordinary host
     // connects. The journal excludes simultaneous owners across generations.
     let mut trace = deployment.event_trace()?;
+    let ready = trace.listener.ready();
     let result = pump(
-        || trace.listener.drain(),
+        |flush| {
+            if flush {
+                trace.listener.drain()
+            } else {
+                trace.listener.drain_ready()
+            }
+        },
+        &ready,
         async |batch| sender.send(batch).await,
     )
     .await;
@@ -53,13 +61,25 @@ async fn accept_until<T>(
 }
 
 async fn pump(
-    mut drain: impl FnMut() -> Result<EventBatch>,
+    mut drain: impl FnMut(bool) -> Result<EventBatch>,
+    ready: &tokio::sync::Notify,
     mut send: impl AsyncFnMut(EventBatch) -> Result<()>,
 ) -> Result<()> {
+    let mut refresh = tokio::time::interval(HEARTBEAT);
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut backlog = false;
     loop {
-        let batch = drain()?;
+        // A hot callback queue must not starve ownership/loss checks. Native
+        // flushes run on the timer, never for every callback or on its thread.
+        let flush = tokio::select! {
+            biased;
+            _ = refresh.tick() => true,
+            _ = ready.notified() => false,
+            _ = tokio::task::yield_now(), if backlog => false,
+        };
+        let batch = drain(flush)?;
         let ended = batch.ended;
-        let has_backlog = batch.hints.len() == crate::etw::BATCH_LIMIT;
+        backlog = batch.hints.len() == crate::etw::BATCH_LIMIT;
         send(batch).await?;
         if let Some(code) = ended {
             return if code == 0 {
@@ -70,11 +90,6 @@ async fn pump(
                     code,
                 })
             };
-        }
-        if has_backlog {
-            tokio::task::yield_now().await;
-        } else {
-            tokio::time::sleep(HEARTBEAT).await;
         }
     }
 }

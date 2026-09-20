@@ -19,7 +19,7 @@ pub(super) struct Record {
     checked: Instant,
 }
 impl Record {
-    fn new(revision: u64, phase: ScanPhase, diagnostic: Option<String>) -> Self {
+    pub(super) fn new(revision: u64, phase: ScanPhase, diagnostic: Option<String>) -> Self {
         Self {
             revision,
             phase,
@@ -63,7 +63,7 @@ impl Schedule {
             (ScanPhase::Blocked, 1 | 2) => Duration::from_millis(500),
             (ScanPhase::Blocked, _) => FULL_SCAN,
             (ScanPhase::Checking, _) => POLL,
-            _ => Duration::from_millis(500),
+            _ => Duration::from_millis(50),
         };
         self.delays.insert(id, (failures, now + delay));
         if phase != ScanPhase::Ready {
@@ -79,7 +79,7 @@ impl Monitor {
         let mut authorization: Option<Arc<Authorization>> = None;
         let mut pending: Option<Task<Result<GuardScan>>> = None;
         let mut scanning = None;
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let mut rescan = false;
@@ -134,6 +134,7 @@ impl Monitor {
                 continue;
             };
             if rescan {
+                app_proxy_windows::diagnostic_timing::mark("scan.requested", || owner.to_string());
                 for instance in &manifest.instances {
                     if instance.guard.desired == Desired::Enabled {
                         schedule.enqueue(instance.id);
@@ -178,6 +179,7 @@ impl Monitor {
             {
                 let launch = self.launch.clone();
                 scanning = Some(id);
+                app_proxy_windows::diagnostic_timing::mark("scan.scheduled", || id.to_string());
                 pending = Some(Task(tokio::spawn(
                     async move { launch.observe_guard(id).await },
                 )));
@@ -234,8 +236,8 @@ impl Monitor {
             GuardObservation::Blocked { code } => (ScanPhase::Blocked, Some(code)),
             GuardObservation::Disabled {} => return Err(Error::Invalid("GUARD_CONFIG_DISABLED")),
             GuardObservation::Absent {} => {
-                // Preserve the most recent failed correction across scans and
-                // coordinator restarts; absence is not evidence of recovery.
+                // Preserve dispatched and non-transient failures across scans
+                // and restarts; only pre-stop process races can clear here.
                 let attempts = self.configuration.lock()?.launch_attempts()?;
                 match recent_failure(&attempts, scan.instance_id) {
                     Some(code) => (ScanPhase::Blocked, Some(code)),
@@ -281,7 +283,28 @@ fn recent_failure(attempts: &[LaunchAttempt], instance: Uuid) -> Option<String> 
             a.instance_id == instance && a.accepted_at == latest && a.guard_correction.is_some()
         })
         .find_map(|a| match &a.phase {
-            LaunchPhase::Failed { code } => Some(code.clone()),
+            LaunchPhase::Failed { code } => {
+                let correction = a.guard_correction.as_ref().unwrap();
+                // Called only after a fresh Absent observation. A pre-stop
+                // process race no longer describes current readiness; retain
+                // its journal entry, and keep all dispatched/unknown failures.
+                let transient = matches!(
+                    code.as_str(),
+                    "PROCESS_EXITED_DURING_INSPECTION"
+                        | "PROCESS_QUERY_NOT_FOUND"
+                        | "GUARD_TARGET_EXITED_BEFORE_STOP"
+                        | "GUARD_CANDIDATES_CHANGED"
+                );
+                if transient
+                    && correction.stop_started_at.is_none()
+                    && correction.stop_nonce.is_none()
+                    && !correction.stop_confirmed
+                {
+                    None
+                } else {
+                    Some(code.clone())
+                }
+            }
             LaunchPhase::Cancelled {} => Some("GUARD_CORRECTION_CANCELLED".into()),
             _ => None,
         })
@@ -344,20 +367,10 @@ fn overlay(
     status.phase = match record.phase {
         ScanPhase::Blocked => GuardPhase::Blocked,
         ScanPhase::Checking => GuardPhase::Starting,
-        ScanPhase::Ready
-            if status.ifeo == ComponentState::NotApplicable && listener.phase == Phase::Etw =>
-        {
-            GuardPhase::Active
-        }
+        ScanPhase::Ready if listener.phase == Phase::Etw => GuardPhase::Active,
         ScanPhase::Ready => GuardPhase::Degraded,
     };
-    status.diagnostic = record.diagnostic.clone().or_else(|| {
-        if status.ifeo != ComponentState::NotApplicable {
-            Some("GUARD_IFEO_NOT_READY".into())
-        } else {
-            listener.diagnostic
-        }
-    });
+    status.diagnostic = record.diagnostic.clone().or(listener.diagnostic);
 }
 
 #[cfg(test)]
@@ -379,7 +392,6 @@ mod tests {
             desired: Desired::Enabled,
             phase: GuardPhase::Blocked,
             listener: ComponentState::Unverified,
-            ifeo: ComponentState::NotApplicable,
             scan: None,
             diagnostic: Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED".into()),
         };
@@ -438,10 +450,6 @@ mod tests {
         let mut value = status();
         overlay(&mut value, listener.clone(), Some(&fresh));
         assert!(value.phase == GuardPhase::Active);
-        value.ifeo = ComponentState::NeedsAuthorization;
-        overlay(&mut value, listener.clone(), Some(&fresh));
-        assert!(value.phase == GuardPhase::Degraded);
-        assert_eq!(value.diagnostic.as_deref(), Some("GUARD_IFEO_NOT_READY"));
         let mut value = status();
         overlay(&mut value, listener.clone(), None);
         assert!(value.phase == GuardPhase::Starting);
@@ -522,6 +530,32 @@ mod tests {
             matches!(result.phase, LaunchPhase::Failed { ref code } if code == "GUARD_STOPPED_PROXY_UNAVAILABLE")
         );
         let mut ordinary = result.clone();
+        // Fresh absence clears only transient failures with no stop intent.
+        for code in [
+            "PROCESS_EXITED_DURING_INSPECTION",
+            "PROCESS_QUERY_NOT_FOUND",
+            "GUARD_TARGET_EXITED_BEFORE_STOP",
+            "GUARD_CANDIDATES_CHANGED",
+        ] {
+            let mut transient = result.clone();
+            transient.phase = LaunchPhase::Failed { code: code.into() };
+            assert_eq!(
+                recent_failure(&[transient.clone()], id).as_deref(),
+                Some(code)
+            );
+            let correction = transient.guard_correction.as_mut().unwrap();
+            correction.stop_started_at = None;
+            correction.stop_nonce = None;
+            correction.stop_confirmed = false;
+            assert!(recent_failure(&[transient.clone()], id).is_none());
+            transient.phase = LaunchPhase::Failed {
+                code: "PROCESS_QUERY_TIMEOUT".into(),
+            };
+            assert_eq!(
+                recent_failure(&[transient], id).as_deref(),
+                Some("PROCESS_QUERY_TIMEOUT")
+            );
+        }
         ordinary.id = Uuid::new_v4();
         ordinary.guard_correction = None;
         ordinary.phase = LaunchPhase::Cancelled {};
@@ -624,6 +658,21 @@ mod tests {
         assert_eq!(schedule.take(now), None);
         assert_eq!(schedule.take(now + Duration::from_secs(1)), Some(a));
     }
+    #[test]
+    fn new_event_after_ready_scan_waits_only_the_short_coalescing_interval() {
+        let mut schedule = Schedule::default();
+        let id = Uuid::new_v4();
+        let now = Instant::now();
+        schedule.finished(id, ScanPhase::Ready, now);
+        assert!(schedule.queue.is_empty());
+        schedule.enqueue(id);
+        assert_eq!(schedule.take(now + Duration::from_millis(49)), None);
+        assert_eq!(schedule.take(now + Duration::from_millis(50)), Some(id));
+        schedule.finished(id, ScanPhase::Blocked, now);
+        assert_eq!(schedule.take(now + Duration::from_millis(50)), None);
+        assert_eq!(schedule.take(now + Duration::from_millis(500)), Some(id));
+    }
+
     #[test]
     fn unknown_has_three_checks_then_backs_off_despite_event_storms() {
         let mut schedule = Schedule::default();

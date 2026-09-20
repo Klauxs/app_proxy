@@ -39,6 +39,26 @@ fn corrupt_and_unknown_config_are_never_reset() {
 }
 
 #[test]
+fn retired_ifeo_registration_is_rejected_without_resetting_the_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    drop(Store::create(&root).unwrap());
+    let path = root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["integrations"]["ifeo"] = serde_json::json!([{"id":"legacy-registration"}]);
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        Store::open(&root),
+        Err(app_proxy_windows::Error::Invalid(
+            "LEGACY_IFEO_CLEANUP_REQUIRED"
+        ))
+    ));
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[test]
 fn secrets_are_immutable_and_missing_references_block_commit() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("store");

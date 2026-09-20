@@ -21,7 +21,7 @@ pub enum Command {
     Status { id: Uuid },
     /// 保存启用意图；所需组件未授权时报告保护未完成
     Enable { id: Uuid },
-    /// 关闭实例保护；已有 IFEO 时必须先解除系统接管
+    /// 关闭实例保护
     Disable { id: Uuid },
 }
 
@@ -319,7 +319,7 @@ pub(crate) async fn run_with_foreground(
             }
         }
         println!(
-            "实例 {id}：{}；监听：{}；IFEO：{}。",
+            "实例 {id}：{}；监听：{}。",
             match status.phase {
                 GuardPhase::Disabled => "保护已关闭",
                 GuardPhase::NeedsAuthorization => "保护未生效，等待组件授权",
@@ -328,8 +328,7 @@ pub(crate) async fn run_with_foreground(
                 GuardPhase::Active => "保护运行中",
                 GuardPhase::Degraded => "保护降级，请查看诊断",
             },
-            component(status.listener),
-            component(status.ifeo)
+            component(status.listener)
         );
         if let Some(scan) = status.scan {
             use crate::launch_engine::GuardObservation;

@@ -38,6 +38,9 @@ impl LaunchEngine {
     /// Does not contact a proxy, create data, adopt a process, or enable Guard.
     /// Listener authorization and its lifecycle are separate from this evidence.
     pub async fn observe_guard(&self, instance_id: Uuid) -> Result<GuardScan> {
+        let _timing = app_proxy_windows::diagnostic_timing::Span::new("scan.total", || {
+            instance_id.to_string()
+        });
         let snapshot = self.configuration.snapshot()?;
         let (application, instance) = entries(&snapshot, instance_id)?;
         let observation = if instance.guard.desired != Desired::Enabled {
@@ -85,6 +88,11 @@ impl LaunchEngine {
         } else {
             observation
         };
+        if let GuardObservation::Correction { target } = &observation {
+            app_proxy_windows::diagnostic_timing::mark("scan.correction", || {
+                format!("{}:{}", instance_id, target.process.pid)
+            });
+        }
         Ok(GuardScan {
             instance_id,
             revision: snapshot.revision,
@@ -132,14 +140,25 @@ impl LaunchEngine {
             .ok_or(Error::Invalid("PROFILE_NOT_FOUND"))?
             .endpoint
             .clone();
+        let timing = app_proxy_windows::diagnostic_timing::Span::new("scan.resolve", || {
+            instance.id.to_string()
+        });
         let resolved = self
             .resolve_for_observation(application.locator.clone())
             .await?;
+        drop(timing);
+        let timing = app_proxy_windows::diagnostic_timing::Span::new("scan.candidates", || {
+            instance.id.to_string()
+        });
         let candidates =
             query_when_ready(|| process_query::application_candidates(&resolved)).await?;
+        drop(timing);
         if candidates.is_empty() {
             return Ok(GuardObservation::Absent {});
         }
+        let timing = app_proxy_windows::diagnostic_timing::Span::new("scan.data", || {
+            instance.id.to_string()
+        });
         let data = {
             let store = self.configuration.lock()?;
             if store.load()?.revision != snapshot.revision {
@@ -148,16 +167,21 @@ impl LaunchEngine {
             store.inspect_instance_data(instance.id, resolved.package())?
         };
         let target = InstanceTarget::new(&resolved, data.as_ref(), application.template_ref)?;
+        drop(timing);
         let mut main = None;
         let mut auxiliary = false;
-        for process in candidates {
-            let observed = query_when_ready(|| {
-                target.inspect_proxy(
-                    &process,
-                    std::net::SocketAddr::new(endpoint.host, endpoint.port),
-                )
-            })
-            .await?;
+        let timing = app_proxy_windows::diagnostic_timing::Span::new("scan.inspect", || {
+            instance.id.to_string()
+        });
+        let observed = query_when_ready(|| {
+            target.inspect_candidates(
+                &candidates,
+                Some(std::net::SocketAddr::new(endpoint.host, endpoint.port)),
+            )
+        })
+        .await?;
+        drop(timing);
+        for observed in observed {
             match (observed.role, observed.relation) {
                 (_, InstanceRelation::Other) => {}
                 (ProcessRole::Auxiliary, InstanceRelation::Target) => auxiliary = true,

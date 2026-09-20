@@ -170,7 +170,7 @@ fn guard_cli_keeps_clone_only_scope_and_reports_authorization_until_components_e
     let id = created["receipt"]["entity_id"].as_str().unwrap();
     assert_eq!(created["requires_action"], "authorize_guard_components");
     assert_eq!(created["protection"]["phase"], "needs_authorization");
-    assert_eq!(created["protection"]["ifeo"], "not_applicable");
+    assert!(created["protection"].get("ifeo").is_none());
     assert_eq!(
         created["protection"]["scan"]["observation"]["state"],
         "absent"
@@ -211,7 +211,6 @@ fn guard_cli_keeps_clone_only_scope_and_reports_authorization_until_components_e
         manifest.instances[0].data,
         InstanceData::Isolated { .. }
     ));
-    assert!(manifest.integrations.ifeo.is_empty());
     assert!(manifest.integrations.guard_login_task.is_none());
     assert!(store.launch_attempts().unwrap().is_empty());
     assert!(!root.join("instances").exists());
@@ -248,7 +247,7 @@ fn guard_cli_keeps_clone_only_scope_and_reports_authorization_until_components_e
 }
 
 #[test]
-fn guard_cli_requires_ifeo_for_original_and_never_claims_manifest_registration_is_active() {
+fn guard_cli_original_requires_listener_and_can_disable_without_ifeo() {
     let (_temp, root, exe) = setup();
     let created = create(&root, &exe, &[]);
     let id = created["receipt"]["entity_id"].as_str().unwrap();
@@ -279,38 +278,12 @@ fn guard_cli_requires_ifeo_for_original_and_never_claims_manifest_registration_i
     let enabled = cli(&root, &["guard", "enable", id, "--json"]);
     assert_eq!(enabled.status.code(), Some(5));
     let enabled: Value = serde_json::from_slice(&enabled.stdout).unwrap();
-    assert_eq!(enabled["status"]["ifeo"], "needs_authorization");
-    owner.stop();
-    let mut store = Store::open(&root).unwrap();
-    let mut manifest = store.load().unwrap();
-    manifest.integrations.ifeo.push(IfeoRegistration {
-        id: Uuid::new_v4(),
-        revision: 1,
-        application_id: manifest.applications[0].id,
-        default_instance_id: id.parse().unwrap(),
-        desired: Desired::Enabled,
-        owner_sid: manifest.owner_sid.clone(),
-        store_id: manifest.store_id,
-        installed_target: InstalledTarget {
-            path: exe.clone(),
-            file_identity: identity::file_identity(&exe).unwrap(),
-            package_full_name: None,
-        },
-        registration_generation: Uuid::new_v4(),
-    });
-    store.commit(manifest.revision, manifest).unwrap();
-    drop(store);
-    owner = Owner::capture(&root);
-    let status = ok(&root, &["guard", "status", id, "--json"]);
-    assert_eq!(status["status"]["phase"], "blocked");
-    assert_eq!(status["status"]["ifeo"], "unverified");
-    let disabled = cli(&root, &["guard", "disable", id, "--json"]);
-    assert_eq!(disabled.status.code(), Some(5));
-    assert!(String::from_utf8_lossy(&disabled.stdout).contains("INTEGRATION_CLEANUP_REQUIRED"));
-    assert_eq!(
-        ok(&root, &["guard", "status", id, "--json"])["status"]["desired"],
-        "enabled"
-    );
+    assert!(enabled["status"].get("ifeo").is_none());
+    assert_eq!(enabled["status"]["listener"], "needs_authorization");
+    assert_eq!(enabled["status"]["phase"], "needs_authorization");
+    let disabled = ok(&root, &["guard", "disable", id, "--json"]);
+    assert_eq!(disabled["status"]["phase"], "disabled");
+    assert!(disabled["status"].get("ifeo").is_none());
     owner.stop();
 }
 
@@ -963,7 +936,6 @@ fn real_cli_lifecycle_keeps_identity_and_data_without_launching_an_application()
     let manifest = store.load().unwrap();
     assert!(manifest.instances.is_empty());
     assert_eq!(manifest.applications.len(), 1);
-    assert!(manifest.integrations.ifeo.is_empty());
     assert_eq!(
         fs::read_to_string(saved_file).unwrap(),
         "retained fixture data"
@@ -990,7 +962,6 @@ fn clone_only_creation_never_registers_original_and_alias_does_not_duplicate_app
             .iter()
             .all(|i| matches!(i.data, InstanceData::Isolated { .. }))
     );
-    assert!(manifest.integrations.ifeo.is_empty());
     assert!(!root.join("instances").exists()); // Data allocation remains deferred to launch.
 }
 

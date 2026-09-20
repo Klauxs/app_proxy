@@ -3,15 +3,12 @@
 use serde_json::Value;
 use std::process::Command;
 
-fn run_probe(debug: bool) {
+fn run_probe() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_app-proxy"));
     command
         .args(["probe", "process"])
         .env("APP_PROXY_PROBE_REMOVE", "must not reach the child")
         .env("APP_PROXY_PROBE_VALUE", "must be replaced only in child");
-    if debug {
-        command.arg("--debug-detach");
-    }
     let output = command.output().expect("run probe CLI");
     assert!(
         output.status.success(),
@@ -29,18 +26,12 @@ fn run_probe(debug: bool) {
     ] {
         assert_eq!(report[check], true, "{check}");
     }
-    assert_eq!(report["ifeo_registration_tested"], false);
     assert!(report["identity"]["creation_time"].as_u64().unwrap() > 0);
 }
 
 #[test]
 fn normal_spawn_roundtrips_real_windows_args_environment_and_identity() {
-    run_probe(false);
-}
-
-#[test]
-fn debuggee_survives_detach_and_debug_thread_exit() {
-    run_probe(true);
+    run_probe();
 }
 
 #[test]

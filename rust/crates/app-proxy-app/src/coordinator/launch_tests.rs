@@ -1323,33 +1323,36 @@ async fn launch_wait_does_not_hold_rpc_slots_and_cancellation_releases_idle_owne
 }
 
 #[tokio::test]
-async fn guard_status_client_rejects_old_minor_before_sending_operation() {
-    let fixture = Fixture::new();
-    let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
-    let status = fixture.shared.identity.clone();
-    let server = tokio::spawn(async move {
-        let mut connection = listener.accept().await.unwrap();
-        connection.receive::<Hello>().await.unwrap();
-        let mut greeting = hello(status.store_id, status.session_id, Some(status.epoch));
-        greeting.protocol_minor = 8;
-        connection
-            .send(&Welcome::Ready { hello: greeting })
-            .await
-            .unwrap();
-        assert!(connection.receive::<Request>().await.is_err());
-    });
-    assert!(matches!(
-        fixture
-            .rpc(
-                Uuid::new_v4(),
-                Operation::GuardStatus {
-                    instance_id: fixture.instance
-                }
-            )
-            .await,
-        Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
-    ));
-    server.await.unwrap();
+async fn guard_status_client_rejects_old_protocol_before_sending_operation() {
+    for (major, minor) in [(2, 19), (PROTOCOL_MAJOR, 8)] {
+        let fixture = Fixture::new();
+        let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+        let status = fixture.shared.identity.clone();
+        let server = tokio::spawn(async move {
+            let mut connection = listener.accept().await.unwrap();
+            connection.receive::<Hello>().await.unwrap();
+            let mut greeting = hello(status.store_id, status.session_id, Some(status.epoch));
+            greeting.protocol_major = major;
+            greeting.protocol_minor = minor;
+            connection
+                .send(&Welcome::Ready { hello: greeting })
+                .await
+                .unwrap();
+            assert!(connection.receive::<Request>().await.is_err());
+        });
+        assert!(matches!(
+            fixture
+                .rpc(
+                    Uuid::new_v4(),
+                    Operation::GuardStatus {
+                        instance_id: fixture.instance
+                    }
+                )
+                .await,
+            Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+        ));
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1469,7 +1472,6 @@ async fn guard_slow_observations_return_metadata_before_real_rpc_frame_deadline(
                         desired: Desired::Enabled,
                         phase: GuardPhase::Blocked,
                         listener,
-                        ifeo: ComponentState::NotApplicable,
                         scan,
                         diagnostic,
                     }),

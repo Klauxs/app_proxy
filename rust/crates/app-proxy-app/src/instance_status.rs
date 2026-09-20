@@ -128,10 +128,9 @@ pub async fn inspect(root: &Path, id: Uuid, json: bool) -> Result<(), Failure> {
         }
         if let Some(guard) = guard {
             println!(
-                "保护：{} · 监听：{} · IFEO：{}",
+                "保护：{} · 监听：{}",
                 guard_label(&guard),
-                crate::guard_cli::component(guard.listener),
-                crate::guard_cli::component(guard.ifeo)
+                crate::guard_cli::component(guard.listener)
             );
             if let Some(note) = guard.diagnostic {
                 println!("保护诊断：{note}");

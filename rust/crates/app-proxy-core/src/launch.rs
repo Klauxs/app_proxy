@@ -11,7 +11,6 @@ pub enum LaunchOrigin {
     Interactive,
     Shortcut,
     Guard,
-    Ifeo,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

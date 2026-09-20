@@ -27,7 +27,20 @@ impl Store {
         self.recover_config_requests()?;
         let manifest = self.load()?;
         let mut journal = self.read_launch_journal()?;
-        let attempt = attempt_mut(&mut journal, id, epoch, &LaunchPhase::CheckingInstance {})?;
+        let phase = journal
+            .attempts
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or(Error::Invalid("LAUNCH_ATTEMPT_NOT_FOUND"))?
+            .phase
+            .clone();
+        if !matches!(
+            phase,
+            LaunchPhase::Accepted {} | LaunchPhase::CheckingInstance {}
+        ) {
+            return Err(Error::Invalid("INVALID_LAUNCH_TRANSITION"));
+        }
+        let attempt = attempt_mut(&mut journal, id, epoch, &phase)?;
         if attempt.cancel_requested {
             return Err(Error::Invalid("LAUNCH_CANCEL_REQUESTED"));
         }
@@ -71,6 +84,9 @@ impl Store {
         correction.stop_nonce = Some(nonce);
         correction.stop_started_at = Some(at);
         let target = correction.target.clone();
+        // Event preparation has no external creation side effects. Persist its
+        // completion together with the one-use stop intent, before termination.
+        attempt.phase = LaunchPhase::CheckingInstance {};
         self.write_launch_journal(&journal)?;
         Ok(GuardStopDispatch {
             owner: ResourceOwner {

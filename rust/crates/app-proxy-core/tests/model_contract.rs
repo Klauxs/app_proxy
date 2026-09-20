@@ -36,7 +36,6 @@ fn only_a_clone_does_not_require_or_create_an_original() {
     manifest.instances.remove(0);
     manifest.validate().unwrap();
     assert_eq!(manifest.instances.len(), 1);
-    assert!(manifest.integrations.ifeo.is_empty());
 }
 
 #[test]
@@ -166,30 +165,18 @@ fn chromium_windows_switch_aliases_cannot_override_managed_fields() {
 }
 
 #[test]
-fn ifeo_requires_an_enabled_registered_original() {
-    let mut manifest = example();
-    let app = &manifest.applications[0];
-    manifest.integrations.ifeo.push(IfeoRegistration {
-        id: Uuid::new_v4(),
-        revision: 1,
-        application_id: app.id,
-        default_instance_id: manifest.instances[1].id,
-        desired: Desired::Enabled,
-        owner_sid: manifest.owner_sid.clone(),
-        store_id: manifest.store_id,
-        installed_target: InstalledTarget {
-            path: "C:\\Apps\\Claude.exe".into(),
-            file_identity: app_proxy_core::FileIdentity {
-                volume_serial: 1,
-                file_index: 2,
-            },
-            package_full_name: None,
-        },
-        registration_generation: Uuid::new_v4(),
-    });
-    invalid(&manifest, "INVALID_IFEO_REGISTRATION");
-    manifest.integrations.ifeo[0].default_instance_id = manifest.instances[0].id;
-    manifest.validate().unwrap();
-    manifest.instances[0].guard.desired = Desired::Disabled;
-    invalid(&manifest, "INVALID_IFEO_REGISTRATION");
+fn retired_ifeo_slot_preserves_empty_manifest_and_rejects_old_registrations() {
+    let original: serde_json::Value =
+        serde_json::from_str(include_str!("../../../examples/manifest.json")).unwrap();
+    let manifest: Manifest = serde_json::from_value(original.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_string(&manifest.integrations).unwrap(),
+        r#"{"shortcuts":[],"guard_login_task":null,"ifeo":[]}"#
+    );
+    // Existing transaction digest input remains unchanged, including the empty slot.
+    assert_eq!(serde_json::to_value(manifest).unwrap(), original);
+    let mut legacy = original;
+    legacy["integrations"]["ifeo"] = serde_json::json!([{"id":"legacy-registration"}]);
+    let error = serde_json::from_value::<Manifest>(legacy).err().unwrap();
+    assert!(error.to_string().contains("LEGACY_IFEO_CLEANUP_REQUIRED"));
 }

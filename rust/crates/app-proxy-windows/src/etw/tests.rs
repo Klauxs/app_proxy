@@ -1,5 +1,20 @@
 use super::*;
 
+#[tokio::test]
+async fn callback_notification_survives_enqueue_before_wait_and_decode_failure() {
+    let state = State::new();
+    state.push(hint(123, 1, 1, &image("App.exe")).unwrap());
+    tokio::time::timeout(Duration::from_secs(1), state.ready.notified())
+        .await
+        .unwrap();
+    assert_eq!(state.drain(Uuid::new_v4()).unwrap().hints.len(), 1);
+    state.failed_decode();
+    tokio::time::timeout(Duration::from_secs(1), state.ready.notified())
+        .await
+        .unwrap();
+    assert!(state.drain(Uuid::new_v4()).unwrap().full_scan_required);
+}
+
 fn image(value: &str) -> Vec<u8> {
     value
         .encode_utf16()
@@ -10,9 +25,10 @@ fn image(value: &str) -> Vec<u8> {
 
 #[test]
 fn hints_are_bounded_names_not_payload_or_identity() {
-    let h = hint(123, 456, &image(r"C:\private-path\应用.exe")).unwrap();
+    let h = hint(123, 1, 456, &image(r"C:\private-path\应用.exe")).unwrap();
     assert_eq!(h.image_name, "应用.exe");
     assert_eq!(h.pid, 123);
+    assert_eq!(h.creation_time, 1);
     assert_eq!(h.event_time, 456);
     for bytes in [
         vec![],
@@ -24,10 +40,11 @@ fn hints_are_bounded_names_not_payload_or_identity() {
         vec![0; 4098],
         vec![0, 0xd8, 0, 0],
     ] {
-        assert!(hint(123, 456, &bytes).is_err());
+        assert!(hint(123, 1, 456, &bytes).is_err());
     }
-    assert!(hint(0, 456, &image("app.exe")).is_err());
-    assert!(hint(123, 0, &image("app.exe")).is_err());
+    assert!(hint(0, 1, 456, &image("app.exe")).is_err());
+    assert!(hint(123, 1, 0, &image("app.exe")).is_err());
+    assert!(hint(123, 0, 456, &image("app.exe")).is_err());
 }
 
 #[test]
@@ -36,10 +53,10 @@ fn bounded_queue_deduplicates_and_reports_overflow_decode_loss_and_end() {
     let epoch = Uuid::new_v4();
     assert!(state.drain(epoch).unwrap().full_scan_required);
     for pid in 1..=QUEUE_LIMIT as u32 {
-        state.push(hint(pid, 1, &image("App.exe")).unwrap());
+        state.push(hint(pid, 1, 1, &image("App.exe")).unwrap());
     }
-    state.push(hint(1, 2, &image("app.exe")).unwrap());
-    state.push(hint(5000, 2, &image("app.exe")).unwrap());
+    state.push(hint(1, 1, 2, &image("app.exe")).unwrap());
+    state.push(hint(5000, 1, 2, &image("app.exe")).unwrap());
     state.failed_decode();
     state.lost(2, 1);
     let batch = state.drain(epoch).unwrap();
@@ -73,7 +90,7 @@ fn ended_listener_delivers_every_queued_hint_in_bounded_batches_before_end() {
     let state = State::new();
     let epoch = Uuid::new_v4();
     for pid in 1..=QUEUE_LIMIT as u32 {
-        state.push(hint(pid, 1, &image("😀.exe")).unwrap());
+        state.push(hint(pid, 1, 1, &image("😀.exe")).unwrap());
     }
     state.ended.store(ERROR_CANCELLED, Ordering::Release);
     let mut pids = Vec::new();
@@ -212,6 +229,11 @@ fn native_session_conflict_owner_check_and_external_stop_final_batch() {
         Err(Error::Invalid("ETW_SESSION_OWNER_MISMATCH"))
     ));
     other.stopped = true;
+    assert!(matches!(
+        other.flush(),
+        Err(Error::Invalid("ETW_SESSION_OWNER_MISMATCH"))
+    ));
+    session.flush().unwrap();
     session.query().unwrap();
     let mut controller = Session {
         handle: session.handle,

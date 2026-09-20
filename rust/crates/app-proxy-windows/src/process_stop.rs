@@ -16,12 +16,33 @@ pub enum StopOutcome {
     StillRunning,
 }
 
+pub fn stop_guarded_pinned(
+    permit: crate::instance_resource::AuthorizedGuardStop<'_>,
+    process: &crate::native_process::PinnedProcess,
+) -> Result<crate::launch_state::GuardStopReceipt> {
+    let _timing = crate::diagnostic_timing::Span::new("stop.total", || {
+        permit.dispatch.target.process.pid.to_string()
+    });
+    let outcome = process.terminate(&permit.dispatch.target.process)?;
+    Ok(crate::launch_state::GuardStopReceipt {
+        owner: permit.dispatch.owner,
+        nonce: permit.dispatch.nonce,
+        target: permit.dispatch.target.clone(),
+        outcome,
+    })
+}
+
 /// Guard path requires both durable intents and keeps the global reservation
 /// borrowed until native stopping has returned. No receipt is issued on error.
 pub fn stop_guarded(
     permit: crate::instance_resource::AuthorizedGuardStop<'_>,
 ) -> Result<crate::launch_state::GuardStopReceipt> {
-    let outcome = stop_exact(&permit.dispatch.target.process, true)?;
+    let _timing = crate::diagnostic_timing::Span::new("stop.total", || {
+        permit.dispatch.target.process.pid.to_string()
+    });
+    // An unproxied Guard target should stop before doing more network work.
+    // User-requested normal stops retain their graceful-close policy below.
+    let outcome = stop_immediately(&permit.dispatch.target.process)?;
     Ok(crate::launch_state::GuardStopReceipt {
         owner: permit.dispatch.owner,
         nonce: permit.dispatch.nonce,
@@ -36,6 +57,20 @@ pub fn stop_guarded(
 /// obtains termination rights only after that grace period and rechecks identity.
 /// Success means this one process exited, not that its descendants have exited.
 pub fn stop_exact(expected: &ProcessIdentity, force: bool) -> Result<StopOutcome> {
+    stop_with_policy(expected, force, true)
+}
+
+fn stop_immediately(expected: &ProcessIdentity) -> Result<StopOutcome> {
+    stop_with_policy(expected, true, false)
+}
+
+fn stop_with_policy(
+    expected: &ProcessIdentity,
+    force: bool,
+    graceful: bool,
+) -> Result<StopOutcome> {
+    let timing =
+        crate::diagnostic_timing::Span::new("stop.native_verify", || expected.pid.to_string());
     identity::assert_ordinary_user()?;
     let caller = identity::current()?;
     if expected.pid == 0
@@ -69,43 +104,45 @@ pub fn stop_exact(expected: &ProcessIdentity, force: bool) -> Result<StopOutcome
     if actual != *expected {
         return Err(Error::IdentityMismatch);
     }
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let windows = windows_for(expected.pid, deadline)?;
-    for window in windows {
-        if exited(&handle, 0)? {
+    if graceful {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let windows = windows_for(expected.pid, deadline)?;
+        for window in windows {
+            if exited(&handle, 0)? {
+                return Ok(StopOutcome::Exited);
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            // The process handle remains pinned; window ownership is checked again
+            // immediately before the best-effort close request. A send result is
+            // never interpreted as proof of process exit.
+            verify(&handle, expected)?;
+            let mut pid = 0;
+            // SAFETY: output storage is valid; HWND is only a transient hint.
+            if unsafe { GetWindowThreadProcessId(window, &mut pid) } == 0 || pid != expected.pid {
+                continue;
+            }
+            // SAFETY: WM_CLOSE has no borrowed payload. Never broadcast, never ignore
+            // the timeout for a responsive thread, and never pump incoming messages.
+            unsafe {
+                SendMessageTimeoutW(
+                    window,
+                    WM_CLOSE,
+                    0,
+                    0,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+                    remaining.as_millis().clamp(1, 100) as u32,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+        if exited(&handle, 1500)? {
             return Ok(StopOutcome::Exited);
         }
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        // The process handle remains pinned; window ownership is checked again
-        // immediately before the best-effort close request. A send result is
-        // never interpreted as proof of process exit.
-        verify(&handle, expected)?;
-        let mut pid = 0;
-        // SAFETY: output storage is valid; HWND is only a transient hint.
-        if unsafe { GetWindowThreadProcessId(window, &mut pid) } == 0 || pid != expected.pid {
-            continue;
+        if !force {
+            return Ok(StopOutcome::StillRunning);
         }
-        // SAFETY: WM_CLOSE has no borrowed payload. Never broadcast, never ignore
-        // the timeout for a responsive thread, and never pump incoming messages.
-        unsafe {
-            SendMessageTimeoutW(
-                window,
-                WM_CLOSE,
-                0,
-                0,
-                SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
-                remaining.as_millis().clamp(1, 100) as u32,
-                std::ptr::null_mut(),
-            );
-        }
-    }
-    if exited(&handle, 1500)? {
-        return Ok(StopOutcome::Exited);
-    }
-    if !force {
-        return Ok(StopOutcome::StillRunning);
     }
     verify(&handle, expected)?;
     let terminator = match identity::open(
@@ -120,6 +157,8 @@ pub fn stop_exact(expected: &ProcessIdentity, force: bool) -> Result<StopOutcome
         return Ok(StopOutcome::Exited);
     }
     verify(&terminator, expected)?;
+    drop(timing);
+    let timing = crate::diagnostic_timing::Span::new("stop.terminate", || expected.pid.to_string());
     // SAFETY: complete identity was just verified on this retained exact handle.
     if unsafe { TerminateProcess(terminator.as_raw_handle(), 1) } == 0 {
         let error = last_error("TerminateApplication");
@@ -128,6 +167,9 @@ pub fn stop_exact(expected: &ProcessIdentity, force: bool) -> Result<StopOutcome
         }
         return Err(error);
     }
+    drop(timing);
+    let _timing =
+        crate::diagnostic_timing::Span::new("stop.wait_exit", || expected.pid.to_string());
     if !exited(&terminator, 3000)? {
         return Err(Error::Invalid("PROCESS_STOP_UNCONFIRMED"));
     }

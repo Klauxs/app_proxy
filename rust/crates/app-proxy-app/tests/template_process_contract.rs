@@ -58,7 +58,6 @@ fn template_receipt_helper() {
         args,
         cwd: compiled.cwd.clone(),
         environment: compiled.environment,
-        mode: process::CreationMode::Normal,
     })
     .unwrap();
     if let Some(exit) = child.wait_timeout(Duration::from_secs(5)).unwrap() {
@@ -77,7 +76,6 @@ fn template_receipt_helper() {
             .collect(),
         cwd: compiled.cwd,
         environment: native_patch,
-        mode: process::CreationMode::Normal,
     })
     .unwrap();
     if let Some(exit) = native.wait_timeout(Duration::from_secs(5)).unwrap() {

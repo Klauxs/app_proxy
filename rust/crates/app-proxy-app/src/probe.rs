@@ -1,8 +1,8 @@
-//! Bounded M0 experiments. These do not initialize a production store or install IFEO.
+//! Bounded M0 experiments. These do not initialize a production store.
 use app_proxy_core::{EnvPatch, ProcessIdentity};
 use app_proxy_windows::{
     identity, package,
-    process::{self, CreationMode, SpawnSpec},
+    process::{self, SpawnSpec},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -49,7 +49,6 @@ pub struct ProcessReport {
     pub survived_creating_thread: bool,
     pub forged_identity_rejected: bool,
     pub exact_stop_confirmed: bool,
-    pub ifeo_registration_tested: bool,
 }
 
 #[derive(Serialize)]
@@ -196,7 +195,7 @@ pub fn child(request_path: &Path, args: Vec<OsString>) -> Result<()> {
     Ok(())
 }
 
-pub fn process_probe(debug: bool) -> Result<ProcessReport> {
+pub fn process_probe() -> Result<ProcessReport> {
     identity::assert_ordinary_user()?;
     let directory = tempfile::Builder::new()
         .prefix("AppProxyRust-M0-中文 空格-")
@@ -239,11 +238,6 @@ pub fn process_probe(debug: bool) -> Result<ProcessReport> {
         args,
         cwd: root.into(),
         environment,
-        mode: if debug {
-            CreationMode::DebugDetach
-        } else {
-            CreationMode::Normal
-        },
     })?;
     let result = (|| -> Result<ProcessReport> {
         let receipt = await_receipt(root, &request)?;
@@ -277,7 +271,7 @@ pub fn process_probe(debug: bool) -> Result<ProcessReport> {
             return Err("PROBE_STOP_UNCONFIRMED".into());
         }
         Ok(ProcessReport {
-            mode: if debug { "debug_detach" } else { "normal" },
+            mode: "normal",
             identity: child.identity.clone(),
             args_and_cwd_match: args_match,
             environment_set_unset_match: environment_match,
@@ -285,7 +279,6 @@ pub fn process_probe(debug: bool) -> Result<ProcessReport> {
             survived_creating_thread: survived,
             forged_identity_rejected: rejected,
             exact_stop_confirmed: stopped,
-            ifeo_registration_tested: false,
         })
     })();
     let cleanup = child.terminate();

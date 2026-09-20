@@ -1,4 +1,4 @@
-//! Ordinary coordinator's listener lifecycle. Events only request a rescan;
+//! Ordinary coordinator's listener lifecycle. Events request exact-PID inspection;
 //! neither a PID hint nor a scheduled-task receipt grants process authority.
 use crate::{configuration::Configuration, launch_engine::LaunchEngine};
 use app_proxy_core::model::Desired;
@@ -10,7 +10,7 @@ use app_proxy_windows::{
     guard_task, identity,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -21,6 +21,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod events;
 mod scan;
 
 const RETRY: Duration = Duration::from_secs(30);
@@ -94,6 +95,7 @@ struct State {
     snapshot: Snapshot,
     authorization: Option<Arc<Authorization>>,
     scans: HashMap<Uuid, scan::Record>,
+    events: VecDeque<app_proxy_windows::etw::ProcessStartHint>,
 }
 
 struct Preparation {
@@ -120,6 +122,7 @@ pub(crate) struct Monitor {
     state: Mutex<State>,
     native: Arc<Semaphore>,
     scan_requested: Notify,
+    events_requested: Notify,
 }
 impl Monitor {
     pub fn new(configuration: Arc<Configuration>, launch: Arc<LaunchEngine>) -> Arc<Self> {
@@ -131,9 +134,11 @@ impl Monitor {
                 snapshot: Snapshot::new(Phase::Disabled, None),
                 authorization: None,
                 scans: HashMap::new(),
+                events: VecDeque::new(),
             }),
             native: Arc::new(Semaphore::new(1)),
             scan_requested: Notify::new(),
+            events_requested: Notify::new(),
         })
     }
     pub fn start(self: &Arc<Self>) -> Result<Service> {
@@ -177,6 +182,7 @@ impl Monitor {
         if !matches!((&state.authorization, &authorization), (Some(old), Some(new)) if Arc::ptr_eq(old, new))
         {
             state.scans.clear();
+            state.events.clear();
         }
         state.snapshot = snapshot;
         state.authorization = authorization;
@@ -198,9 +204,12 @@ impl Monitor {
         {
             return;
         }
-        if state.snapshot.observe(batch) {
-            // Coalesce bursts into one pending full scan, never an unbounded PID
-            // work queue. The consumer re-reads registered instances/identities.
+        state.snapshot.observe(batch);
+        let overflow = events::enqueue(&mut state.events, &batch.hints);
+        if !state.events.is_empty() {
+            self.events_requested.notify_one();
+        }
+        if overflow || batch.full_scan_required || batch.ended.is_some() {
             self.scan_requested.notify_one();
         }
     }
@@ -303,6 +312,11 @@ impl Monitor {
             // This receive future is never cancelled for a timer tick. Pipe
             // cancellation poisons a connection, so only shutdown drops it.
             let batch = stream.receive().await?;
+            for hint in &batch.hints {
+                app_proxy_windows::diagnostic_timing::mark("event.received", || {
+                    format!("{}:{}", hint.pid, hint.event_time)
+                });
+            }
             self.batch(&authorization, &batch);
             if let Some(code) = batch.ended {
                 return Err(Error::Windows {
@@ -314,6 +328,10 @@ impl Monitor {
     }
 
     async fn run(self: Arc<Self>, owner_epoch: Uuid, mut stopped: watch::Receiver<bool>) {
+        let event_owner = self.clone();
+        let _events = Task(tokio::spawn(async move {
+            event_owner.process_events(owner_epoch).await
+        }));
         let scanner = self.clone();
         let _scanner = Task(tokio::spawn(async move {
             scanner.scan_instances(owner_epoch).await
@@ -426,6 +444,7 @@ impl Drop for Service {
             state.owner = None;
             state.authorization = None;
             state.scans.clear();
+            state.events.clear();
             state.snapshot = Snapshot::new(Phase::Disabled, None);
         }
     }

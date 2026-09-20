@@ -126,7 +126,6 @@ fn console_original_save_return_rename_and_unsupported_clone() {
     ));
     assert!(saved.instances[0].guard.desired == Desired::Disabled);
     assert!(saved.profiles.is_empty());
-    assert!(saved.integrations.ifeo.is_empty());
     assert!(store.launch_attempts().unwrap().is_empty());
 }
 
@@ -150,7 +149,6 @@ fn console_missing_core_return_preserves_proxy_without_creating_instance() {
     assert_eq!(saved.profiles[0].name, "menu-proxy");
     assert!(saved.instances.is_empty());
     assert!(saved.applications.is_empty());
-    assert!(saved.integrations.ifeo.is_empty());
     assert!(store.launch_attempts().unwrap().is_empty());
     assert!(
         !fs::read_to_string(root.join("manifest.json"))

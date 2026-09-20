@@ -409,7 +409,17 @@ pub(crate) fn encode<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>> {
 }
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     // serde errors can contain the offending value, so only expose a stable code.
-    serde_json::from_slice(bytes).map_err(|_| Error::Invalid("INVALID_STORE_JSON"))
+    serde_json::from_slice(bytes).map_err(|error| {
+        // Only this fixed model error is safe to surface; never echo JSON values.
+        if error
+            .to_string()
+            .starts_with("LEGACY_IFEO_CLEANUP_REQUIRED at line ")
+        {
+            Error::Invalid("LEGACY_IFEO_CLEANUP_REQUIRED")
+        } else {
+            Error::Invalid("INVALID_STORE_JSON")
+        }
+    })
 }
 pub(crate) fn write_new(path: &Path, bytes: &[u8], sid: &str) -> Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;

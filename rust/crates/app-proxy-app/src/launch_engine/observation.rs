@@ -163,8 +163,7 @@ impl LaunchEngine {
         let target = InstanceTarget::new(&resolved, data.as_ref(), application.template_ref)?;
         let mut main = None;
         let mut auxiliary = false;
-        for process in candidates {
-            let observed = query_when_ready(|| target.inspect(&process)).await?;
+        for observed in query_when_ready(|| target.inspect_candidates(&candidates, None)).await? {
             match (observed.role, observed.relation) {
                 (_, InstanceRelation::Other) => {}
                 (ProcessRole::Auxiliary, InstanceRelation::Target) => auxiliary = true,

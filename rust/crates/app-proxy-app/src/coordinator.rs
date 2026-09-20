@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
-const PROTOCOL_MAJOR: u32 = 2;
+const PROTOCOL_MAJOR: u32 = 3;
 const PROTOCOL_MINOR: u32 = 18;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
@@ -996,8 +996,10 @@ async fn rpc(
             }));
         }
     };
-    if server.protocol_major != PROTOCOL_MAJOR
-        || server.store_id != store_id
+    if server.protocol_major != PROTOCOL_MAJOR {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
+    if server.store_id != store_id
         || server.session_id != policy.session_id
         || server.epoch.is_none()
     {
@@ -2163,7 +2165,7 @@ mod tests {
             let mut listener = ipc::Listener::bind(id, policy()).unwrap();
             let mut request = hello(id, status.identity.session_id, None);
             match expected {
-                "PROTOCOL_VERSION_MISMATCH" => request.protocol_major += 1,
+                "PROTOCOL_VERSION_MISMATCH" => request.protocol_major = 2,
                 "STORE_ID_MISMATCH" => request.store_id = Uuid::new_v4(),
                 "STORE_SESSION_CONFLICT" => request.session_id += 1,
                 _ => request.epoch = Some(Uuid::new_v4()),

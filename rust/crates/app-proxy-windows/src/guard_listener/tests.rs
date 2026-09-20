@@ -9,6 +9,7 @@ fn batch(sequence: u64, count: usize, ended: Option<u32>) -> EventBatch {
             .map(|pid| ProcessStartHint {
                 pid,
                 image_name: "fixture.exe".into(),
+                creation_time: 1,
                 event_time: 1,
             })
             .collect(),
@@ -69,7 +70,8 @@ async fn pump_delivers_backlog_and_final_failure_once_then_stops() {
     ]);
     let mut sent = Vec::new();
     let result = pump(
-        || Ok(incoming.pop_front().expect("no drain after end")),
+        |_| Ok(incoming.pop_front().expect("no drain after end")),
+        &tokio::sync::Notify::new(),
         async |batch| {
             sent.push((batch.sequence, batch.hints.len(), batch.ended));
             Ok(())
@@ -92,10 +94,11 @@ async fn pump_stops_on_disconnect_or_query_failure_and_emits_idle_heartbeats() {
     let mut drains = 0;
     assert!(
         pump(
-            || {
+            |_| {
                 drains += 1;
                 Ok(batch(1, 0, None))
             },
+            &tokio::sync::Notify::new(),
             async |_| { Err(Error::Invalid("fixture disconnected")) }
         )
         .await
@@ -104,7 +107,8 @@ async fn pump_stops_on_disconnect_or_query_failure_and_emits_idle_heartbeats() {
     assert_eq!(drains, 1);
     assert!(
         pump(
-            || Err(Error::Invalid("fixture query failure")),
+            |_| Err(Error::Invalid("fixture query failure")),
+            &tokio::sync::Notify::new(),
             async |_| { panic!("failed query must not send a healthy heartbeat") }
         )
         .await
@@ -112,11 +116,13 @@ async fn pump_stops_on_disconnect_or_query_failure_and_emits_idle_heartbeats() {
     );
     let mut sequence = 0;
     let mut sent = Vec::new();
+    let started = tokio::time::Instant::now();
     pump(
-        || {
+        |_| {
             sequence += 1;
             Ok(batch(sequence, 0, (sequence == 2).then_some(0)))
         },
+        &tokio::sync::Notify::new(),
         async |batch| {
             sent.push((batch.sequence, tokio::time::Instant::now()));
             Ok(())
@@ -125,7 +131,7 @@ async fn pump_stops_on_disconnect_or_query_failure_and_emits_idle_heartbeats() {
     .await
     .unwrap();
     assert_eq!(sent.len(), 2);
-    assert!(sent[1].1.duration_since(sent[0].1) >= HEARTBEAT);
+    assert!(sent[1].1.duration_since(started) >= HEARTBEAT);
     assert!(sent[1].1.duration_since(sent[0].1) < Duration::from_secs(2));
 }
 
@@ -133,4 +139,30 @@ async fn pump_stops_on_disconnect_or_query_failure_and_emits_idle_heartbeats() {
 async fn ordinary_host_cannot_enter_privileged_listener_or_create_deployment() {
     identity::assert_ordinary_user().unwrap();
     assert!(run(Uuid::new_v4(), Uuid::new_v4()).await.is_err());
+}
+
+#[tokio::test]
+async fn callback_wakes_delivery_without_flush_and_timer_cannot_be_starved() {
+    let ready = tokio::sync::Notify::new();
+    let mut flushes = Vec::new();
+    let mut sequence = 0;
+    pump(
+        |flush| {
+            flushes.push(flush);
+            sequence += 1;
+            Ok(batch(sequence, 1, (sequence == 3).then_some(0)))
+        },
+        &ready,
+        async |batch| {
+            if batch.sequence == 2 {
+                // Model a busy sender while callbacks continue to arrive.
+                tokio::time::sleep(HEARTBEAT * 2).await;
+            }
+            ready.notify_one(); // before the next wait: the permit must survive
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(flushes, [true, false, true]);
 }

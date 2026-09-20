@@ -5,7 +5,7 @@ use crate::{
     installation::ResolvedApplication,
     instance_resource::AuthorizedSpawn,
     launch_state::DispatchIdentity,
-    process::{self, CreationMode, NoProcessCreated, SpawnFailure, SpawnSpec},
+    process::{self, NoProcessCreated, SpawnFailure, SpawnSpec},
     storage_security as security,
     store::{self, Store},
 };
@@ -112,7 +112,6 @@ impl Store {
                 || permit.binding().executable != spec.exe
                 || application.executable() != spec.exe
                 || *application.image() != permit.binding().image
-                || !matches!(spec.mode, CreationMode::Normal)
             {
                 return Err(Error::Invalid("PACKAGE_LAUNCH_BINDING_MISMATCH"));
             }
@@ -121,9 +120,9 @@ impl Store {
             if identity::file_identity(application.executable())? != *application.image() {
                 return Err(Error::Invalid("LAUNCH_EXECUTABLE_CHANGED"));
             }
-            crate::ifeo::ensure_plain_creation(&spec.exe)?;
+            crate::creation_guard::ensure_plain_creation(&spec.exe)?;
             let helper_image = identity::file_identity(helper)?;
-            crate::ifeo::ensure_plain_creation(helper)?;
+            crate::creation_guard::ensure_plain_creation(helper)?;
             let issued_at = now()?;
             let request = Request {
                 version: 1,
@@ -430,7 +429,7 @@ fn consume(
         if *pinned.image() != ticket.request.binding.image {
             return Err(Error::Invalid("LAUNCH_EXECUTABLE_CHANGED"));
         }
-        crate::ifeo::ensure_plain_creation(&ticket.request.binding.executable)?;
+        crate::creation_guard::ensure_plain_creation(&ticket.request.binding.executable)?;
         ticket.request.environment.validate()?;
         check_deadline(&ticket.request, started)?;
         Ok(pinned)
@@ -460,7 +459,6 @@ fn consume(
             set: environment.set.clone(),
             unset: environment.unset.clone(),
         },
-        mode: CreationMode::Normal,
     };
     if let Err(error) = check_deadline(&ticket.request, started) {
         ticket.write(Phase::NotCreated {})?;

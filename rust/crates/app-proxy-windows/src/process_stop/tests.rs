@@ -1,5 +1,5 @@
 use super::*;
-use crate::process::{self, CreationMode, SpawnSpec, StartedProcess};
+use crate::process::{self, SpawnSpec, StartedProcess};
 use app_proxy_core::EnvPatch;
 use std::{fs, path::PathBuf};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -26,7 +26,6 @@ impl Fixture {
                 .to_vec(),
             cwd: root.path().into(),
             environment,
-            mode: CreationMode::Normal,
         })
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -84,6 +83,45 @@ fn graceful_stop_verifies_identity_and_only_closes_the_target_windows() {
         StopOutcome::AlreadyExited
     );
     assert!(stop_exact(&identity::current().unwrap(), true).is_err());
+}
+
+#[test]
+fn immediate_guard_policy_skips_window_close_and_preserves_other_processes() {
+    let target = Fixture::new("ignore");
+    let unrelated = Fixture::new("close");
+    for field in ["sid", "session", "image"] {
+        let mut forged = target.child.identity.clone();
+        match field {
+            "sid" => forged.user_sid.push_str("-1"),
+            "session" => forged.session_id += 1,
+            _ => forged.image_file.file_index += 1,
+        }
+        assert!(matches!(
+            stop_immediately(&forged),
+            Err(Error::IdentityMismatch)
+        ));
+        assert!(process::is_running_exact(&target.child.identity).unwrap());
+    }
+    let mut reused = target.child.identity.clone();
+    reused.creation_time -= 1;
+    assert_eq!(
+        stop_immediately(&reused).unwrap(),
+        StopOutcome::AlreadyExited
+    );
+    assert!(process::is_running_exact(&target.child.identity).unwrap());
+    assert_eq!(
+        stop_immediately(&target.child.identity).unwrap(),
+        StopOutcome::Forced
+    );
+    assert!(!target.closed()); // no WM_CLOSE or graceful-exit wait on Guard path
+    assert!(!process::is_running_exact(&target.child.identity).unwrap());
+    assert!(process::is_running_exact(&unrelated.child.identity).unwrap());
+    assert!(!unrelated.closed());
+    assert_eq!(
+        stop_immediately(&target.child.identity).unwrap(),
+        StopOutcome::AlreadyExited
+    );
+    assert!(stop_immediately(&identity::current().unwrap()).is_err());
 }
 
 #[test]

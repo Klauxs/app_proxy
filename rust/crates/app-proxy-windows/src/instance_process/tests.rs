@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     installation,
-    process::{CreationMode, SpawnSpec, StartedProcess},
+    process::{SpawnSpec, StartedProcess},
     store::Store,
 };
 use app_proxy_core::{EnvPatch, model::*};
@@ -331,7 +331,6 @@ async fn exact_native_child_is_classified_without_adoption_or_termination() {
             ],
             cwd: temp.path().to_owned(),
             environment,
-            mode: CreationMode::Normal,
         })
         .unwrap(),
     );
@@ -434,7 +433,6 @@ fn attribution_child() {
                     .to_vec(),
                 cwd: std::env::current_dir().unwrap(),
                 environment,
-                mode: CreationMode::Normal,
             })
             .unwrap(),
         );
@@ -490,7 +488,6 @@ async fn auxiliary_inherits_only_live_exact_ancestry_and_keeps_its_role() {
                 args,
                 cwd: temp.path().into(),
                 environment,
-                mode: CreationMode::Normal,
             })
             .unwrap(),
         );
@@ -509,6 +506,19 @@ async fn auxiliary_inherits_only_live_exact_ancestry_and_keeps_its_role() {
         }
         let _cleanup = Cleanup(child.clone());
         let observed = target.inspect(&child).await.unwrap();
+        let grouped = target
+            .inspect_candidates(
+                &[parent.0.identity.clone(), child.clone()],
+                Some("127.0.0.1:32123".parse().unwrap()),
+            )
+            .await
+            .unwrap();
+        let grouped_child = grouped.iter().find(|p| p.identity == child).unwrap();
+        assert_eq!(grouped_child.role, observed.role);
+        assert_eq!(grouped_child.relation, observed.relation);
+        assert_eq!(grouped_child.proxy, ProxyArguments::Unknown);
+        let parent_watch = process::watch_exit(&parent.0.identity).unwrap();
+        let child_watch = process::watch_exit(&child).unwrap();
         assert_eq!(observed.role, ProcessRole::Auxiliary);
         assert_eq!(
             target
@@ -535,6 +545,8 @@ async fn auxiliary_inherits_only_live_exact_ancestry_and_keeps_its_role() {
         foreign.session_id += 1;
         assert!(!valid_parent(&child, &foreign));
         parent.0.terminate().unwrap();
+        assert!(!parent_watch.is_running().unwrap());
+        assert!(child_watch.is_running().unwrap());
         assert!(process::is_running_exact(&child).unwrap());
         // No live ancestor means the orphan cannot be excluded as another instance.
         assert!(target.inspect(&child).await.is_err());

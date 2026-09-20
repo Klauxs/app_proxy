@@ -1,5 +1,5 @@
 //! Immutable, administrator-owned helper generations. Staging never activates
-//! a task or IFEO rule. Callers must verify those integrations separately before
+//! a scheduled task. Callers must verify those integrations separately before
 //! reporting Guard active; failed stages are retained for explicit maintenance.
 use crate::{Error, Result, identity, installation, storage_security};
 use app_proxy_core::{FileIdentity, ProcessIdentity};

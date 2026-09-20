@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const BRIDGE: &str = include_str!("../../../assets/msix-bridge.ps1");
+mod lookup;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Package {
     pub family_name: String,
@@ -36,7 +37,7 @@ pub fn resolve(family: &str, app_id: &str) -> Result<Package> {
     {
         return Err(Error::Invalid("INVALID_PACKAGE_LOCATOR"));
     }
-    bridge(&serde_json::json!({"operation":"discover", "family_name":family, "app_id":app_id}))
+    lookup::resolve(family, app_id)
 }
 
 /// Activates only our bounded probe helper; not a general package launch service.

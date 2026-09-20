@@ -5,7 +5,7 @@ use app_proxy_windows::{
     instance_resource::{InstanceResource, ResourceOwner, ResourceRegistry},
     package,
     package_launch::PackageOutcome,
-    process::{CreationMode, SpawnSpec},
+    process::SpawnSpec,
     store::Store,
 };
 use std::{
@@ -116,7 +116,6 @@ fn expired_production_helper_receipt_is_shared_from_default_store_location() {
                 args: vec![],
                 cwd: resolved.executable().parent().unwrap().into(),
                 environment: Default::default(),
-                mode: CreationMode::Normal,
             },
         )
         .unwrap();

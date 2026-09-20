@@ -1,5 +1,5 @@
 use super::*;
-use crate::process::{self, CreationMode, SpawnSpec, StartedProcess};
+use crate::process::{self, SpawnSpec, StartedProcess};
 use app_proxy_core::EnvPatch;
 use std::sync::mpsc;
 
@@ -159,7 +159,6 @@ async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
             args: words.iter().map(Into::into).collect(),
             cwd: temp.path().to_owned(),
             environment,
-            mode: CreationMode::Normal,
         })
         .unwrap(),
     );
@@ -183,6 +182,23 @@ async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
     let expected: Vec<OsString> = words.iter().map(Into::into).collect();
     assert!(actual[1..] == expected, "argument roundtrip mismatch");
     assert!(process::is_running_exact(&child.0.identity).unwrap());
+    let exit_watch = process::watch_exit(&child.0.identity).unwrap();
+    assert!(exit_watch.is_running().unwrap());
+    let group = vec![child.0.identity.clone(), identity::current().unwrap()];
+    let inputs = group.clone();
+    inspect_group_with(&group, move |batch, deadline| {
+        assert_eq!(batch.rows.len(), 2);
+        for expected in inputs {
+            batch.inspect(expected.clone(), deadline, |observed| {
+                assert_eq!(observed.identity, expected);
+                assert!(observed.arguments.is_some());
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
     wait_free(&QUERY_BUSY).await;
     for change in 0..4 {
         let mut forged = child.0.identity.clone();
@@ -194,6 +210,10 @@ async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
         }
         assert!(matches!(
             inspect(&forged).await,
+            Err(Error::IdentityMismatch)
+        ));
+        assert!(matches!(
+            process::watch_exit(&forged),
             Err(Error::IdentityMismatch)
         ));
         wait_free(&QUERY_BUSY).await;
@@ -209,15 +229,19 @@ async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
         Err(Error::Invalid("PROCESS_EXITED_DURING_INSPECTION"))
     ));
     child.0.terminate().unwrap();
+    assert!(!exit_watch.is_running().unwrap());
+    assert!(
+        !process::watch_exit(&child.0.identity)
+            .unwrap()
+            .is_running()
+            .unwrap()
+    );
     assert!(inspect(&child.0.identity).await.is_err());
     wait_free(&QUERY_BUSY).await;
-    let missing = std::thread::spawn(|| wmi_row(u32::MAX, Instant::now() + QUERY_BUDGET))
+    let missing = std::thread::spawn(|| wmi_rows(&[u32::MAX], Instant::now() + QUERY_BUDGET))
         .join()
         .unwrap();
-    assert!(matches!(
-        missing,
-        Err(Error::Invalid("PROCESS_QUERY_NOT_FOUND"))
-    ));
+    assert!(missing.unwrap().is_empty());
 }
 
 #[test]

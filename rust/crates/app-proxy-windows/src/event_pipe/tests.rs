@@ -90,6 +90,7 @@ fn event_schema_rejects_commands_and_max_unicode_batch_fits_frame_budget() {
         .map(|pid| crate::etw::ProcessStartHint {
             pid: pid as u32,
             image_name: "😀".repeat(260),
+            creation_time: 1,
             event_time: i64::MAX,
         })
         .collect();

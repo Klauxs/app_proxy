@@ -32,6 +32,7 @@ const RUNNING: u32 = u32::MAX;
 #[serde(deny_unknown_fields)]
 pub struct ProcessStartHint {
     pub pid: u32,
+    pub creation_time: u64,
     pub image_name: String,
     pub event_time: i64,
 }
@@ -59,6 +60,7 @@ struct Queue {
     decode_failures: u64,
 }
 struct State {
+    ready: Arc<tokio::sync::Notify>,
     queue: Mutex<Queue>,
     stop: AtomicBool,
     events_lost: AtomicU32,
@@ -69,6 +71,7 @@ struct State {
 impl State {
     fn new() -> Self {
         Self {
+            ready: Arc::new(tokio::sync::Notify::new()),
             queue: Mutex::new(Queue {
                 full_scan: true,
                 ..Queue::default()
@@ -117,11 +120,15 @@ impl State {
         } else {
             queue.hints.push_back(hint);
         }
+        drop(queue);
+        self.ready.notify_one();
     }
     fn failed_decode(&self) {
         let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
         queue.decode_failures = queue.decode_failures.saturating_add(1);
         queue.full_scan = true;
+        drop(queue);
+        self.ready.notify_one();
     }
     fn drain(&self, epoch: Uuid) -> Result<EventBatch> {
         let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
@@ -203,6 +210,23 @@ impl Session {
         {
             return Err(Error::Invalid("ETW_SESSION_OWNER_MISMATCH"));
         }
+        Ok(properties)
+    }
+    fn flush(&self) -> Result<Properties> {
+        // Never flush by name alone: authenticate the current session first,
+        // just as stop does. A replacement session must remain untouched.
+        let mut properties = self.query()?;
+        // SAFETY: the owned handle was checked above and sized buffers remain
+        // live. This runs on the controller, never inside an ETW callback.
+        let code = unsafe {
+            ControlTraceW(
+                self.handle,
+                ptr::null(),
+                &mut properties.value,
+                EVENT_TRACE_CONTROL_FLUSH,
+            )
+        };
+        win(code, "FlushOwnedTrace")?;
         Ok(properties)
     }
     fn stop(&mut self) -> Result<()> {
@@ -426,6 +450,7 @@ impl ProcessListener {
                 // its callback state stays owned here until all callbacks finish.
                 let result = unsafe { ProcessTrace(&consumer, 1, ptr::null(), ptr::null()) };
                 worker_state.ended.store(result, Ordering::Release);
+                worker_state.ready.notify_one();
                 let _ = worker_state.close_consumer();
             })?;
         match receiver.recv_timeout(Duration::from_secs(3)) {
@@ -451,8 +476,17 @@ impl ProcessListener {
     }
     pub fn drain(&self) -> Result<EventBatch> {
         if !self.session.stopped {
-            return self.drain_after_query(self.session.query());
+            // Force delivery on the listener's bounded heartbeat rather than
+            // waiting up to the integer-second ETW FlushTimer.
+            return self.drain_after_query(self.session.flush());
         }
+        self.state.drain(self.epoch)
+    }
+    pub(crate) fn ready(&self) -> Arc<tokio::sync::Notify> {
+        self.state.ready.clone()
+    }
+    /// Callback delivery already happened; consume without another native flush.
+    pub(crate) fn drain_ready(&self) -> Result<EventBatch> {
         self.state.drain(self.epoch)
     }
     fn drain_after_query(&self, query: Result<Properties>) -> Result<EventBatch> {
@@ -602,11 +636,18 @@ fn decode(record: &EVENT_RECORD) -> Result<ProcessStartHint> {
         pid.try_into()
             .map_err(|_| Error::Invalid("ETW_PROCESS_ID_SIZE"))?,
     );
+    let created = property(record, "CreateTime", 8)?;
+    let created = u64::from_le_bytes(
+        created
+            .try_into()
+            .map_err(|_| Error::Invalid("ETW_CREATION_TIME_SIZE"))?,
+    );
     let image = property(record, "ImageName", 4096)?;
-    hint(pid, record.EventHeader.TimeStamp, &image)
+    hint(pid, created, record.EventHeader.TimeStamp, &image)
 }
-fn hint(pid: u32, event_time: i64, bytes: &[u8]) -> Result<ProcessStartHint> {
+fn hint(pid: u32, creation_time: u64, event_time: i64, bytes: &[u8]) -> Result<ProcessStartHint> {
     if pid == 0
+        || creation_time == 0
         || event_time <= 0
         || bytes.len() < 2
         || bytes.len() > 4096
@@ -630,6 +671,7 @@ fn hint(pid: u32, event_time: i64, bytes: &[u8]) -> Result<ProcessStartHint> {
     }
     Ok(ProcessStartHint {
         pid,
+        creation_time,
         event_time,
         image_name: name.into(),
     })

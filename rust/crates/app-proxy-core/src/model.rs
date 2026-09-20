@@ -1,5 +1,5 @@
 //! On-disk configuration. Runtime handles and process state are deliberately separate.
-use crate::{EnvPatch, FileIdentity};
+use crate::EnvPatch;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
@@ -255,7 +255,9 @@ pub struct HealthPolicy {
 pub struct Integrations {
     pub shortcuts: Vec<Shortcut>,
     pub guard_login_task: Option<LoginTask>,
-    pub ifeo: Vec<IfeoRegistration>,
+    // Retired wire slot: preserve existing manifest/journal digests, never register rules.
+    #[serde(default, deserialize_with = "empty_legacy_ifeo")]
+    ifeo: [(); 0],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -275,26 +277,14 @@ pub struct LoginTask {
     pub args: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IfeoRegistration {
-    pub id: Uuid,
-    pub revision: u64,
-    pub application_id: Uuid,
-    pub default_instance_id: Uuid,
-    pub desired: Desired,
-    pub owner_sid: String,
-    pub store_id: Uuid,
-    pub installed_target: InstalledTarget,
-    pub registration_generation: Uuid,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InstalledTarget {
-    pub path: PathBuf,
-    pub file_identity: FileIdentity,
-    pub package_full_name: Option<String>,
+fn empty_legacy_ifeo<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<[(); 0], D::Error> {
+    let entries = Vec::<serde::de::IgnoredAny>::deserialize(deserializer)?;
+    if !entries.is_empty() {
+        return Err(serde::de::Error::custom("LEGACY_IFEO_CLEANUP_REQUIRED"));
+    }
+    Ok([])
 }
 
 impl Manifest {
@@ -487,26 +477,6 @@ impl Manifest {
                 .any(|s| !(200..=599).contains(s) || (300..400).contains(s))
         {
             return Err(ValidationError("INVALID_HEALTH_POLICY"));
-        }
-        let mut ifeo_apps = HashSet::new();
-        for registration in &self.integrations.ifeo {
-            entity(&mut ids, registration.id, "ifeo", registration.revision)?;
-            let instance = self
-                .instances
-                .iter()
-                .find(|i| i.id == registration.default_instance_id)
-                .ok_or(ValidationError("IFEO_INSTANCE_NOT_FOUND"))?;
-            if !matches!(instance.data, InstanceData::Original {})
-                || instance.application_id != registration.application_id
-                || instance.guard.desired != Desired::Enabled
-                || registration.owner_sid != self.owner_sid
-                || registration.store_id != self.store_id
-                || registration.registration_generation.is_nil()
-                || !ifeo_apps.insert(registration.application_id)
-            {
-                return Err(ValidationError("INVALID_IFEO_REGISTRATION"));
-            }
-            absolute(&registration.installed_target.path)?;
         }
         let mut shortcut_paths = HashSet::new();
         for shortcut in &self.integrations.shortcuts {

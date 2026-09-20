@@ -179,7 +179,7 @@ fn omitted_data_defaults_to_original_and_network_remains_required() {
 }
 
 #[test]
-fn create_only_isolated_does_not_register_original_or_ifeo() {
+fn create_only_isolated_does_not_register_original() {
     let mut manifest = example();
     manifest.instances.clear();
     let profile = manifest.profiles[0].id;
@@ -198,7 +198,6 @@ fn create_only_isolated_does_not_register_original_or_ifeo() {
     assert_eq!(receipt.revision, 2);
     assert_eq!(updated.revision, 1);
     assert!(updated.instances[0].guard.desired == Desired::Enabled);
-    assert!(updated.integrations.ifeo.is_empty());
     let InstanceData::Isolated {
         location:
             StorageLocation::PackageLocalState {

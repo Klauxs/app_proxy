@@ -1,10 +1,10 @@
 //! Ordinary-user diagnostics. Desired configuration never serves as proof that
-//! an elevated listener or machine-wide IFEO registration has been installed.
+//! an elevated listener has been installed.
 use crate::{
     configuration::Configuration,
     launch_engine::{GuardScan, LaunchEngine},
 };
-use app_proxy_core::model::{Desired, InstanceData};
+use app_proxy_core::model::Desired;
 use app_proxy_windows::{Error, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -49,7 +49,6 @@ pub struct GuardStatus {
     pub desired: Desired,
     pub phase: GuardPhase,
     pub listener: ComponentState,
-    pub ifeo: ComponentState,
     pub scan: Option<GuardScan>,
     pub diagnostic: Option<String>,
 }
@@ -90,19 +89,7 @@ pub async fn status(
     {
         return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
     }
-    let registered_ifeo = manifest
-        .integrations
-        .ifeo
-        .iter()
-        .any(|i| i.default_instance_id == id);
-    let ifeo = if registered_ifeo {
-        ComponentState::Unverified
-    } else if enabled && matches!(instance.data, InstanceData::Original {}) {
-        ComponentState::NeedsAuthorization
-    } else {
-        ComponentState::NotApplicable
-    };
-    let phase = if listener == ComponentState::Unverified || ifeo == ComponentState::Unverified {
+    let phase = if listener == ComponentState::Unverified {
         GuardPhase::Blocked
     } else if enabled {
         GuardPhase::NeedsAuthorization
@@ -118,7 +105,6 @@ pub async fn status(
         desired: instance.guard.desired,
         phase,
         listener,
-        ifeo,
         scan,
         diagnostic: if !scan_allowed {
             Some("GUARD_SCAN_BUSY".into())

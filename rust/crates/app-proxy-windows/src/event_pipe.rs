@@ -21,7 +21,7 @@ use windows_sys::Win32::{
     System::{Pipes::*, Threading::*},
 };
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const LOGON_GROUP: u32 = windows_sys::Win32::System::SystemServices::SE_GROUP_LOGON_ID as u32;
 
 #[derive(Serialize, Deserialize)]
@@ -219,6 +219,7 @@ impl Cursor {
             || batch.hints.iter().any(|hint| {
                 hint.pid == 0
                     || hint.event_time <= 0
+                    || hint.creation_time == 0
                     || hint.image_name.is_empty()
                     || hint.image_name.chars().count() > 260
                     || hint

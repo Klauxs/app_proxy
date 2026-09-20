@@ -9,7 +9,7 @@ use app_proxy_windows::{
     instance_resource::{
         InstanceResource, ResourceOwner, ResourcePhase, ResourceRegistry, ResourceReservation,
     },
-    process::{self, CreationMode, SpawnFailure, SpawnSpec},
+    process::{self, SpawnFailure, SpawnSpec},
     process_query,
 };
 use sha2::{Digest, Sha256};
@@ -20,6 +20,7 @@ use std::{
 };
 use uuid::Uuid;
 
+mod event;
 mod guard;
 pub use guard::{GuardObservation, GuardScan};
 mod observation;
@@ -37,6 +38,8 @@ pub struct LaunchEngine {
     before_guard_resolution: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     after_guard_scan: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_guard_target_read: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     before_dispatch: Mutex<Option<Arc<tokio::sync::Notify>>>,
     #[cfg(test)]
@@ -80,6 +83,8 @@ impl LaunchEngine {
             #[cfg(test)]
             after_guard_scan: Mutex::new(None),
             #[cfg(test)]
+            after_guard_target_read: Mutex::new(None),
+            #[cfg(test)]
             before_dispatch: Mutex::new(None),
             #[cfg(test)]
             after_spawn: Mutex::new(None),
@@ -103,7 +108,7 @@ impl LaunchEngine {
         request: LaunchRequest,
         expected_revision: Option<u64>,
     ) -> Result<LaunchAttempt> {
-        self.submit_checked(request, expected_revision, None)
+        self.submit_checked(request, expected_revision, None, None)
     }
 
     /// Internal Guard adapter. A caller-supplied origin label on ordinary launch
@@ -114,7 +119,10 @@ impl LaunchEngine {
         revision: u64,
         target: GuardTarget,
     ) -> Result<LaunchAttempt> {
-        self.submit_checked(request, Some(revision), Some(target))
+        let _timing = app_proxy_windows::diagnostic_timing::Span::new("launch.admit", || {
+            format!("{}:{}", request.request_id, target.process.pid)
+        });
+        self.submit_checked(request, Some(revision), Some(target), None)
     }
 
     fn submit_checked(
@@ -122,6 +130,7 @@ impl LaunchEngine {
         request: LaunchRequest,
         expected_revision: Option<u64>,
         guard_target: Option<GuardTarget>,
+        pinned: Option<event::ObservedTarget>,
     ) -> Result<LaunchAttempt> {
         let mut active = self
             .active
@@ -178,14 +187,16 @@ impl LaunchEngine {
         let admission = admit(&mut store)?;
         if admission.is_new {
             active.insert(admission.attempt.id);
-            let job = Job {
+            let mut job = Job {
                 engine: self.clone(),
                 id: admission.attempt.id,
+                pinned,
             };
             tokio::spawn(async move {
                 // A panic/drop leaves a durable stage. Status/recovery never
                 // interprets it as proof that creation did not happen.
-                job.engine.execute(job.id).await;
+                let pinned = job.pinned.take();
+                job.engine.execute(job.id, pinned).await;
             });
         }
         Ok(admission.attempt)
@@ -297,11 +308,11 @@ impl LaunchEngine {
         }
     }
 
-    async fn execute(&self, id: Uuid) {
+    async fn execute(&self, id: Uuid, pinned: Option<event::ObservedTarget>) {
         let mut reservation = None;
         let result = tokio::time::timeout(
             Duration::from_secs(90),
-            self.prepare_and_spawn(id, &mut reservation),
+            self.prepare_and_spawn(id, &mut reservation, pinned),
         )
         .await;
         let error = match result {
@@ -393,8 +404,18 @@ impl LaunchEngine {
         &self,
         id: Uuid,
         reservation: &mut Option<ResourceReservation>,
+        pinned: Option<event::ObservedTarget>,
     ) -> Result<()> {
-        self.advance(id, LaunchPhase::Accepted {}, LaunchPhase::Resolving {})?;
+        let _timing =
+            app_proxy_windows::diagnostic_timing::Span::new("launch.total", || id.to_string());
+        let timing =
+            app_proxy_windows::diagnostic_timing::Span::new("launch.prepare", || id.to_string());
+        let from_event = pinned.is_some();
+        // Event preparation is already pinned. Its two progress-only states are
+        // folded into the durable stop intent; Accepted still recovers safely.
+        if !from_event {
+            self.advance(id, LaunchPhase::Accepted {}, LaunchPhase::Resolving {})?;
+        }
         let (snapshot, instance_id) = {
             let mut store = self.configuration.lock()?;
             store.recover_config_requests()?;
@@ -405,20 +426,40 @@ impl LaunchEngine {
         };
         let (app, instance) = entries(&snapshot, instance_id)?;
         let digest = dependency_digest(&snapshot, instance_id)?;
-        let locator = app.locator.clone();
-        let application = tokio::task::spawn_blocking(move || installation::resolve(&locator))
-            .await
-            .map_err(|_| Error::Invalid("LAUNCH_RESOLUTION_INTERRUPTED"))??;
-        app_proxy_windows::ifeo::ensure_plain_creation(application.executable())?;
-        let data = self
-            .configuration
-            .lock()?
-            .prepare_instance_data(instance_id, application.package())?;
-        self.advance(
-            id,
-            LaunchPhase::Resolving {},
-            LaunchPhase::CheckingInstance {},
-        )?;
+        let (application, data, pinned) = if let Some(observed) = pinned {
+            if observed.instance_id != instance_id || observed.revision != snapshot.revision {
+                return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
+            }
+            // Revalidate registration while reusing held image/data pins.
+            observed.application.verify_current()?;
+            (observed.application, observed.data, Some(observed.pinned))
+        } else {
+            let locator = app.locator.clone();
+            let resolving =
+                app_proxy_windows::diagnostic_timing::Span::new("launch.resolve", || {
+                    id.to_string()
+                });
+            let application = tokio::task::spawn_blocking(move || installation::resolve(&locator))
+                .await
+                .map_err(|_| Error::Invalid("LAUNCH_RESOLUTION_INTERRUPTED"))??;
+            drop(resolving);
+            let preparing =
+                app_proxy_windows::diagnostic_timing::Span::new("launch.data", || id.to_string());
+            app_proxy_windows::creation_guard::ensure_plain_creation(application.executable())?;
+            let data = self
+                .configuration
+                .lock()?
+                .prepare_instance_data(instance_id, application.package())?;
+            drop(preparing);
+            self.advance(
+                id,
+                LaunchPhase::Resolving {},
+                LaunchPhase::CheckingInstance {},
+            )?;
+            (application, data, None)
+        };
+        let resources =
+            app_proxy_windows::diagnostic_timing::Span::new("launch.resources", || id.to_string());
         let resource = InstanceResource::resolve(&application, data.as_ref())?;
         let resource_key = resource.digest();
         let mut acquired = self.resources.acquire(resource)?;
@@ -454,26 +495,46 @@ impl LaunchEngine {
         }
         acquired.reserve(owner)?;
         *reservation = Some(acquired);
-        let correction = self
-            .configuration
-            .lock()?
-            .launch_request(id)?
-            .unwrap()
-            .guard_correction;
-        let (application, data) = if let Some(correction) = correction {
+        drop(resources);
+        drop(timing);
+        let attempt = self.configuration.lock()?.launch_request(id)?.unwrap();
+        // Ordinary launches delegate external single-instance/data locking to
+        // the application. Only Guard must establish exclusivity around a stop
+        // and correction; request/owned-session deduplication remains separate.
+        let guard_launch = attempt.origin == LaunchOrigin::Guard;
+        let (application, data) = if let Some(correction) = attempt.guard_correction {
             self.correct_guard(
                 id,
                 application,
                 data,
                 app.template_ref,
-                &correction.target,
+                (&correction.target, pinned),
                 reservation,
             )
             .await?
         } else {
             (application, data)
         };
-        check_occupancy(&application, data.as_ref(), app.template_ref).await?;
+        if guard_launch {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match check_occupancy(&application, data.as_ref(), app.template_ref).await {
+                        Ok(()) => return Ok(()),
+                        Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING")) => {
+                            return Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING"));
+                        }
+                        Err(_) => tokio::time::sleep(Duration::from_millis(30)).await,
+                    }
+                }
+            })
+            .await
+            .map_err(|_| Error::Invalid("GUARD_RESTART_NOT_CLEAR"))??;
+        }
+        if from_event {
+            // This is a spawn precondition, not a reason to delay stopping a
+            // positively identified unproxied process.
+            app_proxy_windows::creation_guard::ensure_plain_creation(application.executable())?;
+        }
         self.advance(
             id,
             LaunchPhase::CheckingInstance {},
@@ -555,7 +616,21 @@ impl LaunchEngine {
                 gate.notified().await;
             }
         }
-        check_occupancy(&application, data.as_ref(), app.template_ref).await?;
+        if guard_launch {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match check_occupancy(&application, data.as_ref(), app.template_ref).await {
+                        Ok(()) => return Ok(()),
+                        Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING")) => {
+                            return Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING"));
+                        }
+                        Err(_) => tokio::time::sleep(Duration::from_millis(30)).await,
+                    }
+                }
+            })
+            .await
+            .map_err(|_| Error::Invalid("GUARD_RESTART_NOT_CLEAR"))??;
+        }
         application.verify_current()?;
         let dispatch = {
             let mut store = self.configuration.lock()?;
@@ -578,7 +653,6 @@ impl LaunchEngine {
             args: output.args,
             cwd: output.cwd,
             environment: output.environment,
-            mode: CreationMode::Normal,
         };
         tokio::task::spawn_blocking(move || {
             let _data = data;
@@ -625,38 +699,37 @@ impl LaunchEngine {
         application: installation::ResolvedApplication,
         data: Option<PreparedData>,
         template: Template,
-        target: &GuardTarget,
+        target: (
+            &GuardTarget,
+            Option<app_proxy_windows::native_process::PinnedProcess>,
+        ),
         reservation: &mut Option<ResourceReservation>,
     ) -> Result<(installation::ResolvedApplication, Option<PreparedData>)> {
+        let (target, pinned) = target;
+        let _timing = app_proxy_windows::diagnostic_timing::Span::new("guard.correct", || {
+            format!("{}:{}", id, target.process.pid)
+        });
         let instance = InstanceTarget::new(&application, data.as_ref(), template)?;
         let endpoint = std::net::SocketAddr::new(target.endpoint.host, target.endpoint.port);
-        let observed =
-            query_when_ready(|| instance.inspect_proxy(&target.process, endpoint)).await?;
-        if observed.role != ProcessRole::Main
-            || observed.relation != InstanceRelation::Target
-            || observed.proxy != ProxyArguments::Mismatched
-        {
-            return Err(Error::Invalid("GUARD_TARGET_NOT_UNPROXIED"));
-        }
-        let candidates =
-            query_when_ready(|| process_query::application_candidates(&application)).await?;
-        let mut auxiliaries = Vec::new();
-        for candidate in candidates {
-            if candidate == target.process {
-                continue;
+        let pinned = match pinned {
+            Some(pinned) => pinned,
+            None => {
+                let mut pinned =
+                    app_proxy_windows::native_process::PinnedProcess::open(target.process.pid)?;
+                if pinned.identity() != &target.process {
+                    return Err(Error::IdentityMismatch);
+                }
+                pinned.read_arguments()?;
+                pinned
             }
-            let observed = query_when_ready(|| instance.inspect(&candidate)).await?;
-            match (observed.role, observed.relation) {
-                (_, InstanceRelation::Other) => {}
-                (ProcessRole::Auxiliary, InstanceRelation::Target) => auxiliaries.push(candidate),
-                _ => return Err(Error::Invalid("GUARD_INSTANCE_NOT_EXCLUSIVE")),
-            }
+        };
+        #[cfg(test)]
+        if let Some(hook) = self.after_guard_target_read.lock().unwrap().clone() {
+            hook();
         }
-        // Refresh the exact main after capturing auxiliaries; no inference from
-        // orphaned parent PIDs is needed after the main exits.
-        let observed =
-            query_when_ready(|| instance.inspect_proxy(&target.process, endpoint)).await?;
-        if observed.role != ProcessRole::Main
+        let observed = instance.inspect_pinned(&pinned, endpoint)?;
+        if observed.identity != target.process
+            || observed.role != ProcessRole::Main
             || observed.relation != InstanceRelation::Target
             || observed.proxy != ProxyArguments::Mismatched
         {
@@ -673,11 +746,22 @@ impl LaunchEngine {
         let after_guard_stop = self.after_guard_stop.lock().unwrap().clone();
         #[cfg(test)]
         let before_guard_receipt = self.before_guard_receipt.lock().unwrap().clone();
+        let stop_queued =
+            app_proxy_windows::diagnostic_timing::Span::new("guard.stop_dispatch_queue", || {
+                id.to_string()
+            });
         let (application, data, held, result) = tokio::task::spawn_blocking(move || {
+            drop(stop_queued);
             let result = (|| {
+                let timing =
+                    app_proxy_windows::diagnostic_timing::Span::new("guard.stop_authorize", || {
+                        id.to_string()
+                    });
                 let dispatch = configuration.lock()?.dispatch_guard_stop(id, epoch)?;
                 let permit = held.authorize_guard_stop(dispatch)?;
-                let receipt = app_proxy_windows::process_stop::stop_guarded(permit)?;
+                drop(timing);
+                let receipt =
+                    app_proxy_windows::process_stop::stop_guarded_pinned(permit, &pinned)?;
                 if !matches!(
                     receipt.outcome(),
                     app_proxy_windows::process_stop::StopOutcome::Exited
@@ -702,20 +786,6 @@ impl LaunchEngine {
         .map_err(|_| Error::Invalid("GUARD_STOP_INTERRUPTED"))?;
         *reservation = Some(held);
         result?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            let mut running = false;
-            for auxiliary in &auxiliaries {
-                running |= process::is_running_exact(auxiliary)?;
-            }
-            if !running {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(Error::Invalid("GUARD_AUXILIARY_STILL_RUNNING"));
-            }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
         let store = self.configuration.lock()?;
         let attempt = store.launch_request(id)?.unwrap();
         if attempt.expected_revision != Some(store.load()?.revision) {
@@ -803,6 +873,7 @@ fn spawn_package(
 struct Job {
     engine: Arc<LaunchEngine>,
     id: Uuid,
+    pinned: Option<event::ObservedTarget>,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -949,8 +1020,7 @@ async fn check_occupancy_inner(
     let candidates =
         query_when_ready(|| process_query::application_candidates(application)).await?;
     let target = InstanceTarget::new(application, data, template)?;
-    for process in candidates {
-        let observed = query_when_ready(|| target.inspect(&process)).await?;
+    for observed in query_when_ready(|| target.inspect_candidates(&candidates, None)).await? {
         match (observed.role, observed.relation) {
             (_, InstanceRelation::Other) => {}
             (ProcessRole::Main, InstanceRelation::Target) => {

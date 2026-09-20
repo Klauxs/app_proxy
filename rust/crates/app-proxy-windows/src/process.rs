@@ -3,20 +3,11 @@ use app_proxy_core::{EnvPatch, ProcessIdentity};
 use std::ffi::OsString;
 use std::mem::zeroed;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::System::Diagnostics::Debug::*;
 use windows_sys::Win32::System::Threading::*;
-
-/// Experimental until actual IFEO registration and target application tests pass.
-#[derive(Clone, Copy)]
-pub enum CreationMode {
-    Normal,
-    DebugDetach,
-}
 
 // No Debug: arguments and environment may contain secrets.
 pub struct SpawnSpec {
@@ -24,7 +15,6 @@ pub struct SpawnSpec {
     pub args: Vec<OsString>,
     pub cwd: PathBuf,
     pub environment: EnvPatch,
-    pub mode: CreationMode,
 }
 
 pub struct StartedProcess {
@@ -258,6 +248,64 @@ pub fn is_running_exact(expected: &ProcessIdentity) -> Result<bool> {
     observe_exact(expected, false)
 }
 
+/// Retain an already verified process object when waiting for an owned child to
+/// exit. A dying process can lose queryable image/token information before its
+/// handle is signaled; waiting never needs to query that information again.
+pub struct ExitWatch {
+    handle: Option<OwnedHandle>,
+}
+
+impl ExitWatch {
+    pub fn is_running(&self) -> Result<bool> {
+        let Some(handle) = &self.handle else {
+            return Ok(false);
+        };
+        // SAFETY: this owns the exact verified handle with SYNCHRONIZE access.
+        match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
+            WAIT_OBJECT_0 => Ok(false),
+            WAIT_TIMEOUT => Ok(true),
+            _ => Err(last_error("ObserveApplicationExit")),
+        }
+    }
+}
+
+pub fn watch_exit(expected: &ProcessIdentity) -> Result<ExitWatch> {
+    identity::assert_ordinary_user()?;
+    let caller = identity::current()?;
+    if expected.pid == 0
+        || expected.creation_time == 0
+        || expected.user_sid != caller.user_sid
+        || expected.session_id != caller.session_id
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    let handle = match identity::open(
+        expected.pid,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+    ) {
+        Ok(handle) => handle,
+        Err(Error::Windows {
+            code: ERROR_INVALID_PARAMETER,
+            ..
+        }) => return Ok(ExitWatch { handle: None }),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: the handle is retained through validation and all later waits.
+    unsafe {
+        match WaitForSingleObject(handle.as_raw_handle(), 0) {
+            WAIT_OBJECT_0 => return Ok(ExitWatch { handle: None }),
+            WAIT_TIMEOUT => {}
+            _ => return Err(last_error("ObserveApplicationExit")),
+        }
+        if identity::inspect_handle(handle.as_raw_handle())? != *expected {
+            return Err(Error::IdentityMismatch);
+        }
+    }
+    Ok(ExitWatch {
+        handle: Some(handle),
+    })
+}
+
 /// Only protected historical receipts may use this read-only path. Ordinary
 /// creation, termination and public observation retain their session boundary.
 pub(crate) fn is_recorded_process_running(expected: &ProcessIdentity) -> Result<bool> {
@@ -322,9 +370,7 @@ pub fn spawn_for_attempt(
     if identity::file_identity(&spec.exe).map_err(not_created)? != permit.binding().image {
         return Err(not_created(Error::Invalid("LAUNCH_EXECUTABLE_CHANGED")));
     }
-    if matches!(spec.mode, CreationMode::Normal) {
-        crate::ifeo::ensure_plain_creation(&spec.exe).map_err(not_created)?;
-    }
+    crate::creation_guard::ensure_plain_creation(&spec.exe).map_err(not_created)?;
     // Keep the consumed permit, owner lease and reservation borrow alive through
     // the creating thread's return. A panic after dispatch remains unknown.
     let result = spawn_checked(spec).map_err(|(error, created)| {
@@ -350,7 +396,7 @@ pub(crate) fn spawn_checked(spec: SpawnSpec) -> std::result::Result<StartedProce
     {
         return Err((Error::Invalid("ABSOLUTE_EXE_AND_CWD_REQUIRED"), false));
     }
-    // Windows debug events and detach belong to the thread creating the child.
+    // Preserve explicit evidence if the creating worker panics after dispatch.
     let thread = std::thread::Builder::new()
         .spawn(move || {
             let mut created = false;
@@ -367,7 +413,6 @@ pub(crate) fn spawn_checked(spec: SpawnSpec) -> std::result::Result<StartedProce
 fn spawn_on_thread(spec: SpawnSpec, created: &mut bool) -> Result<StartedProcess> {
     let expected_image = identity::file_identity(&spec.exe)?;
     let caller = identity::current()?;
-    let debug = matches!(spec.mode, CreationMode::DebugDetach);
     let mut command = Command::new(&spec.exe);
     command
         .args(&spec.args)
@@ -381,19 +426,8 @@ fn spawn_on_thread(spec: SpawnSpec, created: &mut bool) -> Result<StartedProcess
     for (key, value) in &spec.environment.set {
         command.env(key, value);
     }
-    if debug {
-        command.creation_flags(DEBUG_ONLY_THIS_PROCESS);
-    }
     let mut child = command.spawn()?;
     *created = true;
-    if debug {
-        // SAFETY: this thread just established a debug relationship via CreateProcess.
-        if unsafe { DebugSetProcessKillOnExit(0) } == 0 {
-            let error = last_error("DebugSetProcessKillOnExit");
-            cleanup_failed_debug(&mut child);
-            return Err(error);
-        }
-    }
     // SAFETY: the Child owns and retains the created process query handle.
     let result = unsafe { identity::inspect_handle(child.as_raw_handle()) };
     let actual = match result {
@@ -405,114 +439,18 @@ fn spawn_on_thread(spec: SpawnSpec, created: &mut bool) -> Result<StartedProcess
             identity
         }
         Ok(_) => {
-            if debug {
-                cleanup_failed_debug(&mut child);
-            } else {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            let _ = child.kill();
+            let _ = child.wait();
             return Err(Error::IdentityMismatch);
         }
         Err(error) => {
-            if debug {
-                cleanup_failed_debug(&mut child);
-            } else {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            let _ = child.kill();
+            let _ = child.wait();
             return Err(error);
         }
     };
-    if debug && let Err(error) = detach_after_start(child.id(), Duration::from_secs(5)) {
-        cleanup_failed_debug(&mut child);
-        return Err(error);
-    }
     Ok(StartedProcess {
         child,
         identity: actual,
     })
-}
-
-fn cleanup_failed_debug(child: &mut Child) {
-    let _ = child.kill();
-    // SAFETY: only the debuggee created by this thread is detached.
-    unsafe {
-        DebugActiveProcessStop(child.id());
-    }
-    // Bounded: an outstanding debug event can delay process exit.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        if child.try_wait().ok().flatten().is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn detach_after_start(pid: u32, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    let mut created = false;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(Error::Invalid("DEBUG_START_TIMEOUT"));
-        }
-        // SAFETY: correctly sized event; same creating thread consumes all events.
-        unsafe {
-            let mut event: DEBUG_EVENT = zeroed();
-            if WaitForDebugEventEx(&mut event, 50) == 0 {
-                let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
-                if code == ERROR_SEM_TIMEOUT {
-                    continue;
-                }
-                return Err(Error::Windows {
-                    operation: "WaitForDebugEventEx",
-                    code,
-                });
-            }
-            if event.dwProcessId != pid {
-                return Err(Error::Invalid("UNEXPECTED_DEBUGGEE"));
-            }
-            let mut status = DBG_CONTINUE;
-            let mut ready = false;
-            match event.dwDebugEventCode {
-                CREATE_PROCESS_DEBUG_EVENT => {
-                    created = true;
-                    let file = event.u.CreateProcessInfo.hFile;
-                    if !file.is_null() {
-                        CloseHandle(file);
-                    }
-                    // Debug process/thread handles are released by Windows on detach.
-                }
-                LOAD_DLL_DEBUG_EVENT => {
-                    let file = event.u.LoadDll.hFile;
-                    if !file.is_null() {
-                        CloseHandle(file);
-                    }
-                }
-                EXCEPTION_DEBUG_EVENT => {
-                    if created
-                        && event.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT
-                    {
-                        ready = true;
-                    } else {
-                        status = DBG_EXCEPTION_NOT_HANDLED;
-                    }
-                }
-                EXIT_PROCESS_DEBUG_EVENT => {
-                    ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE);
-                    return Err(Error::Invalid("TARGET_EXITED_BEFORE_DEBUG_DETACH"));
-                }
-                _ => {}
-            }
-            if ContinueDebugEvent(event.dwProcessId, event.dwThreadId, status) == 0 {
-                return Err(last_error("ContinueDebugEvent"));
-            }
-            if ready {
-                if DebugActiveProcessStop(pid) == 0 {
-                    return Err(last_error("DebugActiveProcessStop"));
-                }
-                return Ok(());
-            }
-        }
-    }
 }

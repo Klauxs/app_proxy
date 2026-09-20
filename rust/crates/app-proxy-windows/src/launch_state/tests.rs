@@ -472,7 +472,7 @@ fn confirmed_process_exit_releases_reservation_and_forged_identity_is_unknown() 
             .map(Into::into)
             .to_vec(),
         cwd: temp.path().to_owned(),
-        mode: process::CreationMode::Normal,
+
         environment: app_proxy_core::EnvPatch {
             set: [("APP_PROXY_LAUNCH_CHILD".into(), "1".into())].into(),
             unset: vec![],

@@ -1,4 +1,4 @@
-//! Read-only creation guard until the owned IFEO continuation dispatcher is wired.
+//! Read-only guard against externally configured Windows debugger redirection.
 //! No registrations are created, changed or removed by this module.
 use crate::{Error, Result};
 use std::{path::Path, ptr};
@@ -18,8 +18,7 @@ impl Drop for Key {
 }
 
 /// Do not let ordinary CreateProcess silently execute a third-party debugger.
-/// Filtered Debugger entries are conservatively rejected until matching/bypass
-/// has its own verified implementation; unrelated mitigation-only keys are allowed.
+/// Filtered Debugger entries are conservatively rejected because this launcher does not support debugger redirection; unrelated mitigation-only keys are allowed.
 pub fn ensure_plain_creation(executable: &Path) -> Result<()> {
     let name = executable
         .file_name()
@@ -75,7 +74,7 @@ fn debugger(key: &Key) -> Result<bool> {
 }
 fn check(key: &Key, view: u32) -> Result<()> {
     if debugger(key)? {
-        return Err(Error::Invalid("IFEO_DISPATCH_REQUIRED"));
+        return Err(Error::Invalid("EXTERNAL_DEBUGGER_UNSUPPORTED"));
     }
     for index in 0..512 {
         let mut name = [0u16; 256];
@@ -107,7 +106,7 @@ fn check(key: &Key, view: u32) -> Result<()> {
         let child = open(key.0, &name, KEY_READ | view)?
             .ok_or(Error::Invalid("IFEO_REGISTRATION_CHANGED"))?;
         if debugger(&child)? {
-            return Err(Error::Invalid("IFEO_DISPATCH_REQUIRED"));
+            return Err(Error::Invalid("EXTERNAL_DEBUGGER_UNSUPPORTED"));
         }
     }
     Err(Error::Invalid("IFEO_FILTER_LIMIT"))
@@ -176,7 +175,7 @@ mod tests {
             );
             assert!(matches!(
                 check(&key, 0),
-                Err(Error::Invalid("IFEO_DISPATCH_REQUIRED"))
+                Err(Error::Invalid("EXTERNAL_DEBUGGER_UNSUPPORTED"))
             ));
             assert_eq!(RegDeleteValueW(key.0, debugger.as_ptr()), 0);
             let filter = crate::wide(std::ffi::OsStr::new("filter")).unwrap();
@@ -209,7 +208,7 @@ mod tests {
             );
             assert!(matches!(
                 check(&key, 0),
-                Err(Error::Invalid("IFEO_DISPATCH_REQUIRED"))
+                Err(Error::Invalid("EXTERNAL_DEBUGGER_UNSUPPORTED"))
             ));
         }
         assert!(open(HKEY_CURRENT_USER, &path, KEY_READ).unwrap().is_none());

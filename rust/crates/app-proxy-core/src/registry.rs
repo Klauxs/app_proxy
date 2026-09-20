@@ -432,15 +432,6 @@ pub fn apply(
             } else {
                 previous.guard.desired
             });
-            if desired == Desired::Disabled
-                && manifest
-                    .integrations
-                    .ifeo
-                    .iter()
-                    .any(|i| i.default_instance_id == *instance_id)
-            {
-                return Err(ValidationError("INTEGRATION_CLEANUP_REQUIRED"));
-            }
             let target = instance_mut(&mut manifest, *instance_id)?;
             target.revision = target
                 .revision
@@ -457,11 +448,6 @@ pub fn apply(
                 .shortcuts
                 .iter()
                 .any(|s| s.instance_id == *instance_id)
-                || manifest
-                    .integrations
-                    .ifeo
-                    .iter()
-                    .any(|i| i.default_instance_id == *instance_id)
             {
                 return Err(ValidationError("INTEGRATION_CLEANUP_REQUIRED"));
             }

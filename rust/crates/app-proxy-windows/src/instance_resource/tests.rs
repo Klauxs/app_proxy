@@ -22,6 +22,12 @@ fn owner() -> ResourceOwner {
 }
 
 fn guard_store(root: &Path) -> (Store, ResourceOwner, LaunchRequest, GuardTarget) {
+    guard_store_at(root, false)
+}
+fn guard_store_at(
+    root: &Path,
+    accepted: bool,
+) -> (Store, ResourceOwner, LaunchRequest, GuardTarget) {
     let resource = current_resource();
     let (mut store, setup) = ready_store(root, &resource, Uuid::new_v4());
     store
@@ -87,29 +93,39 @@ fn guard_store(root: &Path) -> (Store, ResourceOwner, LaunchRequest, GuardTarget
             target.clone(),
         )
         .unwrap();
-    store
-        .advance_launch(
-            owner.attempt_id,
-            owner.epoch,
-            &LaunchPhase::Accepted {},
-            LaunchPhase::Resolving {},
-        )
-        .unwrap();
-    store
-        .advance_launch(
-            owner.attempt_id,
-            owner.epoch,
-            &LaunchPhase::Resolving {},
-            LaunchPhase::CheckingInstance {},
-        )
-        .unwrap();
+    if !accepted {
+        store
+            .advance_launch(
+                owner.attempt_id,
+                owner.epoch,
+                &LaunchPhase::Accepted {},
+                LaunchPhase::Resolving {},
+            )
+            .unwrap();
+        store
+            .advance_launch(
+                owner.attempt_id,
+                owner.epoch,
+                &LaunchPhase::Resolving {},
+                LaunchPhase::CheckingInstance {},
+            )
+            .unwrap();
+    }
     (store, owner, request, target)
 }
 
 #[test]
 fn guard_intent_is_one_use_and_recovery_or_aliases_cannot_upgrade_stop_authority() {
     let temp = tempfile::tempdir().unwrap();
-    let (mut store, owner, request, target) = guard_store(&temp.path().join("store"));
+    let (mut store, owner, request, target) = guard_store_at(&temp.path().join("store"), true);
+    assert_eq!(
+        store
+            .launch_request(owner.attempt_id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        LaunchPhase::Accepted {}
+    );
     assert!(matches!(
         store.begin_launch(&request, owner.epoch),
         Err(Error::Invalid("REQUEST_ID_CONFLICT"))
@@ -145,6 +161,14 @@ fn guard_intent_is_one_use_and_recovery_or_aliases_cannot_upgrade_stop_authority
     let dispatch = store
         .dispatch_guard_stop(owner.attempt_id, owner.epoch)
         .unwrap();
+    assert_eq!(
+        store
+            .launch_request(owner.attempt_id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        LaunchPhase::CheckingInstance {}
+    );
     assert!(matches!(
         store.dispatch_guard_stop(owner.attempt_id, owner.epoch),
         Err(Error::Invalid("GUARD_STOP_ALREADY_DISPATCHED"))
@@ -413,7 +437,6 @@ fn spec(exe: PathBuf, cwd: PathBuf) -> process::SpawnSpec {
         cwd,
         args: vec![],
         environment: app_proxy_core::EnvPatch::default(),
-        mode: process::CreationMode::Normal,
     }
 }
 struct Child(process::StartedProcess);

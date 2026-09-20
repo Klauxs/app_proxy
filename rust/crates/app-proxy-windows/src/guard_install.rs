@@ -1,9 +1,9 @@
 //! Foreground-only authorization of a fixed listener installer. No arbitrary
 //! elevated executable, directory, command, or writable request file is accepted.
 use crate::{
-    Error, Result,
+    Error, Result, creation_guard,
     guard_deployment::{Deployment, InstallerSource, SourceExpectation},
-    guard_task, identity, ifeo, last_error, wide,
+    guard_task, identity, last_error, wide,
 };
 use app_proxy_core::ProcessIdentity;
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,7 @@ pub fn authorize_listener(store: Uuid) -> Result<Uuid> {
         source: source.expectation(),
     };
     let encoded = encode(&ticket)?;
-    ifeo::ensure_plain_creation(source.path())?;
+    creation_guard::ensure_plain_creation(source.path())?;
     let process = launch(&source, &encoded)?;
     let completed = wait(&process, INSTALL_TIMEOUT)?;
     if completed.is_none() {

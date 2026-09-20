@@ -197,6 +197,7 @@ fn only_received_batches_mark_etw_and_loss_hints_end_request_rescan() {
     batch.hints.push(ProcessStartHint {
         pid: 123,
         image_name: "untrusted-hint.exe".into(),
+        creation_time: 1,
         event_time: 1,
     });
     assert!(snapshot.observe(&batch));

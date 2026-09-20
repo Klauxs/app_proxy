@@ -65,7 +65,7 @@ enum Commands {
         #[arg(value_enum)]
         app: Discovery,
     },
-    /// 运行隔离的开发验证，不注册 IFEO、不启动真实应用
+    /// 运行隔离的开发验证，不启动真实应用
     Probe {
         #[command(subcommand)]
         command: Probes,
@@ -95,10 +95,7 @@ enum Discovery {
 
 #[derive(Subcommand)]
 enum Probes {
-    Process {
-        #[arg(long)]
-        debug_detach: bool,
-    },
+    Process {},
     Package {
         #[arg(value_enum)]
         app: App,
@@ -259,8 +256,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             app: Discovery::Codex,
         } => print(&package::discover("codex")?),
         Commands::Probe {
-            command: Probes::Process { debug_detach },
-        } => print(&app_proxy_app::probe::process_probe(debug_detach)?),
+            command: Probes::Process {},
+        } => print(&app_proxy_app::probe::process_probe()?),
         Commands::Probe {
             command: Probes::Package { app },
         } => print(&app_proxy_app::probe::package_probe(app.name())?),

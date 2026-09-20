@@ -3,6 +3,7 @@
 use crate::{Error, Result, identity, last_error};
 use app_proxy_core::ProcessIdentity;
 use std::{
+    collections::HashMap,
     ffi::OsString,
     os::windows::{
         ffi::OsStringExt,
@@ -165,18 +166,70 @@ pub(crate) async fn inspect_with<T: Send + 'static>(
     expected: &ProcessIdentity,
     finish: impl FnOnce(ProcessObservation, Instant) -> Result<T> + Send + 'static,
 ) -> Result<T> {
+    let expected = expected.clone();
+    let input = expected.clone();
+    inspect_group_with(std::slice::from_ref(&input), move |batch, deadline| {
+        batch.inspect(expected.clone(), deadline, |observed| {
+            finish(observed, deadline)
+        })
+    })
+    .await
+}
+
+/// Query only the already identified candidates, once per scan. Handles remain
+/// pinned across WMI and all attribution/ancestor checks; rows are never reused
+/// by another scan or used as proof that a process is still alive.
+pub(crate) async fn inspect_group_with<T: Send + 'static>(
+    expected: &[ProcessIdentity],
+    finish: impl FnOnce(&Inspection, Instant) -> Result<T> + Send + 'static,
+) -> Result<T> {
     identity::assert_ordinary_user()?;
     let caller = identity::current()?;
-    if expected.pid == 0
-        || expected.creation_time == 0
-        || expected.user_sid != caller.user_sid
-        || expected.session_id != caller.session_id
-    {
-        return Err(Error::IdentityMismatch);
+    for process in expected {
+        if process.pid == 0
+            || process.creation_time == 0
+            || process.user_sid != caller.user_sid
+            || process.session_id != caller.session_id
+        {
+            return Err(Error::IdentityMismatch);
+        }
     }
-    let expected = expected.clone();
+    let expected = expected.to_vec();
     query_with(&QUERY_BUSY, QUERY_BUDGET, move |deadline| {
-        inspect_on_thread(expected, deadline, |observed| finish(observed, deadline))
+        let key = || {
+            expected
+                .iter()
+                .map(|p| p.pid.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let _timing = crate::diagnostic_timing::Span::new("query.batch", key);
+        let timing = crate::diagnostic_timing::Span::new("query.pin", key);
+        let mut handles = Vec::with_capacity(expected.len());
+        for process in &expected {
+            let handle = identity::open(
+                process.pid,
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            )?;
+            verify_handle(&handle, process)?;
+            handles.push(handle);
+        }
+        let pids = expected.iter().map(|p| p.pid).collect::<Vec<_>>();
+        drop(timing);
+        let batch = Inspection {
+            rows: wmi_rows(&pids, deadline)?,
+        };
+        let timing = crate::diagnostic_timing::Span::new("query.attribute", key);
+        let result = finish(&batch, deadline)?;
+        drop(timing);
+        let _timing = crate::diagnostic_timing::Span::new("query.recheck", key);
+        for (handle, process) in handles.iter().zip(&expected) {
+            verify_handle(handle, process)?;
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Invalid("PROCESS_QUERY_TIMEOUT"));
+        }
+        Ok(result)
     })
     .await
 }
@@ -214,39 +267,56 @@ async fn query_with<T: Send + 'static>(
         .map_err(|_| Error::Invalid("PROCESS_QUERY_INTERRUPTED"))?
 }
 
-pub(crate) fn inspect_on_thread<T>(
-    expected: ProcessIdentity,
-    deadline: Instant,
-    finish: impl FnOnce(ProcessObservation) -> Result<T>,
-) -> Result<T> {
-    let handle = identity::open(
-        expected.pid,
-        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-    )?;
-    verify_handle(&handle, &expected)?;
-    let row = wmi_row(expected.pid, deadline)?;
-    if row.pid != expected.pid
-        || row.session_id != expected.session_id
-        || dmtf_creation_time(&row.created)? / 10 != expected.creation_time / 10
-    {
-        return Err(Error::IdentityMismatch);
+pub(crate) struct Inspection {
+    rows: HashMap<u32, Row>,
+}
+
+impl Inspection {
+    pub(crate) fn inspect<T>(
+        &self,
+        expected: ProcessIdentity,
+        deadline: Instant,
+        finish: impl FnOnce(ProcessObservation) -> Result<T>,
+    ) -> Result<T> {
+        let handle = identity::open(
+            expected.pid,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+        )?;
+        verify_handle(&handle, &expected)?;
+        let uncached;
+        let row = if let Some(row) = self.rows.get(&expected.pid) {
+            row
+        } else {
+            // An ancestor may have appeared after candidate discovery. It must be
+            // queried and checked normally, never inferred from its PID alone.
+            uncached = wmi_rows(&[expected.pid], deadline)?;
+            uncached
+                .get(&expected.pid)
+                .ok_or(Error::Invalid("PROCESS_QUERY_NOT_FOUND"))?
+        };
+        if row.pid != expected.pid
+            || row.session_id != expected.session_id
+            || dmtf_creation_time(&row.created)? / 10 != expected.creation_time / 10
+        {
+            return Err(Error::IdentityMismatch);
+        }
+        let arguments = row
+            .command_line
+            .as_deref()
+            .map(parse_arguments)
+            .transpose()?
+            .flatten();
+        let result = finish(ProcessObservation {
+            identity: expected.clone(),
+            parent_pid: row.parent_pid,
+            arguments,
+        })?;
+        verify_handle(&handle, &expected)?;
+        if Instant::now() >= deadline {
+            return Err(Error::Invalid("PROCESS_QUERY_TIMEOUT"));
+        }
+        Ok(result)
     }
-    let arguments = row
-        .command_line
-        .as_deref()
-        .map(parse_arguments)
-        .transpose()?
-        .flatten();
-    let result = finish(ProcessObservation {
-        identity: expected.clone(),
-        parent_pid: row.parent_pid,
-        arguments,
-    })?;
-    verify_handle(&handle, &expected)?;
-    if Instant::now() >= deadline {
-        return Err(Error::Invalid("PROCESS_QUERY_TIMEOUT"));
-    }
-    Ok(result)
 }
 
 fn verify_handle(handle: &OwnedHandle, expected: &ProcessIdentity) -> Result<()> {
@@ -282,7 +352,19 @@ fn com_error(error: windows::core::Error) -> Error {
     }
 }
 
-fn wmi_row(pid: u32, deadline: Instant) -> Result<Row> {
+fn wmi_rows(pids: &[u32], deadline: Instant) -> Result<HashMap<u32, Row>> {
+    let key = || {
+        pids.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let _timing = crate::diagnostic_timing::Span::new("wmi.total", key);
+    let connecting = crate::diagnostic_timing::Span::new("wmi.connect", key);
+    let mut rows = HashMap::new();
+    if pids.is_empty() {
+        return Ok(rows);
+    }
     // All COM objects stay on this dedicated thread and drop before apartment teardown.
     struct Apartment;
     impl Drop for Apartment {
@@ -323,52 +405,68 @@ fn wmi_row(pid: u32, deadline: Instant) -> Result<Row> {
             EOAC_NONE,
         )
         .map_err(com_error)?;
-        let query = BSTR::from(format!(
-            "SELECT ProcessId,ParentProcessId,SessionId,CreationDate,CommandLine FROM Win32_Process WHERE ProcessId = {pid}"
-        ));
-        let enumeration = service
-            .ExecQuery(
-                &BSTR::from("WQL"),
-                &query,
-                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-                None,
-            )
-            .map_err(com_error)?;
-        loop {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or(Error::Invalid("PROCESS_QUERY_TIMEOUT"))?;
-            let mut objects = [None];
-            let mut returned = 0;
-            let status = enumeration.Next(
-                remaining.as_millis().clamp(1, 250) as i32,
-                &mut objects,
-                &mut returned,
-            );
-            status.ok().map_err(com_error)?;
-            if returned == 1 {
-                let object = objects[0]
-                    .take()
-                    .ok_or(Error::Invalid("INVALID_PROCESS_QUERY_RESULT"))?;
-                return Ok(Row {
-                    pid: number_property(&object, w!("ProcessId"))?,
-                    parent_pid: number_property(&object, w!("ParentProcessId"))?,
-                    session_id: number_property(&object, w!("SessionId"))?,
-                    created: string_property(&object, w!("CreationDate"))?
-                        .ok_or(Error::Invalid("PROCESS_CREATION_TIME_UNAVAILABLE"))?,
-                    command_line: string_property(&object, w!("CommandLine"))?,
-                });
-            }
-            if returned != 0 {
-                return Err(Error::Invalid("INVALID_PROCESS_QUERY_RESULT"));
-            }
-            if status.0 == WBEM_S_FALSE.0 {
-                return Err(Error::Invalid("PROCESS_QUERY_NOT_FOUND"));
-            }
-            if status.0 != WBEM_S_TIMEDOUT.0 {
-                return Err(Error::Invalid("INVALID_PROCESS_QUERY_RESULT"));
+        drop(connecting);
+        for chunk in pids.chunks(128) {
+            let filter = chunk
+                .iter()
+                .map(|pid| format!("ProcessId = {pid}"))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let query = BSTR::from(format!(
+                "SELECT ProcessId,ParentProcessId,SessionId,CreationDate,CommandLine FROM Win32_Process WHERE {filter}"
+            ));
+            let timing = crate::diagnostic_timing::Span::new("wmi.exec", key);
+            let enumeration = service
+                .ExecQuery(
+                    &BSTR::from("WQL"),
+                    &query,
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                    None,
+                )
+                .map_err(com_error)?;
+            drop(timing);
+            let _timing = crate::diagnostic_timing::Span::new("wmi.read_rows", key);
+            loop {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(Error::Invalid("PROCESS_QUERY_TIMEOUT"))?;
+                let mut objects = [None];
+                let mut returned = 0;
+                let status = enumeration.Next(
+                    remaining.as_millis().clamp(1, 250) as i32,
+                    &mut objects,
+                    &mut returned,
+                );
+                status.ok().map_err(com_error)?;
+                if returned == 1 {
+                    let object = objects[0]
+                        .take()
+                        .ok_or(Error::Invalid("INVALID_PROCESS_QUERY_RESULT"))?;
+                    let row = Row {
+                        pid: number_property(&object, w!("ProcessId"))?,
+                        parent_pid: number_property(&object, w!("ParentProcessId"))?,
+                        session_id: number_property(&object, w!("SessionId"))?,
+                        created: string_property(&object, w!("CreationDate"))?
+                            .ok_or(Error::Invalid("PROCESS_CREATION_TIME_UNAVAILABLE"))?,
+                        command_line: string_property(&object, w!("CommandLine"))?,
+                    };
+                    if !chunk.contains(&row.pid) || rows.insert(row.pid, row).is_some() {
+                        return Err(Error::Invalid("INVALID_PROCESS_QUERY_RESULT"));
+                    }
+                    continue;
+                }
+                if returned != 0 {
+                    return Err(Error::Invalid("INVALID_PROCESS_QUERY_RESULT"));
+                }
+                if status.0 == WBEM_S_FALSE.0 {
+                    break;
+                }
+                if status.0 != WBEM_S_TIMEDOUT.0 {
+                    return Err(Error::Invalid("INVALID_PROCESS_QUERY_RESULT"));
+                }
             }
         }
+        Ok(rows)
     }
 }
 
