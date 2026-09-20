@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 17;
+const PROTOCOL_MINOR: u32 = 18;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -56,6 +56,16 @@ struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    LoginApply {
+        request: app_proxy_windows::guard_task::login::journal::Request,
+    },
+    LoginResume {
+        request_id: Uuid,
+    },
+    LoginRequest {
+        request_id: Uuid,
+    },
+    LoginStatus {},
     InstanceSettings {
         instance_id: Uuid,
     },
@@ -142,6 +152,12 @@ struct Response {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
+    LoginRequest {
+        status: Option<app_proxy_windows::guard_task::login::journal::Status>,
+    },
+    LoginStatus {
+        status: crate::login_tasks::View,
+    },
     InstanceSettings {
         settings: crate::instance_settings::Summary,
     },
@@ -195,6 +211,8 @@ enum Reply {
 
 struct Shared {
     root: PathBuf,
+    login_jobs: Arc<tokio::sync::Semaphore>,
+    login_queries: Arc<tokio::sync::Semaphore>,
     shortcut_jobs: Arc<tokio::sync::Semaphore>,
     identity: Status,
     configuration: Arc<Configuration>,
@@ -230,6 +248,8 @@ impl Shared {
         )?;
         Ok(Self {
             root,
+            login_jobs: Arc::new(tokio::sync::Semaphore::new(1)),
+            login_queries: Arc::new(tokio::sync::Semaphore::new(1)),
             shortcut_jobs: Arc::new(tokio::sync::Semaphore::new(1)),
             subscription: crate::subscription_preview::PreviewService::new(
                 configuration.clone(),
@@ -275,6 +295,30 @@ impl Shared {
     }
     fn execute(&self, request: Request) -> Result<Reply> {
         match request.operation {
+            Operation::LoginApply { request: login } => {
+                if request.request_id != login.id {
+                    return Err(Error::Invalid("INVALID_LOGIN_REQUEST"));
+                }
+                Ok(Reply::LoginRequest {
+                    status: Some(crate::login_tasks::apply(
+                        &self.configuration,
+                        &self.root,
+                        &login,
+                    )?),
+                })
+            }
+            Operation::LoginResume { request_id } => Ok(Reply::LoginRequest {
+                status: Some(crate::login_tasks::resume(&self.configuration, request_id)?),
+            }),
+            Operation::LoginRequest { request_id } => Ok(Reply::LoginRequest {
+                status: self
+                    .configuration
+                    .lock()?
+                    .login_request_status(request_id)?,
+            }),
+            Operation::LoginStatus {} => Ok(Reply::LoginStatus {
+                status: crate::login_tasks::status(&self.configuration, &self.root)?,
+            }),
             Operation::InstanceSettings { instance_id } => Ok(Reply::InstanceSettings {
                 settings: crate::instance_settings::summary(
                     &self.configuration.snapshot()?,
@@ -558,6 +602,17 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if login_operation(&request.operation) && client_minor < 18 {
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: Reply::Error {
+                    code: "GUARD_LOGIN_PROTOCOL_UPDATE_REQUIRED".into(),
+                },
+            })
+            .await;
+    }
     if instance_edit_operation(&request.operation) && client_minor < 17 {
         return connection
             .send(&Response {
@@ -781,6 +836,74 @@ async fn handle(
     }
     // Do not cancel accepted work when the client disconnects. The handler stays
     // registered until blocking preparation/commit completes, preventing idle exit.
+    if matches!(
+        &request.operation,
+        Operation::LoginApply { .. } | Operation::LoginResume { .. }
+    ) {
+        let shared = shared.clone();
+        let replay_request = match &request.operation {
+            Operation::LoginApply { request } => Some(request.clone()),
+            _ => None,
+        };
+        let id = match &request.operation {
+            Operation::LoginApply { request } => request.id,
+            Operation::LoginResume { request_id } => *request_id,
+            _ => unreachable!(),
+        };
+        let replay = tokio::task::spawn_blocking(move || {
+            if replay_request.is_some() && request_id != id {
+                return Err(Error::Invalid("INVALID_LOGIN_REQUEST"));
+            }
+            crate::login_tasks::replay(&shared.configuration, id, replay_request.as_ref())
+        })
+        .await
+        .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?;
+        match replay {
+            Ok(None) => {}
+            other => {
+                return connection
+                    .send(&Response {
+                        request_id,
+                        epoch,
+                        result: match other {
+                            Ok(status) => Reply::LoginRequest { status },
+                            Err(error) => Reply::Error {
+                                code: safe_error(error),
+                            },
+                        },
+                    })
+                    .await;
+            }
+        }
+    }
+    let login_status = matches!(&request.operation, Operation::LoginStatus {});
+    let login_slot = if login_status {
+        Some(shared.login_queries.clone())
+    } else if matches!(
+        &request.operation,
+        Operation::LoginApply { .. } | Operation::LoginResume { .. }
+    ) {
+        Some(shared.login_jobs.clone())
+    } else {
+        None
+    };
+    let login_permit = match login_slot {
+        Some(slot) => match slot.try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return connection
+                    .send(&Response {
+                        request_id,
+                        epoch,
+                        result: Reply::Error {
+                            code: "GUARD_LOGIN_BUSY".into(),
+                        },
+                    })
+                    .await;
+            }
+        },
+        None => None,
+    };
     let shortcut_permit = if matches!(
         &request.operation,
         Operation::ShortcutApply { .. } | Operation::ShortcutResume { .. }
@@ -802,12 +925,24 @@ async fn handle(
     } else {
         None
     };
-    let result = tokio::task::spawn_blocking(move || {
+    shared.jobs.fetch_add(1, Ordering::SeqCst);
+    let completed = JobCompletion(shared.clone());
+    let worker = tokio::task::spawn_blocking(move || {
+        let _completed = completed;
+        let _login_permit = login_permit;
         let _permit = shortcut_permit;
         shared.execute(request)
-    })
-    .await
-    .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?;
+    });
+    let result = if login_status {
+        match tokio::time::timeout(Duration::from_secs(3), worker).await {
+            Ok(result) => result.map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?,
+            Err(_) => Err(Error::Invalid("GUARD_LOGIN_CHECK_TIMEOUT")),
+        }
+    } else {
+        worker
+            .await
+            .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?
+    };
     connection
         .send(&Response {
             request_id,
@@ -891,6 +1026,9 @@ async fn rpc(
     if shortcut_operation(&request.operation) && server.protocol_minor < 16 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
+    if login_operation(&request.operation) && server.protocol_minor < 18 {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     if instance_edit_operation(&request.operation) && server.protocol_minor < 17 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
@@ -927,6 +1065,21 @@ async fn rpc(
     }
     if let Reply::Error { code } = &response.result {
         return Err(Error::Invalid(match code.as_str() {
+            "GUARD_LOGIN_BUSY" => "GUARD_LOGIN_BUSY",
+            "GUARD_LOGIN_CHECK_TIMEOUT" => "GUARD_LOGIN_CHECK_TIMEOUT",
+            "GUARD_LOGIN_STATE_CHANGED" => "GUARD_LOGIN_STATE_CHANGED",
+            "GUARD_LOGIN_REQUEST_NOT_FOUND" => "GUARD_LOGIN_REQUEST_NOT_FOUND",
+            "GUARD_LOGIN_ALREADY_REGISTERED" => "GUARD_LOGIN_ALREADY_REGISTERED",
+            "GUARD_LOGIN_NOT_NEEDED" => "GUARD_LOGIN_NOT_NEEDED",
+            "GUARD_LOGIN_REGISTRATION_CHANGED" => "GUARD_LOGIN_REGISTRATION_CHANGED",
+            "GUARD_LOGIN_OPERATION_PENDING" => "GUARD_LOGIN_OPERATION_PENDING",
+            "GUARD_LOGIN_REMOVAL_PENDING" => "GUARD_LOGIN_REMOVAL_PENDING",
+            "GUARD_LOGIN_OWNERSHIP_UNAVAILABLE" => "GUARD_LOGIN_OWNERSHIP_UNAVAILABLE",
+            "GUARD_LOGIN_TASK_RUNNING" => "GUARD_LOGIN_TASK_RUNNING",
+            "GUARD_LOGIN_METADATA_CONFLICT" => "GUARD_LOGIN_METADATA_CONFLICT",
+            "GUARD_LISTENER_MISSING" => "GUARD_LISTENER_MISSING",
+            "GUARD_TASK_MISSING" => "GUARD_TASK_MISSING",
+            "INVALID_LOGIN_REQUEST" => "INVALID_LOGIN_REQUEST",
             "INVALID_SHORTCUT_REQUEST" => "INVALID_SHORTCUT_REQUEST",
             "SHORTCUT_OPERATION_BUSY" => "SHORTCUT_OPERATION_BUSY",
             "SHORTCUT_ALREADY_REGISTERED" => "SHORTCUT_ALREADY_REGISTERED",
@@ -1027,6 +1180,57 @@ fn shortcut_operation(operation: &Operation) -> bool {
             | Operation::ShortcutRequest { .. }
             | Operation::ShortcutStatus { .. }
     )
+}
+
+fn login_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::LoginApply { .. }
+            | Operation::LoginResume { .. }
+            | Operation::LoginRequest { .. }
+            | Operation::LoginStatus {}
+    )
+}
+pub async fn login_apply(
+    root: PathBuf,
+    request: app_proxy_windows::guard_task::login::journal::Request,
+) -> Result<app_proxy_windows::guard_task::login::journal::Status> {
+    store::describe(&root)?;
+    match client_operation(root, request.id, Operation::LoginApply { request }).await? {
+        Reply::LoginRequest {
+            status: Some(status),
+        } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn login_resume(
+    root: PathBuf,
+    request_id: Uuid,
+) -> Result<app_proxy_windows::guard_task::login::journal::Status> {
+    store::describe(&root)?;
+    match client_operation(root, Uuid::new_v4(), Operation::LoginResume { request_id }).await? {
+        Reply::LoginRequest {
+            status: Some(status),
+        } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn login_request(
+    root: PathBuf,
+    request_id: Uuid,
+) -> Result<Option<app_proxy_windows::guard_task::login::journal::Status>> {
+    store::describe(&root)?;
+    match client_operation(root, Uuid::new_v4(), Operation::LoginRequest { request_id }).await? {
+        Reply::LoginRequest { status } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn login_status(root: PathBuf) -> Result<crate::login_tasks::View> {
+    store::describe(&root)?;
+    match client_operation(root, Uuid::new_v4(), Operation::LoginStatus {}).await? {
+        Reply::LoginStatus { status } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
 }
 
 pub async fn shortcut_apply(

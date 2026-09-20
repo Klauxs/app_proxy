@@ -67,7 +67,7 @@ pub async fn status(
         .find(|i| i.id == id)
         .ok_or(Error::Invalid("INSTANCE_NOT_FOUND"))?;
     let enabled = instance.guard.desired == Desired::Enabled;
-    let (scan, mut listener, diagnostic) = observations(
+    let (scan, listener, diagnostic) = observations(
         async {
             if scan_allowed {
                 launch.observe_guard(id).await.map(Some)
@@ -95,12 +95,6 @@ pub async fn status(
         .ifeo
         .iter()
         .any(|i| i.default_instance_id == id);
-    // A protected intent and registered task still do not prove live coverage.
-    if listener == ComponentState::NeedsAuthorization
-        && manifest.integrations.guard_login_task.is_some()
-    {
-        listener = ComponentState::Unverified;
-    }
     let ifeo = if registered_ifeo {
         ComponentState::Unverified
     } else if enabled && matches!(instance.data, InstanceData::Original {}) {

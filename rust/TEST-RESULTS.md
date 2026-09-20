@@ -2,6 +2,14 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：登录任务 RPC、Guard 启用与独立就绪状态**
+
+IPC 2.18 提供 LoginApply/Resume/Request/Status，固定派生路径，原 GuardStatus 协议保持兼容。变更持独立实际 worker 槽到 COM/记账完成，掉应答继续执行；终态先核对完整请求、绕过其他变更的忙状态。就绪查询独立单槽/3 秒预算，超时实际 worker 保留槽及 owner；核验任务定义/ACL、受保护 coordinator/监听组件、原 home 的 store/SID 与当前 home 路径，不把 Created 历史作为下次登录就绪。Guard enable 在写配置前轻量检查协议，组件就绪后自动创建；未完成请求保留原 ID 显式恢复。新增 guard login status/request/resume/remove；关闭 Guard 保留应用与登录入口。
+
+新增 9 项默认测试：服务终态/冲突与先验拒绝、就绪证据/元数据/未完成回执、原生读取期间 journal 竞争、四操作双向 minor 门槛、忙时独立查询、超时后实际 worker 槽和 owner 保留、真实管道丢应答后的删除完成/历史重放、home 移动/替换/当前路径不匹配。超时测试用受控锁在直接 RPC handler 内阻塞工作线程，不声称真实 Task Scheduler COM 卡死验收。扩展既有真实 CLI 契约覆盖登录查询/未登记恢复、未知登录归属时仍展示缺失 listener 且成功关闭 Guard；异步操作均未启动或停止用户应用。
+
+独立审查发现并修复终态 RPC 先争 native 槽、登录查询失败阻断 Guard 查询/关闭、UAC 后与登录创建后版本对齐、原 home 失效误报就绪四项问题，复审通过；审查方独立复跑 10 项定向验证通过。全量 **443 项通过、0 失败、53 项顶层 ignored**，clippy `-D warnings`、fmt/diff 检查通过。初次全量的新增 CLI fixture 使用非法 task 名导致校验失败，改合法 fixture 后重跑完整套件通过。没有执行真实登录触发、UAC 安装/提权事件全链或 IFEO 生产接管；这些验收及入口修复/卸载继续保留。
+
 **2026-09-20：登录任务持久事务与显式恢复**
 
 新增 protected state/login-task.json 保存请求和长期归属，Create/Remove 与配置/core/launch/shortcut ID 双向互斥。begin/resume 短锁接纳后返回不可克隆 Job；Job 和 Completion 持有独立非阻塞文件锁及 store owner lease，COM 执行不占配置 Mutex，直到完成记账才释放。完成先恢复普通 Pending 配置并核验 core 更新屏障，只合并精确匹配的当前集成元数据，外部操作成功而 manifest/回执失败保留原请求。完成创建重放不复活后来已删除的任务；删除须绑定原创建，可取消 Pending Create。已登记结果在 Guard 全关闭后仍可记账，缺失任务不得再创建。

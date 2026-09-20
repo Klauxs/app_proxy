@@ -2,6 +2,338 @@ use super::*;
 use app_proxy_core::{launch::LaunchPhase, model::*};
 
 #[tokio::test]
+async fn login_protocol_requires_minor_eighteen_before_either_admission() {
+    let fixture = Fixture::new();
+    let operations = || {
+        [
+            Operation::LoginStatus {},
+            Operation::LoginRequest {
+                request_id: Uuid::new_v4(),
+            },
+            Operation::LoginResume {
+                request_id: Uuid::new_v4(),
+            },
+            Operation::LoginApply {
+                request: app_proxy_windows::guard_task::login::journal::Request {
+                    id: Uuid::new_v4(),
+                    expected_revision: 2,
+                    action: app_proxy_windows::guard_task::login::journal::Action::Create,
+                    expected_creation: None,
+                },
+            },
+        ]
+    };
+    for operation in operations() {
+        let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+        let identity = fixture.shared.identity.clone();
+        let old_server = tokio::spawn(async move {
+            let mut connection = listener.accept().await.unwrap();
+            connection.receive::<Hello>().await.unwrap();
+            let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
+            greeting.protocol_minor = 17;
+            connection
+                .send(&Welcome::Ready { hello: greeting })
+                .await
+                .unwrap();
+            assert!(connection.receive::<Request>().await.is_err());
+        });
+        assert!(matches!(
+            fixture.rpc(Uuid::new_v4(), operation).await,
+            Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+        ));
+        old_server.await.unwrap();
+    }
+    let server = fixture.server();
+    for operation in operations() {
+        let policy = policy();
+        let mut connection = ipc::connect(
+            fixture.shared.identity.store_id,
+            &policy,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
+        greeting.protocol_minor = 17;
+        connection.send(&greeting).await.unwrap();
+        connection.receive::<Welcome>().await.unwrap();
+        connection
+            .send(&Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id: Uuid::new_v4(),
+                operation,
+            })
+            .await
+            .unwrap();
+        let response: Response = connection.receive().await.unwrap();
+        assert!(
+            matches!(response.result, Reply::Error { code } if code == "GUARD_LOGIN_PROTOCOL_UPDATE_REQUIRED")
+        );
+    }
+    server.await.unwrap().unwrap();
+    assert_eq!(fixture.shared.configuration.snapshot().unwrap().revision, 2);
+    assert!(!fixture.shared.root.join("state/login-task.json").exists());
+}
+
+#[tokio::test]
+async fn login_busy_mutation_keeps_queries_available_and_validates_request_identity() {
+    let fixture = Fixture::new();
+    let held = fixture
+        .shared
+        .login_jobs
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let server = fixture.server();
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::LoginResume {
+                    request_id: Uuid::new_v4()
+                }
+            )
+            .await,
+        Err(Error::Invalid("GUARD_LOGIN_BUSY"))
+    ));
+    assert!(
+        matches!(fixture.rpc(Uuid::new_v4(), Operation::LoginStatus {}).await.unwrap(),
+        Reply::LoginStatus { status } if !status.ready && status.integration.is_none())
+    );
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::LoginRequest {
+                    request_id: Uuid::new_v4()
+                }
+            )
+            .await
+            .unwrap(),
+        Reply::LoginRequest { status: None }
+    ));
+    drop(held);
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::LoginApply {
+                    request: app_proxy_windows::guard_task::login::journal::Request {
+                        id: Uuid::new_v4(),
+                        expected_revision: 2,
+                        action: app_proxy_windows::guard_task::login::journal::Action::Create,
+                        expected_creation: None,
+                    }
+                }
+            )
+            .await,
+        Err(Error::Invalid("INVALID_LOGIN_REQUEST"))
+    ));
+    server.await.unwrap().unwrap();
+    assert_eq!(fixture.shared.configuration.snapshot().unwrap().revision, 2);
+}
+
+#[tokio::test]
+async fn login_status_timeout_retains_worker_slot_and_owner_until_native_work_finishes() {
+    let fixture = Fixture::new();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let configuration = fixture.shared.configuration.clone();
+    let thread = std::thread::spawn(move || {
+        let _held = configuration.lock().unwrap();
+        ready_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    ready_rx.recv().unwrap();
+    // Drive only RPC handlers: the coordinator startup/idle paths legitimately
+    // need the held store lock and are not the native query under test.
+    let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+    let shared = fixture.shared.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            handle(listener.accept().await.unwrap(), shared.clone())
+                .await
+                .unwrap();
+        }
+    });
+    assert!(matches!(
+        fixture.rpc(Uuid::new_v4(), Operation::LoginStatus {}).await,
+        Err(Error::Invalid("GUARD_LOGIN_CHECK_TIMEOUT"))
+    ));
+    assert_eq!(fixture.shared.jobs.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        fixture.rpc(Uuid::new_v4(), Operation::LoginStatus {}).await,
+        Err(Error::Invalid("GUARD_LOGIN_BUSY"))
+    ));
+    release_tx.send(()).unwrap();
+    thread.join().unwrap();
+    server.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.shared.jobs.load(Ordering::SeqCst) != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.shared.jobs.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.shared.login_queries.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn login_removal_survives_lost_reply_and_replays_after_source_disappears() {
+    use app_proxy_windows::guard_task::login::journal::{
+        Action, Request as LoginRequest, Status as LoginStatus,
+    };
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    let create = LoginRequest {
+        id: Uuid::new_v4(),
+        expected_revision: 2,
+        action: Action::Create,
+        expected_creation: None,
+    };
+    let remove = LoginRequest {
+        id: Uuid::new_v4(),
+        expected_revision: 3,
+        action: Action::Remove,
+        expected_creation: Some(create.id),
+    };
+    {
+        let mut store = fixture.shared.configuration.lock().unwrap();
+        let mut model = store.load().unwrap();
+        let scope = format!("{:x}", Sha256::digest(model.owner_sid.as_bytes()));
+        let host = fixture.root.path().join("missing/app-proxy-host.exe");
+        model.integrations.guard_login_task = Some(LoginTask {
+            name: format!("AppProxyRust-Login-{}-{}", &scope[..16], model.store_id),
+            target: host.clone(),
+            args: vec![
+                "serve".into(),
+                "--home".into(),
+                fixture.shared.root.to_str().unwrap().into(),
+                "--expected-store".into(),
+                model.store_id.to_string(),
+            ],
+        });
+        let record = serde_json::json!({"version":1,"store_id":model.store_id,"entries":[{
+            "create":create,"registration":{"store_id":model.store_id,"owner_sid":model.owner_sid,
+                "home":fixture.shared.root,"host":host},"created_revision":3,"removal":remove,"removed_revision":null,"removed_at":null
+        }]});
+        store.commit(2, model).unwrap();
+        std::fs::write(
+            fixture.shared.root.join("state/login-task.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+    }
+    let server = fixture.server();
+    let mut connection = ipc::connect(
+        fixture.shared.identity.store_id,
+        &policy(),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    connection
+        .send(&hello(
+            fixture.shared.identity.store_id,
+            policy().session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    connection.receive::<Welcome>().await.unwrap();
+    connection
+        .send(&Request {
+            protocol_major: PROTOCOL_MAJOR,
+            request_id: Uuid::new_v4(),
+            operation: Operation::LoginResume {
+                request_id: remove.id,
+            },
+        })
+        .await
+        .unwrap();
+    drop(connection);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                fixture
+                    .rpc(
+                        Uuid::new_v4(),
+                        Operation::LoginRequest {
+                            request_id: remove.id
+                        }
+                    )
+                    .await
+                    .unwrap(),
+                Reply::LoginRequest {
+                    status: Some(LoginStatus::Removed { revision: 4 })
+                }
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let held = fixture
+        .shared
+        .login_jobs
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let mut conflict = create.clone();
+    conflict.expected_revision = 4;
+    assert!(matches!(
+        fixture
+            .rpc(conflict.id, Operation::LoginApply { request: conflict })
+            .await,
+        Err(Error::Invalid("REQUEST_ID_CONFLICT"))
+    ));
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::LoginResume {
+                    request_id: create.id
+                }
+            )
+            .await
+            .unwrap(),
+        Reply::LoginRequest {
+            status: Some(LoginStatus::Created { revision: 3 })
+        }
+    ));
+    assert!(matches!(
+        fixture
+            .rpc(create.id, Operation::LoginApply { request: create })
+            .await
+            .unwrap(),
+        Reply::LoginRequest {
+            status: Some(LoginStatus::Created { revision: 3 })
+        }
+    ));
+    assert!(matches!(
+        fixture
+            .rpc(remove.id, Operation::LoginApply { request: remove })
+            .await
+            .unwrap(),
+        Reply::LoginRequest {
+            status: Some(LoginStatus::Removed { revision: 4 })
+        }
+    ));
+    drop(held);
+    assert!(
+        matches!(fixture.rpc(Uuid::new_v4(), Operation::LoginStatus {}).await.unwrap(),
+        Reply::LoginStatus { status } if !status.ready && status.integration.is_none())
+    );
+    server.await.unwrap().unwrap();
+    assert_eq!(fixture.shared.configuration.snapshot().unwrap().revision, 4);
+}
+
+#[tokio::test]
 async fn advanced_settings_require_minor_seventeen_in_both_directions() {
     use app_proxy_core::registry::{ConfigAction, InstanceEdit};
     let fixture = Fixture::new();

@@ -21,6 +21,33 @@ pub struct Registration {
 pub mod journal;
 
 impl Registration {
+    /// Read-only readiness includes the pinned protected host and listener, not
+    /// merely a historical registration or a matching Task Scheduler action.
+    pub fn ready(&self, home: &Path) -> Result<bool> {
+        let descriptor = store::describe(&self.home)?;
+        if descriptor.store_id != self.store_id
+            || descriptor.owner_sid != self.owner_sid
+            || std::fs::canonicalize(home)? != std::fs::canonicalize(&self.home)?
+        {
+            return Err(Error::Invalid("GUARD_LOGIN_STORE_MISMATCH"));
+        }
+        if !self.exists_verified()? {
+            return Ok(false);
+        }
+        let deployment = Deployment::listener(self.store_id)?;
+        let image = deployment.coordinator()?;
+        if image.path() != self.host {
+            return Err(Error::Invalid("GUARD_LOGIN_REGISTRATION_CHANGED"));
+        }
+        super::verify_registered(&deployment)?;
+        Ok(true)
+    }
+    pub fn matches_metadata(&self, metadata: &app_proxy_core::model::LoginTask) -> Result<bool> {
+        let expected = self.metadata()?;
+        Ok(expected.name == metadata.name
+            && expected.target == metadata.target
+            && expected.args == metadata.args)
+    }
     fn metadata(&self) -> Result<app_proxy_core::model::LoginTask> {
         let spec = self.spec()?;
         Ok(app_proxy_core::model::LoginTask {

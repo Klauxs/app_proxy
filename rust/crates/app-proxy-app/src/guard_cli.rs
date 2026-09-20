@@ -12,6 +12,11 @@ use uuid::Uuid;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// 查看或恢复本数据目录的登录启动入口
+    Login {
+        #[command(subcommand)]
+        command: crate::login_cli::Command,
+    },
     /// 查看保护状态和进程检查；已启用的自动保护继续运行
     Status { id: Uuid },
     /// 保存启用意图；所需组件未授权时报告保护未完成
@@ -25,6 +30,8 @@ struct Report {
     request_id: Option<Uuid>,
     receipt: Option<app_proxy_core::registry::ConfigReceipt>,
     status: Option<GuardStatus>,
+    login: Option<crate::login_tasks::View>,
+    login_operation: Option<crate::login_cli::Outcome>,
     requires_action: Option<&'static str>,
 }
 
@@ -36,6 +43,23 @@ pub(crate) fn component(value: ComponentState) -> &'static str {
         ComponentState::ActiveEtw => "事件监听运行中",
         ComponentState::ActivePolling => "轮询检查运行中",
     }
+}
+
+async fn login_view(root: PathBuf) -> crate::login_tasks::View {
+    coordinator::login_status(root)
+        .await
+        .unwrap_or_else(|error| {
+            let code = match error {
+                app_proxy_windows::Error::Invalid(code) => code,
+                _ => "GUARD_LOGIN_CHECK_UNCONFIRMED",
+            };
+            crate::login_tasks::View {
+                revision: 0,
+                integration: None,
+                ready: false,
+                diagnostic: Some(code.into()),
+            }
+        })
 }
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
@@ -54,14 +78,25 @@ pub(crate) async fn run_with_foreground(
     command: Command,
     json: bool,
     foreground: &mut crate::foreground::Foreground,
-    mut expected_revision: Option<u64>,
+    expected_revision: Option<u64>,
 ) -> Result<(), Failure> {
     foreground.check()?;
+    if let Command::Login { command } = command {
+        return crate::login_cli::run(root, command, json).await;
+    }
     let (id, desired) = match command {
         Command::Status { id } => (id, None),
         Command::Enable { id } => (id, Some(Desired::Enabled)),
         Command::Disable { id } => (id, Some(Desired::Disabled)),
+        Command::Login { .. } => unreachable!(),
     };
+    // A lightweight protocol check precedes enabling. Login COM diagnostics
+    // cannot prevent a current protection query or disabling protection.
+    if desired == Some(Desired::Enabled) {
+        coordinator::login_request(root.clone(), Uuid::new_v4())
+            .await
+            .map_err(|e| fail(3, e.to_string()))?;
+    }
     // Check protocol support before changing configuration with an older host.
     let mut status = coordinator::guard_status(root.clone(), id)
         .await
@@ -69,6 +104,7 @@ pub(crate) async fn run_with_foreground(
     if expected_revision.is_some_and(|revision| revision != status.revision) {
         return Err(fail(4, "配置已变化，请重新确认保护设置。"));
     }
+    let mut confirmed_revision = status.revision;
     let mut request_id = None;
     let mut receipt = None;
     if let Some(desired) = desired
@@ -78,7 +114,7 @@ pub(crate) async fn run_with_foreground(
         let catalog = coordinator::catalog(root.clone())
             .await
             .map_err(|e| fail(3, e.to_string()))?;
-        if expected_revision.is_some_and(|revision| revision != catalog.revision) {
+        if confirmed_revision != catalog.revision {
             return Err(fail(4, "配置已变化，请重新确认保护设置。"));
         }
         foreground.check()?;
@@ -99,9 +135,7 @@ pub(crate) async fn run_with_foreground(
         )
         .await?;
         request_id = Some(request);
-        if expected_revision.is_some() {
-            expected_revision = Some(applied.revision);
-        }
+        confirmed_revision = applied.revision;
         receipt = Some(applied);
         match coordinator::guard_status(root.clone(), id).await {
             Ok(current) => status = current,
@@ -113,6 +147,8 @@ pub(crate) async fn run_with_foreground(
                             request_id,
                             receipt,
                             status: None,
+                            login: None,
+                            login_operation: None,
                             requires_action: Some("query_guard_status"),
                         })
                         .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
@@ -125,7 +161,7 @@ pub(crate) async fn run_with_foreground(
             }
         }
     }
-    if expected_revision.is_some_and(|revision| revision != status.revision) {
+    if confirmed_revision != status.revision {
         return Err(fail(4, "保护设置已保存，但配置随后发生变化；请重新确认。"));
     }
     if desired == Some(Desired::Enabled)
@@ -196,7 +232,68 @@ pub(crate) async fn run_with_foreground(
                 .map_err(|e| fail(6, e.to_string()))?;
         }
     }
-    let requires_action = status.phase.required_action();
+    if confirmed_revision != status.revision {
+        return Err(fail(
+            4,
+            "配置已变化；未继续登记登录入口，请重新确认保护设置。",
+        ));
+    }
+    let mut login = login_view(root.clone()).await;
+    let mut login_operation = None;
+    if desired == Some(Desired::Enabled) {
+        foreground.check()?;
+        if login.revision != 0 && login.revision != confirmed_revision {
+            return Err(fail(4, "配置已变化，请重新确认保护设置。"));
+        }
+        let listener_verified = matches!(
+            status.listener,
+            ComponentState::ActiveEtw | ComponentState::ActivePolling
+        ) || status.diagnostic.as_deref()
+            == Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED");
+        if listener_verified && login.integration.is_none() && login.diagnostic.is_none() {
+            use app_proxy_windows::guard_task::login::journal::{Action, Request, Status};
+            let request = Request {
+                id: Uuid::new_v4(),
+                expected_revision: status.revision,
+                action: Action::Create,
+                expected_creation: None,
+            };
+            let outcome =
+                crate::login_cli::perform(&root, request.id, Some(request), foreground).await?;
+            let revision = match &outcome.status {
+                Some(Status::Created { revision }) => Some(*revision),
+                _ => None,
+            };
+            if let Some(revision) = revision {
+                confirmed_revision = revision;
+            }
+            login_operation = Some(outcome);
+            // Preserve the request even when verification or the foreground wait
+            // ends. A later explicit query/resume reconciles the native operation.
+            if foreground.check().is_ok() {
+                login = login_view(root.clone()).await;
+                if let Some(revision) = revision
+                    && let Ok(current) = coordinator::guard_status(root.clone(), id).await
+                    && current.revision == revision
+                {
+                    status = current;
+                }
+            }
+        }
+    }
+    let changed = status.revision != confirmed_revision
+        || (login.revision != 0 && login.revision != confirmed_revision);
+    if changed {
+        login.ready = false;
+        login.diagnostic = Some("GUARD_LOGIN_STATE_CHANGED".into());
+    }
+    let requires_action = if changed {
+        Some("refresh_guard_status")
+    } else {
+        status.phase.required_action().or_else(|| {
+            (status.desired == Desired::Enabled && !login.ready).then_some("verify_guard_login")
+        })
+    };
     if json {
         println!(
             "{}",
@@ -204,11 +301,23 @@ pub(crate) async fn run_with_foreground(
                 request_id,
                 receipt,
                 status: Some(status),
+                login: Some(login),
+                login_operation,
                 requires_action
             })
             .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
         );
     } else {
+        crate::login_cli::print_view(&login);
+        if let Some(outcome) = &login_operation {
+            println!("登录入口请求：{}。", outcome.request_id);
+            if let Some(code) = &outcome.error {
+                println!(
+                    "登录入口诊断：{code}；请用 guard login request {} 查询原请求。",
+                    outcome.request_id
+                );
+            }
+        }
         println!(
             "实例 {id}：{}；监听：{}；IFEO：{}。",
             match status.phase {

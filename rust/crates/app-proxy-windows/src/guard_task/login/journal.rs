@@ -33,7 +33,7 @@ pub struct Request {
     pub action: Action,
     pub expected_creation: Option<Uuid>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Status {
     Pending { action: Action },
@@ -104,6 +104,22 @@ pub struct Completion {
     job: Job,
 }
 impl Job {
+    /// Resume using the recorded home and fixed protected deployment. Existing
+    /// tasks and removals do not depend on an installed/current release.
+    pub fn execute_authorized(self) -> Result<Completion> {
+        self.execute_with(
+            Registration::exists_verified,
+            |registration| {
+                let deployment = Deployment::listener(registration.store_id)?;
+                let prepared = Prepared::authorized(&deployment, &registration.home)?;
+                if prepared.registration() != registration {
+                    return Err(Error::Invalid("GUARD_LOGIN_REGISTRATION_CHANGED"));
+                }
+                prepared.register()
+            },
+            Registration::remove_idle,
+        )
+    }
     pub fn execute(self, prepared: Option<&Prepared<'_>>) -> Result<Completion> {
         self.execute_with(
             Registration::exists_verified,

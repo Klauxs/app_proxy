@@ -1,5 +1,35 @@
 use super::*;
 
+#[test]
+fn login_readiness_rejects_relocated_or_replaced_home_before_task_queries() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("original");
+    let store = store::Store::create(&home).unwrap();
+    let descriptor = store::describe(&home).unwrap();
+    let registration = Registration {
+        store_id: descriptor.store_id,
+        owner_sid: descriptor.owner_sid,
+        home: home.clone(),
+        host: temp.path().join("missing/app-proxy-host.exe"),
+    };
+    let other = temp.path().join("other");
+    let _other = store::Store::create(&other).unwrap();
+    assert!(matches!(
+        registration.ready(&other),
+        Err(Error::Invalid("GUARD_LOGIN_STORE_MISMATCH"))
+    ));
+    drop(store);
+    // Both literal paths are confined to the owned fixture directory.
+    let moved = temp.path().join("moved");
+    std::fs::rename(&home, &moved).unwrap();
+    assert!(registration.ready(&moved).is_err());
+    let _replacement = store::Store::create(&home).unwrap();
+    assert!(matches!(
+        registration.ready(&home),
+        Err(Error::Invalid("GUARD_LOGIN_STORE_MISMATCH"))
+    ));
+}
+
 fn registration() -> Registration {
     Registration {
         store_id: Uuid::new_v4(),

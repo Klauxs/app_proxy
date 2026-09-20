@@ -193,9 +193,19 @@ fn guard_cli_keeps_clone_only_scope_and_reports_authorization_until_components_e
     let request = enabled["request_id"].as_str().unwrap();
     let receipt = ok(&root, &["instance", "request", request, "--json"]);
     assert_eq!(receipt["result"]["outcome"]["receipt"]["entity_id"], id);
+    let login = ok(&root, &["guard", "login", "status", "--json"]);
+    assert_eq!(login["ready"], false);
+    assert!(login["integration"].is_null());
+    let missing = Uuid::new_v4().to_string();
+    assert!(ok(&root, &["guard", "login", "request", &missing, "--json"])["status"].is_null());
+    let resumed = cli(&root, &["guard", "login", "resume", &missing, "--json"]);
+    assert_eq!(resumed.status.code(), Some(6));
+    let resumed: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(resumed["request_id"], missing);
+    assert!(resumed["status"].is_null());
     owner.stop();
-    let store = Store::open(&root).unwrap();
-    let manifest = store.load().unwrap();
+    let mut store = Store::open(&root).unwrap();
+    let mut manifest = store.load().unwrap();
     assert_eq!(manifest.instances.len(), 1);
     assert!(matches!(
         manifest.instances[0].data,
@@ -205,6 +215,36 @@ fn guard_cli_keeps_clone_only_scope_and_reports_authorization_until_components_e
     assert!(manifest.integrations.guard_login_task.is_none());
     assert!(store.launch_attempts().unwrap().is_empty());
     assert!(!root.join("instances").exists());
+    // A login entry with unavailable ownership is an independent diagnostic;
+    // it cannot hide a missing listener or prevent disabling current Guard.
+    manifest.integrations.guard_login_task = Some(app_proxy_core::model::LoginTask {
+        name: "unverified-fixture-login".into(),
+        target: root.join("missing/app-proxy-host.exe"),
+        args: vec![],
+    });
+    store.commit(manifest.revision, manifest).unwrap();
+    drop(store);
+    owner = Owner::capture(&root);
+    let status = ok(&root, &["guard", "status", id, "--json"]);
+    assert_eq!(status["status"]["listener"], "needs_authorization");
+    assert_eq!(status["login"]["ready"], false);
+    assert_eq!(
+        status["login"]["diagnostic"],
+        "GUARD_LOGIN_OWNERSHIP_UNAVAILABLE"
+    );
+    let disabled = ok(&root, &["guard", "disable", id, "--json"]);
+    assert_eq!(disabled["status"]["phase"], "disabled");
+    assert_eq!(disabled["login"]["ready"], false);
+    owner.stop();
+    assert!(
+        Store::open(&root)
+            .unwrap()
+            .load()
+            .unwrap()
+            .integrations
+            .guard_login_task
+            .is_some()
+    );
 }
 
 #[test]

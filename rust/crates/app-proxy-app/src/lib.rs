@@ -17,6 +17,8 @@ pub mod instance_settings;
 pub mod instance_status;
 pub mod launch_cli;
 pub mod launch_engine;
+pub mod login_cli;
+pub mod login_tasks;
 pub mod menu;
 pub mod probe;
 pub mod proxy_cli;
