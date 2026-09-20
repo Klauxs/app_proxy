@@ -2,6 +2,16 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：登录任务持久事务与显式恢复**
+
+新增 protected state/login-task.json 保存请求和长期归属，Create/Remove 与配置/core/launch/shortcut ID 双向互斥。begin/resume 短锁接纳后返回不可克隆 Job；Job 和 Completion 持有独立非阻塞文件锁及 store owner lease，COM 执行不占配置 Mutex，直到完成记账才释放。完成先恢复普通 Pending 配置并核验 core 更新屏障，只合并精确匹配的当前集成元数据，外部操作成功而 manifest/回执失败保留原请求。完成创建重放不复活后来已删除的任务；删除须绑定原创建，可取消 Pending Create。已登记结果在 Guard 全关闭后仍可记账，缺失任务不得再创建。
+
+新增 11 项默认回归，覆盖 intent/原生动作/manifest/终态中断、真实 Windows 文件占用造成 manifest 与回执写失败、operation 与 owner lease、无关配置合并、同版本创建/取消的身份比较、Guard 关闭后两种恢复分支、陌生元数据保留、坏 journal 拒绝、跨命名空间冲突、先恢复纯配置 Pending、已完成请求在后来 Job 与无关 Pending 阻塞期间只读重放，以及近 2 MiB/256 项历史下仍可完成和删除。独立审查指出终态重放曾先争 lease 和恢复无关配置，现提前只读核对完整请求并直接返回，回归通过。
+
+ignored `native_login_journal_recovers_existing_registration_and_completed_removal` 显式通过：使用真实 Task Scheduler 登记后丢弃 completion，重开 store 后通过生产核验补记；真实删除后在 manifest 已提交处中断，再重开补终态；最终任务缺失。此测试只替换了提权监听组件准入，原生注册、回读与删除均真实执行；没有执行任务或用户应用。测试 UUID ec43e2f9-1e31-4800-ae2b-41612ecdc599，结束后额外只读查询确认无残留。RPC、Guard 启用/菜单接入与实际登录仍待完成。
+
+独立最终复审通过并复跑全部 11 项默认专项。全量 workspace **434 项通过、0 失败、53 项顶层 ignored**，日志 `.tools/login-journal-final-tests.log`；clippy -D warnings、fmt/diff 通过。原生中断恢复测试由主实现方执行，审查方审阅其代码但未重复登记系统任务。
+
 **2026-09-20：普通 coordinator 登录任务平台**
 
 新增 guard_task::login，复用已有 Task Scheduler COM 构造和核验。登录/提权事件任务分别固定 Data 协议标记、URI/任务名、principal SID、运行级别、ACL 和触发器，不能交叉采用另一角色权限。登录任务仅当前 SID 的 LogonTrigger，LUA/InteractiveToken，固定发行版 host `serve --home ... --expected-store ...`。新建需核验已有监听组件、当前发行版来源和 coordinator 映像 pin；只创建缺失或复用完全匹配项，不覆盖冲突。Registration 可供上层持久保存；核验/空闲删除不需要原程序或数据目录仍存在，不终止任务实例或用户应用。

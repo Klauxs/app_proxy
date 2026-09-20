@@ -9,13 +9,32 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Registration {
     store_id: Uuid,
     owner_sid: String,
     home: PathBuf,
     host: PathBuf,
+}
+
+pub mod journal;
+
+impl Registration {
+    fn metadata(&self) -> Result<app_proxy_core::model::LoginTask> {
+        let spec = self.spec()?;
+        Ok(app_proxy_core::model::LoginTask {
+            name: spec.name,
+            target: self.host.clone(),
+            args: vec![
+                "serve".into(),
+                "--home".into(),
+                self.home.to_string_lossy().into_owned(),
+                "--expected-store".into(),
+                self.store_id.to_string(),
+            ],
+        })
+    }
 }
 
 /// Held executable/parent pins from the authorized deployment remain live until

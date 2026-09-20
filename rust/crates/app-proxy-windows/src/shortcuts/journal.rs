@@ -217,6 +217,7 @@ impl Store {
         if self.config_request_status(request.id)?.is_some()
             || self.core_request_status(request.id)?.is_some()
             || self.launch_request(request.id)?.is_some()
+            || self.login_request_status(request.id)?.is_some()
         {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }

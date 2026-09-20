@@ -146,6 +146,7 @@ fn preflight(
     if store.config_request_status(request.id)?.is_some()
         || store.core_request_status(request.id)?.is_some()
         || store.launch_request(request.id)?.is_some()
+        || store.login_request_status(request.id)?.is_some()
     {
         return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
     }

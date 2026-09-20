@@ -76,6 +76,7 @@ impl Store {
         if self.core_request_status(request.request_id)?.is_some()
             || self.launch_request(request.request_id)?.is_some()
             || self.shortcut_request_status(request.request_id)?.is_some()
+            || self.login_request_status(request.request_id)?.is_some()
         {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }
@@ -105,6 +106,7 @@ impl Store {
         if self.core_request_status(request.request_id)?.is_some()
             || self.launch_request(request.request_id)?.is_some()
             || self.shortcut_request_status(request.request_id)?.is_some()
+            || self.login_request_status(request.request_id)?.is_some()
         {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }

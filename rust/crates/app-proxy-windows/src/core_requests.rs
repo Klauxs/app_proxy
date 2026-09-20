@@ -53,6 +53,7 @@ impl Store {
         if self.config_request_status(id)?.is_some()
             || self.launch_request(id)?.is_some()
             || self.shortcut_request_status(id)?.is_some()
+            || self.login_request_status(id)?.is_some()
         {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }
