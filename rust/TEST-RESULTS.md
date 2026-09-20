@@ -2,6 +2,16 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：实例高级设置**
+
+新增管理实例高级设置及 instance settings/edit，复用 ConfigRequest、完整请求摘要去重和 revision CAS。args/cwd 部分替换，env 设置/移除/恢复继承按 ASCII 大小写不敏感统一判重；禁止受管字段，原版拒绝分身路径变量。新环境值先全量校验再分存不可变秘密，manifest/intent/回执只含引用；参数和目录继续保存在 ACL 保护配置中。私密文件输入有界且校验 ACL/普通文件/重解析链，不改动用户输入，错误和摘要不回显值。IPC 2.17 对查询和编辑双向拒绝旧版本。
+
+新增 9 项默认测试：core 2 项部分编辑/无效输入；存储 2 项持久中断恢复、秘密不泄漏/不提前写入；app 2 项输入空值/null/严格解析与摘要上限；IPC 双向版本 1 项；运行实例及旧启动计划 1 项；真实 CLI 1 项。独立审查及增量复审通过，独立复跑上述 9 项。CLI 验证目标文件已删除仍能编辑、输入保持原样、陈旧 revision 拒绝且不多写秘密。真实自有 child 在编辑后保持原身份存活、launch journal 不变；明确 revision 的待创建请求在编辑后拒绝，下次新请求读取新 secret。全量后进一步加强 cwd 夹具：初始显式子目录与应用目录不同，旧进程回执及新进程回执分别核验，定向通过。
+
+真实 PTY 显式运行 ignored `console_advanced_settings_save_hidden_values_without_launching`：参数含空字符串及环境值都不回显，确认保存并退出；验证全局 revision 连增两次、参数保存、环境仅含 secret_ref、原值可从受保护秘密读取且无 launch attempt。首轮退出清理发现长暂停后 coordinator 已空闲退出并被后续操作重新创建；测试改为清理前重新查询并验证当前夹具 host 完整身份，不假定最初 PID 仍持锁，重跑 61.71 秒通过。仅停止自有夹具 coordinator。
+
+首轮全量触发既有 lost-ACK 测试的查询先于接纳竞态，单独复跑通过；修正测试 helper 在原有 10 秒上限内允许暂时 None，其他回应仍拒绝，生产逻辑未改变。修复后全量 workspace **418 项通过、0 失败、50 项顶层 ignored**，日志 `.tools/instance-settings-final-tests.log`；clippy -D warnings、fmt/diff 通过。高级设置与整个产品完成情况分开，集成维护和完整 Guard/IFEO 链路仍待续。
+
 **2026-09-20：快捷方式 coordinator、CLI 与菜单接入**
 
 新增 shortcut create/remove/status/request/resume 命令及“管理实例 → 桌面快捷方式”菜单。RPC 不接收目标/图标/桌面路径，程序从当前发行目录、KnownFolder 和实际 EXE 资源确定。安装/资源查询在配置锁外，回锁后先校验同 ID 完整请求再检查当前 revision，避免并发已完成请求被误报 stale。移除/恢复直接使用原 journal，原应用已卸载也不触发重新解析。只读实例状态优先返回待删除请求，历史 Created 不被宣称为当前文件可用性。

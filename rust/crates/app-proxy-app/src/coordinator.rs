@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 16;
+const PROTOCOL_MINOR: u32 = 17;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -56,6 +56,9 @@ struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    InstanceSettings {
+        instance_id: Uuid,
+    },
     ShortcutApply {
         request: app_proxy_windows::shortcuts::journal::Request,
     },
@@ -139,6 +142,9 @@ struct Response {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
+    InstanceSettings {
+        settings: crate::instance_settings::Summary,
+    },
     ShortcutRequest {
         status: Option<app_proxy_windows::shortcuts::journal::Status>,
     },
@@ -269,6 +275,12 @@ impl Shared {
     }
     fn execute(&self, request: Request) -> Result<Reply> {
         match request.operation {
+            Operation::InstanceSettings { instance_id } => Ok(Reply::InstanceSettings {
+                settings: crate::instance_settings::summary(
+                    &self.configuration.snapshot()?,
+                    instance_id,
+                )?,
+            }),
             Operation::ShortcutApply { request: shortcut } => {
                 if request.request_id != shortcut.id {
                     return Err(Error::Invalid("INVALID_SHORTCUT_REQUEST"));
@@ -542,6 +554,17 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if instance_edit_operation(&request.operation) && client_minor < 17 {
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: Reply::Error {
+                    code: "INSTANCE_EDIT_PROTOCOL_UPDATE_REQUIRED".into(),
+                },
+            })
+            .await;
+    }
     if shortcut_operation(&request.operation) && client_minor < 16 {
         return connection
             .send(&Response {
@@ -864,6 +887,9 @@ async fn rpc(
     if shortcut_operation(&request.operation) && server.protocol_minor < 16 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
+    if instance_edit_operation(&request.operation) && server.protocol_minor < 17 {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 10 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
@@ -963,6 +989,32 @@ pub async fn configure(root: PathBuf, request: ConfigRequest) -> Result<ConfigOu
     }
 }
 
+fn instance_edit_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::InstanceSettings { .. }
+            | Operation::Configure {
+                action: ConfigAction::EditInstance { .. },
+                ..
+            }
+    )
+}
+pub async fn instance_settings(
+    root: PathBuf,
+    instance_id: Uuid,
+) -> Result<crate::instance_settings::Summary> {
+    store::describe(&root)?;
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::InstanceSettings { instance_id },
+    )
+    .await?
+    {
+        Reply::InstanceSettings { settings } if settings.instance_id == instance_id => Ok(settings),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
 fn shortcut_operation(operation: &Operation) -> bool {
     matches!(
         operation,

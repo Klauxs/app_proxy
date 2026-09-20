@@ -48,6 +48,59 @@ fn redirected_menu_requires_console_before_creating_a_store() {
 }
 
 #[test]
+#[ignore = "interactive console: edit arguments and environment, then exit without launching"]
+fn console_advanced_settings_save_hidden_values_without_launching() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("advanced menu store");
+    let exe = temp.path().join("fixture.exe");
+    fs::write(&exe, b"fixture only; cannot execute").unwrap();
+    let owner = Owner::capture(&root);
+    let output = cli(&root)
+        .args([
+            "instance",
+            "create",
+            "--exe",
+            exe.to_str().unwrap(),
+            "--adapter",
+            "environment",
+            "--direct",
+            "--name",
+            "advanced fixture",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let revision = created["receipt"]["revision"].as_u64().unwrap();
+    println!(
+        "Manage / instance 1 / advanced 10 / arguments 1: [\"menu-private-argument\",\"\"] / save 1."
+    );
+    println!(
+        "Repeat manage / advanced / environment 3: MENU_PRIVATE_TOKEN = menu-private-value / save 1; exit 0."
+    );
+    assert!(cli(&root).status().unwrap().success());
+    // Interactive pauses may outlive the idle coordinator; capture the current
+    // fixture owner instead of assuming the initial PID still owns the store.
+    drop(Owner::capture(&root));
+    drop(owner);
+    let store = Store::open(&root).unwrap();
+    let saved = store.load().unwrap();
+    assert_eq!(saved.revision, revision + 2);
+    assert_eq!(saved.instances[0].args, ["menu-private-argument", ""]);
+    let EnvValue::SecretRef { id } = saved.instances[0].env.set["MENU_PRIVATE_TOKEN"] else {
+        panic!()
+    };
+    assert_eq!(store.read_secret(id).unwrap(), "menu-private-value");
+    assert!(
+        !fs::read_to_string(root.join("manifest.json"))
+            .unwrap()
+            .contains("menu-private-value")
+    );
+    assert!(store.launch_attempts().unwrap().is_empty());
+}
+
+#[test]
 #[ignore = "interactive console: add Environment original direct, decline launch, rename, reject clone, exit"]
 fn console_original_save_return_rename_and_unsupported_clone() {
     let temp = tempfile::tempdir().unwrap();

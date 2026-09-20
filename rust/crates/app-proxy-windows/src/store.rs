@@ -428,3 +428,11 @@ pub(crate) fn read_protected(path: &Path, sid: &str, limit: usize) -> Result<Vec
     }
     Ok(bytes)
 }
+
+/// User-selected advanced input may contain credentials. Read a bounded file
+/// owned by this ordinary user with the same private ACL as configuration.
+pub fn read_private_input(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    identity::assert_ordinary_user()?;
+    absolute(path)?;
+    read_protected(path, &identity::current()?.user_sid, limit)
+}

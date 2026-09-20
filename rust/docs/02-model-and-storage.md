@@ -47,6 +47,8 @@ GuardConfig = {desired: "enabled"|"disabled", policy: "stop_unproxied"}
 
 首版没有 inherit network 值。将来加入时必须显式编码；缺字段是错误，创建流程必须选择 direct 或 profile。自定义环境支持 set/unset，Windows 名称按大小写不敏感去重，重复歧义拒绝；unset 与空字符串 set 的含义不同。
 
+高级编辑复用 ConfigRequest/expected_revision，不新增实例模型。args、cwd、env 省略或 null 保持原值，args 空数组清空。env 编辑包含 set（name/value）、unset 和 inherit；三组名称按 ASCII 大小写不敏感判重，inherit 删除既有用户覆盖，恢复启动基础环境继承，不是网络继承或重新读取系统环境。新 set 值分配不可变 secret_id，全量配置校验成功后才写秘密；intent/manifest 只存引用，同 ID 请求按完整 payload 摘要校验。失败留下的无引用秘密不自动删除。环境值不展开路径变量；原版参数/目录只能使用 app_dir，拒绝分身专用路径变量。编辑不依赖目标仍已安装，不重启当前进程，只改变以后创建的启动计划。
+
 **3. 模板及合成规则**
 
 首版内置 `builtin.codex@1`、`builtin.claude@1`、`builtin.chromium@1`、`builtin.environment@1`，模板随程序发布，实例使用应用记录固定的模板版本。升级模板需能展示受影响实例和变更，不在后台切换数据规则。

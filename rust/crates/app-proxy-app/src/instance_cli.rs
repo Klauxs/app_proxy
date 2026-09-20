@@ -57,6 +57,16 @@ impl Network {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// 查看高级设置摘要，不显示参数或环境变量值
+    Settings { id: Uuid },
+    /// 从受保护 JSON 文件修改高级设置，仅下次启动生效
+    Edit {
+        id: Uuid,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        revision: u64,
+    },
     /// 列出已登记实例；不读取参数、环境值或代理凭据
     List,
     /// 查看实例进程、历史会话及实际保护状态；不启动应用
@@ -134,6 +144,22 @@ fn display(name: &str) -> String {
 }
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
+    if let Command::Settings { id } = command {
+        return crate::instance_settings::show(&root, id, json).await;
+    }
+    if let Command::Edit { id, file, revision } = command {
+        let edit =
+            crate::instance_settings::edit_file(&root, id, &file, revision).map_err(dependency)?;
+        return crate::instance_settings::save(
+            &root,
+            id,
+            revision,
+            edit,
+            json,
+            &mut crate::foreground::Foreground::new(),
+        )
+        .await;
+    }
     if let Command::Inspect { id } = command {
         return crate::instance_status::inspect(&root, id, json).await;
     }
@@ -395,7 +421,11 @@ pub(crate) async fn save(
             }
         }
         Command::Remove { id } => ConfigAction::RemoveInstance { instance_id: id },
-        Command::Request { .. } | Command::List | Command::Inspect { .. } => {
+        Command::Request { .. }
+        | Command::List
+        | Command::Inspect { .. }
+        | Command::Edit { .. }
+        | Command::Settings { .. } => {
             return Err(fail(2, "CONFIGURATION_EDIT_REQUIRED"));
         }
     };

@@ -1,6 +1,6 @@
 **App Proxy Rust 版设计**
 
-状态：基础平台、配置/存储、认证管道、协调进程、实例配置、共享 sing-box 管理与启动 CLI 已实现。中文日常菜单已接入实例创建/管理/启动、手动代理、订阅、保护授权及桌面快捷方式。启动流程支持缺失内核安装、共享代理扩容确认、查询与取消；MSIX 已接入包内 helper 和持久回执恢复。Codex/Claude 直连双分身已实测；账户与代理隔离、Guard/IFEO 完整链路、高级设置、入口维护及完整验收仍待完成，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
+状态：基础平台、配置/存储、认证管道、协调进程、实例配置、共享 sing-box 管理与启动 CLI 已实现。中文日常菜单已接入实例创建/管理/启动、手动代理、订阅、保护授权、桌面快捷方式及实例高级设置。启动流程支持缺失内核安装、共享代理扩容确认、查询与取消；MSIX 已接入包内 helper 和持久回执恢复。Codex/Claude 直连双分身已实测；账户与代理隔离、Guard/IFEO 完整链路、入口维护及完整验收仍待完成，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
 
 **构建与验证**
 
@@ -20,7 +20,7 @@ cargo fmt --all -- --check
 
 本机 Rust 安装在项目 `.tools` 内，未修改系统 PATH；可使用 `./scripts/cargo.ps1 build --workspace --locked`。传递 Cargo 的 `-p` 或 `--` 等参数时用数组，避免 PowerShell 参数绑定冲突，例如 `./scripts/cargo.ps1 -CargoArgs @('clippy','--workspace','--all-targets','--locked','--','-D','warnings')`。
 
-`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑和应用启动均有持久请求记录，支持去重与查询。开发版 IPC 为 2.16，CLI 与 host 必须成套使用。
+`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑和应用启动均有持久请求记录，支持去重与查询。开发版 IPC 为 2.17，CLI 与 host 必须成套使用。
 
 无参数运行 `app-proxy.exe` 或执行 `app-proxy.exe menu` 打开中文菜单，需要交互终端；输入被重定向时会提示使用 CLI，且不创建数据目录。实例默认原版，网络须明确选择。选择代理后先验证健康，缺 sing-box 时现场提示安装或返回，安装路径自动选择；返回保留已保存的代理。实例保存后再处理保护和启动，返回不会撤销已保存实例。更改配置使用摘要版本核验，其他客户端修改后要求重新选择。Codex/Claude 代理分身默认开启 Guard，不继承被复制实例的关闭状态；只登记分身时不接管原版。实例列表在 Guard 无进程证据时补充独立只读查询，关闭 Guard 的实例也可显示运行状态。`instance inspect <实例ID> [--json]` 展示进程身份、会话启动时的网络与当前配置关系，以及 Guard/监听/IFEO 状态。查询不接管或关闭外部进程，不创建数据；身份不明、繁忙或超时保留“未确认”。进程存活不表示代理可用或应用实际流量已验证。
 
@@ -32,11 +32,21 @@ cargo fmt --all -- --check
 .\target\debug\app-proxy.exe instance clone <实例ID> --name "新分身"
 .\target\debug\app-proxy.exe instance rename <实例ID> "新名称"
 .\target\debug\app-proxy.exe instance bind <实例ID> --direct
+.\target\debug\app-proxy.exe instance settings <实例ID> --json
+.\target\debug\app-proxy.exe instance edit <实例ID> --file <受保护的绝对路径.json> --revision <版本> --json
 .\target\debug\app-proxy.exe instance remove <实例ID>
 .\target\debug\app-proxy.exe instance request <请求ID> --json
 ```
 
 创建默认原版，必须选择 `--direct` 或 `--proxy <已登记代理ID>`；普通 EXE 使用 `--exe <绝对路径> --adapter codex|claude|chromium|environment`，只有已支持的 Codex/Claude 模板允许分身。应用位置和分身存储自动解析，不复制登录数据。移除只删除登记，保留数据；已有系统集成时先要求清理。每次写入前会输出请求编号，响应中断后查询原编号，不自动重新创建。首次登记应用和创建实例是两个请求，实例创建失败可能保留应用记录。列表为摘要，显示名最多 256 字符，不含参数、环境值和代理凭据；不是完整配置导出。Guard 授权仍待实现。
+
+“管理实例 → 高级设置”可替换启动参数、修改工作目录，以及设置、移除或恢复环境变量继承；参数和变量值不回显，保存只影响下次启动。CLI 的 `instance settings` 返回摘要和编辑所需的全局 revision；`instance edit` 从最大 128 KiB 的受保护普通 JSON 文件读取变更，拒绝不符合当前用户 ACL 或包含重解析路径的文件，不改动输入文件权限或内容。文件可放在本工具已创建的受保护 `state` 目录下。省略字段或 `null` 保持原值，`args: []` 清空参数。例如：
+
+```json
+{"args":["--example","two words"],"cwd":{"kind":"application"},"env":{"set":[{"name":"EXAMPLE_TOKEN","value":"new value"}],"unset":["OLD_TOKEN"],"inherit":["RESTORED_VARIABLE"]}}
+```
+
+`cwd` 也可使用 `{"kind":"explicit","path":"${app_dir}\\work"}`。只有参数和目录展开已支持的路径变量，环境值按原文保存。变量名称按 ASCII 大小写不敏感匹配；`set` 空值与 `unset` 不同，`inherit` 仅移除用户覆盖，恢复启动时基础环境的继承，不重新读取系统环境。受管代理和实例目录变量不能覆盖。新环境值单独存入 ACL 保护的明文秘密文件，参数及工作目录仍存于受保护配置；摘要和回执不包含这些值。
 
 实例启动入口（普通 EXE / 已支持的 MSIX）：
 

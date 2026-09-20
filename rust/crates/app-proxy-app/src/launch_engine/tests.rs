@@ -6,6 +6,106 @@ use std::{
     time::Instant,
 };
 
+#[tokio::test]
+async fn advanced_edit_preserves_running_session_and_blocks_stale_dispatch() {
+    use app_proxy_core::registry::{
+        ConfigAction, ConfigRequest, EnvironmentAssignment, EnvironmentEdit, InstanceEdit,
+    };
+    use app_proxy_windows::config_transaction::ConfigOutcome;
+    let fixture = Fixture::new(true);
+    let old_cwd = fixture._root.path().join("old working directory");
+    std::fs::create_dir(&old_cwd).unwrap();
+    fixture.edit(|m| {
+        m.instances[0].cwd = WorkingDirectory::Explicit {
+            path: old_cwd.clone(),
+        }
+    });
+    let request = fixture.request();
+    fixture.engine.submit(request.clone()).await.unwrap();
+    let running = confirmed(fixture.result(request.request_id).await);
+    fixture.events(1).await;
+    let old_event: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.events.join(format!("{}.json", running.pid))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(old_event["cwd"], old_cwd.to_str().unwrap());
+    let journal_path = fixture._root.path().join("store/state/launch.json");
+    let journal = std::fs::read(&journal_path).unwrap();
+    let apply = |edit| {
+        let revision = fixture.engine.configuration.snapshot().unwrap().revision;
+        let result = fixture
+            .engine
+            .configuration
+            .apply(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: revision,
+                action: ConfigAction::EditInstance {
+                    instance_id: fixture.instance,
+                    edit,
+                },
+            })
+            .unwrap();
+        assert!(matches!(result, ConfigOutcome::Applied { .. }));
+    };
+    apply(InstanceEdit {
+        env: Some(EnvironmentEdit {
+            set: vec![EnvironmentAssignment {
+                name: "APP_PROXY_ENGINE_VALUE".into(),
+                secret_id: Uuid::new_v4(),
+                value: "next-launch-only".into(),
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let status = fixture
+        .engine
+        .observe_instance(fixture.instance, true)
+        .await
+        .unwrap();
+    assert!(matches!(status.observation, InstanceObservation::Session {
+        process, configuration_changed: Some(true), .. } if process == running));
+    assert!(process::is_running_exact(&running).unwrap());
+    assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+    process::terminate_exact(&running).unwrap();
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    fixture.engine.hold_dispatch(gate.clone());
+    let next = fixture.request();
+    let revision = fixture.engine.configuration.snapshot().unwrap().revision;
+    fixture
+        .engine
+        .submit_at_revision(next.clone(), Some(revision))
+        .await
+        .unwrap();
+    fixture.ready(next.request_id).await;
+    apply(InstanceEdit {
+        cwd: Some(WorkingDirectory::Application {}),
+        ..Default::default()
+    });
+    gate.notify_one();
+    let failed = fixture.result(next.request_id).await;
+    assert!(
+        matches!(failed.phase, LaunchPhase::Failed { code } if code == "LAUNCH_CONFIG_CHANGED")
+    );
+    assert!(failed.dispatch_id.is_none());
+    fixture.events(1).await;
+    *fixture.engine.before_dispatch.lock().unwrap() = None;
+    let fresh = fixture.request();
+    fixture.engine.submit(fresh.clone()).await.unwrap();
+    let updated = confirmed(fixture.result(fresh.request_id).await);
+    fixture.events(2).await;
+    let event: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.events.join(format!("{}.json", updated.pid))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(event["value"], "next-launch-only");
+    assert_eq!(
+        event["cwd"],
+        fixture.exe.parent().unwrap().to_str().unwrap()
+    );
+}
+
 #[test]
 fn subscription_dependency_tracks_selected_secret_and_preserves_legacy_manual_digest() {
     use app_proxy_core::subscription::{self, saved::SavedNode};

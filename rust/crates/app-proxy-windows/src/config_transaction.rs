@@ -147,6 +147,13 @@ impl Store {
                     .or(self.shortcut_edit_rejection(&request.action)?);
                 if rejection.is_none() {
                     self.stage_proxy_secret(request)?;
+                    if let ConfigAction::EditInstance { edit, .. } = &request.action
+                        && let Some(environment) = &edit.env
+                    {
+                        for entry in &environment.set {
+                            self.put_secret_once(entry.secret_id, &entry.value)?;
+                        }
+                    }
                 }
                 if let Some(code) = rejection {
                     Phase::Complete {
@@ -515,6 +522,138 @@ mod tests {
         };
         assert_eq!(receipt.revision, revision);
         receipt.entity_id
+    }
+
+    fn editable_instance(store: &mut Store) -> Uuid {
+        use app_proxy_core::model::*;
+        let app = applied(store.apply_config(&add(1)).unwrap(), 2);
+        let instance = Uuid::new_v4();
+        let request = ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 2,
+            action: ConfigAction::CreateInstance {
+                instance: registry::NewInstance {
+                    id: instance,
+                    application_id: app,
+                    name: "editable".into(),
+                    data: registry::NewData::Original {},
+                    network: NetworkBinding::Direct {},
+                    guard: None,
+                    args: vec![],
+                    env: SavedEnvironment::default(),
+                    cwd: WorkingDirectory::Application {},
+                },
+            },
+        };
+        applied(store.apply_config(&request).unwrap(), 3);
+        instance
+    }
+    fn advanced(instance_id: Uuid) -> ConfigRequest {
+        ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 3,
+            action: ConfigAction::EditInstance {
+                instance_id,
+                edit: registry::InstanceEdit {
+                    args: Some(vec!["next-argument".into()]),
+                    cwd: None,
+                    env: Some(registry::EnvironmentEdit {
+                        set: vec![registry::EnvironmentAssignment {
+                            name: "TOKEN".into(),
+                            secret_id: Uuid::new_v4(),
+                            value: "private-settings-secret".into(),
+                        }],
+                        unset: vec!["OLD_TOKEN".into()],
+                        inherit: vec![],
+                    }),
+                },
+            },
+        }
+    }
+    #[test]
+    fn advanced_edit_recovers_with_immutable_secrets_and_receipts_never_contain_values() {
+        use app_proxy_core::model::EnvValue;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let mut store = Store::create(&root).unwrap();
+        let instance = editable_instance(&mut store);
+        let request = advanced(instance);
+        let pinned = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(root.join("manifest.json"))
+            .unwrap();
+        assert!(store.apply_config(&request).is_err());
+        assert!(matches!(
+            store.config_request_status(request.request_id).unwrap(),
+            Some(ConfigRequestStatus::Pending {})
+        ));
+        let intent =
+            fs::read_to_string(root.join(format!("state/requests/{}.json", request.request_id)))
+                .unwrap();
+        assert!(!intent.contains("private-settings-secret"));
+        assert_eq!(fs::read_dir(root.join("secrets")).unwrap().count(), 1);
+        drop(pinned);
+        drop(store);
+        let mut store = Store::open(&root).unwrap();
+        let saved = store.load().unwrap();
+        assert_eq!(saved.revision, 4);
+        let EnvValue::SecretRef { id } = &saved.instances[0].env.set["TOKEN"] else {
+            panic!("secret reference required")
+        };
+        assert_eq!(store.read_secret(*id).unwrap(), "private-settings-secret");
+        assert!(
+            !fs::read_to_string(root.join("manifest.json"))
+                .unwrap()
+                .contains("private-settings-secret")
+        );
+        applied(store.apply_config(&request).unwrap(), 4);
+        assert_eq!(fs::read_dir(root.join("secrets")).unwrap().count(), 1);
+        let mut changed = request;
+        if let ConfigAction::EditInstance { edit, .. } = &mut changed.action {
+            edit.env.as_mut().unwrap().set[0].value = "other-private-value".into();
+        }
+        assert!(matches!(
+            store.apply_config(&changed),
+            Err(Error::Invalid("REQUEST_ID_CONFLICT"))
+        ));
+        assert_eq!(store.read_secret(*id).unwrap(), "private-settings-secret");
+        let current = store.load().unwrap();
+        assert_eq!(current.instances[0].args, ["next-argument"]);
+    }
+    #[test]
+    fn rejected_advanced_patch_does_not_stage_even_an_earlier_valid_assignment() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&temp.path().join("store")).unwrap();
+        let instance = editable_instance(&mut store);
+        for value in ["invalid\0value", "valid value"] {
+            let mut request = advanced(instance);
+            if let ConfigAction::EditInstance { edit, .. } = &mut request.action {
+                edit.env
+                    .as_mut()
+                    .unwrap()
+                    .set
+                    .push(registry::EnvironmentAssignment {
+                        name: if value.contains('\0') {
+                            "SECOND"
+                        } else {
+                            "HTTP_PROXY"
+                        }
+                        .into(),
+                        secret_id: Uuid::new_v4(),
+                        value: value.into(),
+                    });
+            }
+            assert!(matches!(
+                store.apply_config(&request).unwrap(),
+                ConfigOutcome::Rejected { .. }
+            ));
+            assert_eq!(
+                fs::read_dir(store.root().join("secrets")).unwrap().count(),
+                0
+            );
+            assert_eq!(store.load().unwrap().revision, 3);
+        }
     }
 
     #[test]

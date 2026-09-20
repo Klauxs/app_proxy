@@ -60,6 +60,70 @@ fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 #[test]
+fn advanced_cli_edits_uninstalled_application_with_private_input_and_revision_check() {
+    let (_temp, root, exe) = setup();
+    let created = create(&root, &exe, &[]);
+    let id = created["receipt"]["entity_id"].as_str().unwrap();
+    let revision = created["receipt"]["revision"].as_u64().unwrap();
+    let mut owner = Owner::capture(&root);
+    fs::remove_file(exe).unwrap();
+    let input = root.join("state/edit-input.json");
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "args": ["private-argument", ""],
+        "cwd": {"kind":"application"},
+        "env": {"set":[{"name":"PRIVATE_TOKEN","value":"literal-${app_home}-value"},
+                         {"name":"EMPTY_VALUE","value":""}],
+                "unset":["OLD_TOKEN"], "inherit":["PREVIOUS_OVERRIDE"]}
+    }))
+    .unwrap();
+    fs::write(&input, &bytes).unwrap();
+    let arguments = [
+        "instance",
+        "edit",
+        id,
+        "--file",
+        input.to_str().unwrap(),
+        "--revision",
+        &revision.to_string(),
+        "--json",
+    ];
+    let result = ok(&root, &arguments);
+    assert_eq!(result["takes_effect"], "next_launch");
+    assert_eq!(result["application_restarted"], false);
+    assert_eq!(result["receipt"]["revision"], revision + 1);
+    let view = ok(&root, &["instance", "settings", id, "--json"]);
+    assert_eq!(view["argument_count"], 2);
+    assert_eq!(view["set_count"], 2);
+    assert_eq!(view["unset_count"], 1);
+    let summary = serde_json::to_string(&view).unwrap();
+    assert!(!summary.contains("private-argument"));
+    assert!(!summary.contains("literal-${app_home}-value"));
+    let stale = cli(&root, &arguments);
+    assert!(!stale.status.success());
+    assert!(!String::from_utf8_lossy(&stale.stderr).contains("literal-${app_home}-value"));
+    assert_eq!(fs::read(&input).unwrap(), bytes);
+    owner.stop();
+    let store = Store::open(&root).unwrap();
+    let manifest = store.load().unwrap();
+    assert_eq!(manifest.revision, revision + 1);
+    assert_eq!(manifest.instances[0].args, ["private-argument", ""]);
+    let EnvValue::SecretRef { id: secret } = manifest.instances[0].env.set["PRIVATE_TOKEN"] else {
+        panic!()
+    };
+    assert_eq!(
+        store.read_secret(secret).unwrap(),
+        "literal-${app_home}-value"
+    );
+    assert_eq!(fs::read_dir(root.join("secrets")).unwrap().count(), 2);
+    assert!(
+        !fs::read_to_string(root.join("manifest.json"))
+            .unwrap()
+            .contains("literal-${app_home}-value")
+    );
+    assert!(store.launch_attempts().unwrap().is_empty());
+}
+
+#[test]
 fn guard_cli_keeps_clone_only_scope_and_reports_authorization_until_components_exist() {
     let (_temp, root, exe) = setup();
     let mut owner = Owner::capture(&root);

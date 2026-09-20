@@ -487,6 +487,7 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
             "关闭保护",
             "移除登记（保留数据）",
             "桌面快捷方式",
+            "高级设置（下次启动生效）",
         ],
         None,
         foreground,
@@ -634,8 +635,95 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
             Ok(())
         }
         8 => manage_shortcut(root, id, foreground).await,
+        9 => advanced_settings(root, id, foreground).await,
         _ => unreachable!(),
     }
+}
+
+async fn advanced_settings(
+    root: &Path,
+    id: Uuid,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    use app_proxy_core::{
+        model::WorkingDirectory,
+        registry::{EnvironmentAssignment, EnvironmentEdit, InstanceEdit},
+    };
+    let summary = coordinator::instance_settings(root.into(), id)
+        .await
+        .map_err(|e| fail(3, e.to_string()))?;
+    crate::instance_settings::display(&summary);
+    let action = fixed(
+        "高级设置",
+        &[
+            "替换启动参数",
+            "修改工作目录",
+            "设置环境变量",
+            "从子进程移除环境变量",
+            "恢复环境变量继承",
+        ],
+        None,
+        foreground,
+    )
+    .await?
+    .ok_or_else(returned)?;
+    let mut edit = InstanceEdit::default();
+    match action {
+        0 => {
+            prompt("输入参数 JSON 数组（不回显；[] 清空；EOF 返回）：")?;
+            let input = foreground
+                .read_secret_line(128 * 1024)
+                .await?
+                .ok_or_else(returned)?;
+            let args: Vec<String> =
+                serde_json::from_str(&input).map_err(|_| fail(2, "参数须为 JSON 字符串数组。"))?;
+            println!("将替换为 {} 项启动参数。", args.len());
+            edit.args = Some(args);
+        }
+        1 => {
+            let choice = fixed("工作目录", &["应用所在目录", "指定目录"], None, foreground)
+                .await?
+                .ok_or_else(returned)?;
+            edit.cwd = Some(if choice == 0 {
+                WorkingDirectory::Application {}
+            } else {
+                let path =
+                    text("绝对路径或已支持的路径变量（空白返回）：", None, foreground).await?;
+                WorkingDirectory::Explicit { path: path.into() }
+            });
+        }
+        2..=4 => {
+            let name = text("环境变量名称（空白返回）：", None, foreground).await?;
+            let mut env = EnvironmentEdit::default();
+            match action {
+                2 => {
+                    prompt("变量值（不回显；回车为空值，EOF 返回）：")?;
+                    let value = foreground
+                        .read_secret_line(65536)
+                        .await?
+                        .ok_or_else(returned)?;
+                    env.set.push(EnvironmentAssignment {
+                        name: name.clone(),
+                        value,
+                        secret_id: Uuid::new_v4(),
+                    });
+                    println!("设置变量 {}。", display(&name));
+                }
+                3 => {
+                    println!("从子进程环境中移除 {}。", display(&name));
+                    env.unset.push(name);
+                }
+                _ => {
+                    println!("恢复 {} 的启动环境继承值。", display(&name));
+                    env.inherit.push(name);
+                }
+            }
+            edit.env = Some(env);
+        }
+        _ => unreachable!(),
+    }
+    confirm("保存高级设置？下次启动生效，当前应用保持运行。", foreground).await?;
+    crate::instance_settings::save(root, id, summary.revision, edit, false, foreground).await
 }
 
 async fn manage_shortcut(

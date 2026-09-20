@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod instance_edit;
+pub use instance_edit::{EnvironmentAssignment, EnvironmentEdit, InstanceEdit};
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigRequest {
@@ -57,6 +60,10 @@ pub enum ConfigAction {
     RenameInstance {
         instance_id: Uuid,
         name: String,
+    },
+    EditInstance {
+        instance_id: Uuid,
+        edit: InstanceEdit,
     },
     BindInstance {
         instance_id: Uuid,
@@ -406,6 +413,12 @@ pub fn apply(
                 .checked_add(1)
                 .ok_or(ValidationError("REVISION_EXHAUSTED"))?;
             target.name = name.clone();
+            *instance_id
+        }
+        ConfigAction::EditInstance { instance_id, edit } => {
+            let target = instance_mut(&mut manifest, *instance_id)?;
+            edit.apply(target)?;
+            target.revision = next_revision(target.revision)?;
             *instance_id
         }
         ConfigAction::BindInstance {
