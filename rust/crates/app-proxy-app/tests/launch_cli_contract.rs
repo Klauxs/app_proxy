@@ -237,6 +237,75 @@ fn cli_launch_is_once_only_survives_owner_restart_and_keeps_historical_receipts(
 }
 
 #[test]
+fn instance_inspect_observes_disabled_guard_session_and_keeps_historical_network() {
+    let fixture = Fixture::new(true, false);
+    let instance = fixture.instance.to_string();
+    let before = fixture.ok(&["instance", "inspect", &instance, "--json"]);
+    assert_eq!(before["runtime"]["observation"]["state"], "absent");
+    assert_eq!(before["protection"]["phase"], "disabled");
+    let launched = fixture.ok(&["launch", &instance, "--json"]);
+    let child: ProcessIdentity =
+        serde_json::from_value(launched["attempt"]["phase"]["process"].clone()).unwrap();
+    fixture.events(1);
+    let running = fixture.ok(&["instance", "inspect", &instance, "--json"]);
+    assert_eq!(running["runtime"]["observation"]["state"], "session");
+    assert_eq!(
+        running["runtime"]["observation"]["process"]["pid"],
+        child.pid
+    );
+    assert_eq!(
+        running["runtime"]["observation"]["configuration_changed"],
+        false
+    );
+    assert_eq!(running["target_traffic_evidence"], "not_observed");
+    assert!(
+        !running
+            .to_string()
+            .contains("never-display-cli-private-value")
+    );
+    assert!(!running.to_string().contains("dependency_digest"));
+    let proxy = fixture.ok(&[
+        "proxy",
+        "create",
+        "--name",
+        "unused",
+        "--protocol",
+        "http",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "1",
+        "--json",
+    ]);
+    fixture.ok(&[
+        "instance",
+        "bind",
+        &instance,
+        "--proxy",
+        proxy["receipt"]["entity_id"].as_str().unwrap(),
+        "--json",
+    ]);
+    let changed = fixture.ok(&["instance", "inspect", &instance, "--json"]);
+    assert_eq!(
+        changed["runtime"]["observation"]["network"]["mode"],
+        "direct"
+    );
+    assert_eq!(
+        changed["runtime"]["observation"]["configuration_changed"],
+        true
+    );
+    assert_eq!(changed["instance"]["network"]["kind"], "profile");
+    assert_eq!(changed["protection"]["phase"], "disabled");
+    assert!(process::is_running_exact(&child).unwrap());
+    fixture.events(1);
+    process::terminate_exact(&child).unwrap();
+    assert_eq!(
+        fixture.ok(&["instance", "inspect", &instance, "--json"])["runtime"]["observation"]["state"],
+        "absent"
+    );
+}
+
+#[test]
 fn definite_create_failure_and_missing_dependency_never_run_a_direct_fallback() {
     for proxy in [false, true] {
         let fixture = Fixture::new(proxy, proxy);

@@ -59,6 +59,8 @@ impl Network {
 pub enum Command {
     /// 列出已登记实例；不读取参数、环境值或代理凭据
     List,
+    /// 查看实例进程、历史会话及实际保护状态；不启动应用
+    Inspect { id: Uuid },
     /// 保存新实例配置；默认原版，分身始终为空白数据
     Create {
         #[arg(long, required_unless_present = "exe", conflicts_with = "exe")]
@@ -132,6 +134,9 @@ fn display(name: &str) -> String {
 }
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
+    if let Command::Inspect { id } = command {
+        return crate::instance_status::inspect(&root, id, json).await;
+    }
     if let Command::Request { id } = command {
         let result = coordinator::request_status(root, id)
             .await
@@ -390,7 +395,7 @@ pub(crate) async fn save(
             }
         }
         Command::Remove { id } => ConfigAction::RemoveInstance { instance_id: id },
-        Command::Request { .. } | Command::List => {
+        Command::Request { .. } | Command::List | Command::Inspect { .. } => {
             return Err(fail(2, "CONFIGURATION_EDIT_REQUIRED"));
         }
     };

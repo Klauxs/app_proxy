@@ -2,6 +2,133 @@ use super::*;
 use app_proxy_core::{launch::LaunchPhase, model::*};
 
 #[tokio::test]
+async fn runtime_status_requires_minor_fifteen_in_both_directions() {
+    let fixture = Fixture::new();
+    let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+    let identity = fixture.shared.identity.clone();
+    let old_server = tokio::spawn(async move {
+        let mut connection = listener.accept().await.unwrap();
+        connection.receive::<Hello>().await.unwrap();
+        let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
+        greeting.protocol_minor = 14;
+        connection
+            .send(&Welcome::Ready { hello: greeting })
+            .await
+            .unwrap();
+        assert!(connection.receive::<Request>().await.is_err());
+    });
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::RuntimeStatus {
+                    instance_id: fixture.instance
+                }
+            )
+            .await,
+        Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+    ));
+    old_server.await.unwrap();
+    let server = fixture.server();
+    let policy = policy();
+    let mut connection = ipc::connect(
+        fixture.shared.identity.store_id,
+        &policy,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
+    greeting.protocol_minor = 14;
+    connection.send(&greeting).await.unwrap();
+    connection.receive::<Welcome>().await.unwrap();
+    connection
+        .send(&Request {
+            protocol_major: PROTOCOL_MAJOR,
+            request_id: Uuid::new_v4(),
+            operation: Operation::RuntimeStatus {
+                instance_id: fixture.instance,
+            },
+        })
+        .await
+        .unwrap();
+    let response: Response = connection.receive().await.unwrap();
+    assert!(
+        matches!(response.result, Reply::Error { code } if code == "RUNTIME_PROTOCOL_UPDATE_REQUIRED")
+    );
+    drop(connection);
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn runtime_status_busy_query_returns_unknown_and_keeps_other_rpcs_available() {
+    let fixture = Fixture::new();
+    let held = fixture
+        .shared
+        .guard_queries
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let server = fixture.server();
+    let Reply::RuntimeStatus { status } = fixture
+        .rpc(
+            Uuid::new_v4(),
+            Operation::RuntimeStatus {
+                instance_id: fixture.instance,
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("runtime response missing")
+    };
+    assert!(
+        matches!(status.observation, crate::launch_engine::InstanceObservation::Unknown { code } if code == "INSTANCE_OBSERVATION_BUSY")
+    );
+    assert!(matches!(
+        fixture
+            .rpc(Uuid::new_v4(), Operation::Status {})
+            .await
+            .unwrap(),
+        Reply::Status { .. }
+    ));
+    drop(held);
+    let Reply::RuntimeStatus { status } = fixture
+        .rpc(
+            Uuid::new_v4(),
+            Operation::RuntimeStatus {
+                instance_id: fixture.instance,
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("runtime response missing")
+    };
+    assert_eq!(status.instance_id, fixture.instance);
+    assert_eq!(
+        status.revision,
+        fixture.shared.configuration.snapshot().unwrap().revision
+    );
+    assert!(matches!(
+        status.observation,
+        crate::launch_engine::InstanceObservation::Absent {}
+    ));
+    assert!(
+        fixture
+            .shared
+            .configuration
+            .lock()
+            .unwrap()
+            .launch_attempts()
+            .unwrap()
+            .is_empty()
+    );
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn subscription_preview_and_nodes_require_their_minor_in_both_directions() {
     use crate::subscription_preview::{PreviewRequest, StageRequest};
     for operation in [

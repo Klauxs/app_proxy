@@ -492,11 +492,23 @@ fn confirmed_process_exit_releases_reservation_and_forged_identity_is_unknown() 
         store
             .confirm_launch(request.request_id, epoch, child.identity.clone())
             .unwrap();
+        let path = store.root().join("state/launch.json");
+        let unchanged = std::fs::read(&path).unwrap();
+        assert_eq!(
+            store.inspect_launch_process(request.request_id).unwrap(),
+            Some(child.identity.clone())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), unchanged);
         assert!(!store.observe_launch_exit(request.request_id).unwrap());
         let before = store.launch_request(request.request_id).unwrap().unwrap();
         assert!(matches!(before.phase, LaunchPhase::Confirmed { .. }));
         child.terminate().unwrap();
         assert!(!process::is_running_exact(&child.identity).unwrap());
+        assert_eq!(
+            store.inspect_launch_process(request.request_id).unwrap(),
+            None
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), unchanged);
         assert!(store.observe_launch_exit(request.request_id).unwrap());
         assert!(
             store

@@ -520,6 +520,28 @@ impl Store {
         Ok(())
     }
 
+    /// Read only: the identity comes from a validated protected receipt, never
+    /// from caller input. Unlike observe_launch_exit, this does not edit it.
+    pub fn inspect_launch_process(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<app_proxy_core::ProcessIdentity>> {
+        let journal = self.read_launch_journal()?;
+        let attempt = journal
+            .attempts
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or(Error::Invalid("LAUNCH_ATTEMPT_NOT_FOUND"))?;
+        let LaunchPhase::Confirmed { process } = &attempt.phase else {
+            return Err(Error::Invalid("LAUNCH_NOT_CONFIRMED"));
+        };
+        if attempt.session_exited || !process::is_recorded_process_running(process)? {
+            Ok(None)
+        } else {
+            Ok(Some(process.clone()))
+        }
+    }
+
     pub fn observe_launch_exit(&mut self, id: Uuid) -> Result<bool> {
         let mut journal = self.read_launch_journal()?;
         let attempt = journal

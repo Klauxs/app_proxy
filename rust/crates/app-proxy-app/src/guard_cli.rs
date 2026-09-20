@@ -28,7 +28,7 @@ struct Report {
     requires_action: Option<&'static str>,
 }
 
-fn component(value: ComponentState) -> &'static str {
+pub(crate) fn component(value: ComponentState) -> &'static str {
     match value {
         ComponentState::NotApplicable => "不适用",
         ComponentState::NeedsAuthorization => "待授权安装",

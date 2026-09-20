@@ -832,6 +832,200 @@ async fn guard_scan_distinguishes_original_compliant_and_misconfigured_without_s
 }
 
 #[tokio::test]
+async fn runtime_observation_keeps_disabled_guard_session_and_history_read_only() {
+    let fixture = Fixture::new(true);
+    let request = fixture.request();
+    fixture.engine.submit(request.clone()).await.unwrap();
+    let running = confirmed(fixture.result(request.request_id).await);
+    let home = fixture._root.path().join("store");
+    let journal = std::fs::read(home.join("state/launch.json")).unwrap();
+    let manifest = std::fs::read(home.join("manifest.json")).unwrap();
+    let status = fixture
+        .engine
+        .observe_instance(fixture.instance, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(status.observation, InstanceObservation::Session { process, network: LaunchNetwork::Direct {}, configuration_changed: Some(false) } if process == running)
+    );
+    assert_eq!(
+        std::fs::read(home.join("state/launch.json")).unwrap(),
+        journal
+    );
+    assert_eq!(std::fs::read(home.join("manifest.json")).unwrap(), manifest);
+    fixture.edit(|m| {
+        m.applications[0].locator = ApplicationLocator::Exe {
+            path: fixture._root.path().join("no-longer-installed.exe"),
+        }
+    });
+    let status = fixture
+        .engine
+        .observe_instance(fixture.instance, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(status.observation, InstanceObservation::Session { process, network: LaunchNetwork::Direct {}, configuration_changed: Some(true) } if process == running)
+    );
+    assert_eq!(
+        std::fs::read(home.join("state/launch.json")).unwrap(),
+        journal
+    );
+    assert!(process::is_running_exact(&running).unwrap());
+}
+
+#[tokio::test]
+async fn runtime_observation_checks_external_process_after_recorded_session_exits() {
+    let fixture = Fixture::new(true);
+    let request = fixture.request();
+    fixture.engine.submit(request.clone()).await.unwrap();
+    let running = confirmed(fixture.result(request.request_id).await);
+    process::terminate_exact(&running).unwrap();
+    let external = fixture.external_guard_target(false, false);
+    fixture.events(2).await;
+    let path = fixture._root.path().join("store/state/launch.json");
+    let before = std::fs::read(&path).unwrap();
+    let status = fixture
+        .engine
+        .observe_instance(fixture.instance, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(status.observation, InstanceObservation::Observed { process } if process == external.0.identity)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(process::is_running_exact(&external.0.identity).unwrap());
+    drop(external);
+    assert!(matches!(
+        fixture
+            .engine
+            .observe_instance(fixture.instance, true)
+            .await
+            .unwrap()
+            .observation,
+        InstanceObservation::Absent {}
+    ));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn runtime_observation_never_creates_data_or_adopts_external_clones() {
+    let fixture = Fixture::guarded();
+    fixture.edit(|m| {
+        m.instances[0].guard.desired = Desired::Disabled;
+        m.instances[0].network = NetworkBinding::Direct {};
+    });
+    let data = fixture._root.path().join("store/instances");
+    assert!(matches!(
+        fixture
+            .engine
+            .observe_instance(fixture.instance, true)
+            .await
+            .unwrap()
+            .observation,
+        InstanceObservation::Absent {}
+    ));
+    assert!(!data.exists());
+    let original = fixture.external_guard_target(false, false);
+    assert!(matches!(
+        fixture
+            .engine
+            .observe_instance(fixture.instance, true)
+            .await
+            .unwrap()
+            .observation,
+        InstanceObservation::Unknown { .. }
+    ));
+    assert!(!data.exists());
+    let clone = fixture.external_guard_target(true, false);
+    let status = fixture
+        .engine
+        .observe_instance(fixture.instance, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(status.observation, InstanceObservation::Observed { process } if process == clone.0.identity)
+    );
+    let other = fixture.external_guard_target(true, false);
+    assert!(
+        matches!(fixture.engine.observe_instance(fixture.instance, true).await.unwrap().observation, InstanceObservation::Unknown { code } if code == "INSTANCE_MULTIPLE_MAIN_PROCESSES")
+    );
+    for child in [&original, &clone, &other] {
+        assert!(process::is_running_exact(&child.0.identity).unwrap());
+    }
+    assert!(
+        fixture
+            .engine
+            .configuration
+            .lock()
+            .unwrap()
+            .launch_attempts()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn runtime_observation_rechecks_edits_and_new_pending_work() {
+    for edit in [false, true] {
+        let fixture = Fixture::new(true);
+        let configuration = fixture.engine.configuration.clone();
+        let request = fixture.request();
+        let epoch = fixture.engine.epoch;
+        *fixture.engine.after_guard_scan.lock().unwrap() = Some(Arc::new(move || {
+            let mut store = configuration.lock().unwrap();
+            if edit {
+                let mut manifest = store.load().unwrap();
+                manifest.instances[0].name = "changed".into();
+                store.commit(manifest.revision, manifest).unwrap();
+            } else {
+                store.begin_launch(&request, epoch).unwrap();
+            }
+        }));
+        let observation = fixture
+            .engine
+            .observe_instance(fixture.instance, true)
+            .await
+            .unwrap()
+            .observation;
+        if edit {
+            assert!(
+                matches!(observation, InstanceObservation::Unknown { code } if code == "LAUNCH_CONFIG_CHANGED")
+            );
+        } else {
+            assert!(matches!(observation, InstanceObservation::Pending { .. }));
+        }
+    }
+}
+
+#[tokio::test]
+async fn runtime_observation_timeout_retains_native_resolution_permit() {
+    let fixture = Fixture::new(true);
+    let (release, wait) = std::sync::mpsc::channel();
+    let wait = Mutex::new(wait);
+    *fixture.engine.before_guard_resolution.lock().unwrap() = Some(Arc::new(move || {
+        wait.lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+    }));
+    assert!(
+        matches!(fixture.engine.observe_instance(fixture.instance, true).await.unwrap().observation, InstanceObservation::Unknown { code } if code == "INSTANCE_OBSERVATION_TIMEOUT")
+    );
+    assert!(
+        matches!(fixture.engine.observe_instance(fixture.instance, true).await.unwrap().observation, InstanceObservation::Unknown { code } if code == "GUARD_RESOLUTION_BUSY")
+    );
+    *fixture.engine.before_guard_resolution.lock().unwrap() = None;
+    release.send(()).unwrap();
+    let _permit = tokio::time::timeout(
+        Duration::from_secs(3),
+        fixture.engine.guard_resolution.acquire(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[tokio::test]
 async fn guard_scan_does_not_prepare_missing_data_and_pending_launches_are_deferred() {
     let fixture = Fixture::guarded();
     let data = fixture._root.path().join("store/instances");

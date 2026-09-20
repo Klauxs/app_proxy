@@ -132,24 +132,9 @@ impl LaunchEngine {
             .ok_or(Error::Invalid("PROFILE_NOT_FOUND"))?
             .endpoint
             .clone();
-        let locator = application.locator.clone();
-        let permit = self
-            .guard_resolution
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Error::Invalid("GUARD_RESOLUTION_BUSY"))?;
-        #[cfg(test)]
-        let hook = self.before_guard_resolution.lock().unwrap().clone();
-        let resolved = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            #[cfg(test)]
-            if let Some(hook) = hook {
-                hook();
-            }
-            installation::resolve(&locator)
-        })
-        .await
-        .map_err(|_| Error::Invalid("GUARD_RESOLUTION_INTERRUPTED"))??;
+        let resolved = self
+            .resolve_for_observation(application.locator.clone())
+            .await?;
         let candidates =
             query_when_ready(|| process_query::application_candidates(&resolved)).await?;
         if candidates.is_empty() {

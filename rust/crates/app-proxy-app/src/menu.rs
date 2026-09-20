@@ -244,6 +244,16 @@ async fn select_instance(
             .await
             .ok();
         let (running, guard) = observation(status.as_ref(), snapshot.revision);
+        let runtime = if running == "未确认" {
+            coordinator::runtime_status(root.into(), instance.id)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let running = runtime.as_ref().map_or(running, |s| {
+            crate::instance_status::label(s, snapshot.revision)
+        });
         options.push(format!(
             "{} · 进程：{running} · 保护：{guard}",
             instance_label(&snapshot, instance)
@@ -483,17 +493,7 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
     .await?
     .ok_or_else(returned)?;
     match action {
-        0 => {
-            println!("{}\n实例编号 {id}", instance_label(&snapshot, instance));
-            guard_cli::run_with_foreground(
-                root.into(),
-                guard_cli::Command::Status { id },
-                false,
-                foreground,
-                None,
-            )
-            .await
-        }
+        0 => crate::instance_status::inspect(root, id, false).await,
         1 => launch_confirmed(root, &snapshot, id, foreground).await,
         2 => {
             let application = snapshot

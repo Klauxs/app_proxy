@@ -13,6 +13,7 @@ pub mod guard_cli;
 pub mod guard_control;
 mod guard_monitor;
 pub mod instance_cli;
+pub mod instance_status;
 pub mod launch_cli;
 pub mod launch_engine;
 pub mod menu;

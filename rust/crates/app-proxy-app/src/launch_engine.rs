@@ -22,6 +22,8 @@ use uuid::Uuid;
 
 mod guard;
 pub use guard::{GuardObservation, GuardScan};
+mod observation;
+pub use observation::{InstanceObservation, RuntimeStatus};
 
 pub struct LaunchEngine {
     configuration: Arc<Configuration>,

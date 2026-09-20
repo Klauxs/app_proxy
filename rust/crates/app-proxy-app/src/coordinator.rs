@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 14;
+const PROTOCOL_MINOR: u32 = 15;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -56,6 +56,9 @@ struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    RuntimeStatus {
+        instance_id: Uuid,
+    },
     SubscriptionNodes {
         profile_id: Uuid,
         offset: usize,
@@ -124,6 +127,9 @@ struct Response {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
+    RuntimeStatus {
+        status: Box<crate::launch_engine::RuntimeStatus>,
+    },
     SubscriptionNodes {
         page: crate::subscription_preview::SavedPage,
     },
@@ -308,6 +314,9 @@ impl Shared {
             Operation::Launch { .. } => Err(Error::Invalid("LAUNCH_REQUIRES_ADMISSION")),
             Operation::GuardStatus { .. } => {
                 Err(Error::Invalid("GUARD_STATUS_REQUIRES_ASYNC_QUERY"))
+            }
+            Operation::RuntimeStatus { .. } => {
+                Err(Error::Invalid("RUNTIME_STATUS_REQUIRES_ASYNC_QUERY"))
             }
             Operation::LaunchStatus { request_id } => Ok(Reply::LaunchStatus {
                 attempt: self.launch.status(request_id)?,
@@ -531,6 +540,42 @@ async fn handle(
             })
             .await;
     }
+    if let Operation::RuntimeStatus { instance_id } = request.operation {
+        if client_minor < 15 {
+            return connection
+                .send(&Response {
+                    request_id,
+                    epoch,
+                    result: Reply::Error {
+                        code: "RUNTIME_PROTOCOL_UPDATE_REQUIRED".into(),
+                    },
+                })
+                .await;
+        }
+        let permit = shared.guard_queries.clone().try_acquire_owned().ok();
+        let runtime = tokio::runtime::Handle::current();
+        let result = tokio::task::spawn_blocking(move || {
+            let allowed = permit.is_some();
+            let _permit = permit;
+            runtime.block_on(shared.launch.observe_instance(instance_id, allowed))
+        })
+        .await
+        .map_err(|_| Error::Invalid("RUNTIME_STATUS_WORKER_FAILED"))?;
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: match result {
+                    Ok(status) => Reply::RuntimeStatus {
+                        status: Box::new(status),
+                    },
+                    Err(error) => Reply::Error {
+                        code: safe_error(error),
+                    },
+                },
+            })
+            .await;
+    }
     if let Operation::GuardStatus { instance_id } = request.operation {
         if client_minor < 10 {
             return connection
@@ -730,6 +775,9 @@ async fn rpc(
         }
     ) && server.protocol_minor < 8
     {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
+    if matches!(&request.operation, Operation::RuntimeStatus { .. }) && server.protocol_minor < 15 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
     if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 10 {
@@ -1018,6 +1066,22 @@ pub async fn cancel_launch(root: PathBuf, request_id: Uuid) -> Result<LaunchAtte
         Reply::LaunchStatus {
             attempt: Some(attempt),
         } => Ok(attempt),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn runtime_status(
+    root: PathBuf,
+    instance_id: Uuid,
+) -> Result<crate::launch_engine::RuntimeStatus> {
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::RuntimeStatus { instance_id },
+    )
+    .await?
+    {
+        Reply::RuntimeStatus { status } if status.instance_id == instance_id => Ok(*status),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
 }
