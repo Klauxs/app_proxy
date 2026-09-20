@@ -145,6 +145,36 @@ fn error_exit(code: &str) -> i32 {
 }
 
 pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
+    run_with_foreground(root, command, None, &mut Foreground::new()).await
+}
+
+pub(crate) async fn from_menu(
+    root: PathBuf,
+    instance: Uuid,
+    revision: u64,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    run_with_foreground(
+        root,
+        Command {
+            instance: Some(instance),
+            request_id: None,
+            json: false,
+            action: None,
+        },
+        Some(revision),
+        foreground,
+    )
+    .await
+}
+
+async fn run_with_foreground(
+    root: PathBuf,
+    command: Command,
+    menu_revision: Option<u64>,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    foreground.check()?;
     let json = command.json;
     if let Some(action) = command.action {
         let (id, result) = match action {
@@ -168,13 +198,15 @@ pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
     }
     // This snapshot is used only for foreground dependency repair. Replays still
     // work if the instance has subsequently been removed from the catalog.
-    let mut foreground = Foreground::new();
     let catalog = coordinator::catalog(root.clone())
         .await
         .map_err(|e| fail(3, e.to_string()))?;
+    if menu_revision.is_some_and(|revision| revision != catalog.revision) {
+        return Err(fail(4, "配置已变化，请重新确认启动。"));
+    }
     let instance = catalog.instances.iter().find(|i| i.id == instance_id);
     if instance.is_some_and(|i| i.guard == Desired::Enabled) {
-        eprintln!("当前构建尚未实现 Guard/IFEO 保护；启动结果不表示保护已生效。");
+        eprintln!("启动结果不表示保护已生效；请以实例详情中的实际保护状态为准。");
     }
     let mut installed = false;
     let mut expanded = false;
@@ -185,9 +217,10 @@ pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
             instance_id,
             origin: LaunchOrigin::Interactive,
         };
-        let expected = (installed || expanded).then_some(catalog.revision);
+        let expected =
+            menu_revision.or_else(|| (installed || expanded).then_some(catalog.revision));
         let (mut report, fresh, interrupted) =
-            submit(root.clone(), request, expected, &mut foreground).await;
+            submit(root.clone(), request, expected, foreground).await;
         let repairable = fresh
             && !interrupted
             && report
@@ -218,7 +251,7 @@ pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
                 report.output(json)?;
                 return report.outcome();
             }
-            core_cli::install_interactively(root.clone(), &mut foreground).await?;
+            core_cli::install_interactively(root.clone(), foreground).await?;
             installed = true;
         } else {
             let profile = match instance.map(|i| &i.network) {
@@ -235,7 +268,7 @@ pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
                     required: profile,
                 },
                 json,
-                &mut foreground,
+                foreground,
             )
             .await;
             let Some(CoreRequestStatus::Complete {
@@ -261,7 +294,7 @@ pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
                 return report.outcome();
             }
             core_cli::show_impact(impact);
-            if !core_cli::confirm_impact(&mut foreground).await? {
+            if !core_cli::confirm_impact(foreground).await? {
                 return Err(fail(5, "已返回；共享代理未切换，应用未创建。"));
             }
             foreground.check()?;
@@ -271,7 +304,7 @@ pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
                     plan_id: impact.plan_id,
                 },
                 false,
-                &mut foreground,
+                foreground,
             )
             .await;
             core_cli::output(core_id, &applied, false)?;

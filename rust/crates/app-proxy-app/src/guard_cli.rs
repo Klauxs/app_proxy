@@ -39,6 +39,24 @@ fn component(value: ComponentState) -> &'static str {
 }
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
+    run_with_foreground(
+        root,
+        command,
+        json,
+        &mut crate::foreground::Foreground::new(),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn run_with_foreground(
+    root: PathBuf,
+    command: Command,
+    json: bool,
+    foreground: &mut crate::foreground::Foreground,
+    mut expected_revision: Option<u64>,
+) -> Result<(), Failure> {
+    foreground.check()?;
     let (id, desired) = match command {
         Command::Status { id } => (id, None),
         Command::Enable { id } => (id, Some(Desired::Enabled)),
@@ -48,14 +66,22 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
     let mut status = coordinator::guard_status(root.clone(), id)
         .await
         .map_err(|e| fail(3, e.to_string()))?;
+    if expected_revision.is_some_and(|revision| revision != status.revision) {
+        return Err(fail(4, "配置已变化，请重新确认保护设置。"));
+    }
     let mut request_id = None;
     let mut receipt = None;
     if let Some(desired) = desired
         && status.desired != desired
     {
+        foreground.check()?;
         let catalog = coordinator::catalog(root.clone())
             .await
             .map_err(|e| fail(3, e.to_string()))?;
+        if expected_revision.is_some_and(|revision| revision != catalog.revision) {
+            return Err(fail(4, "配置已变化，请重新确认保护设置。"));
+        }
+        foreground.check()?;
         let instance = catalog
             .instances
             .iter()
@@ -73,6 +99,9 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         )
         .await?;
         request_id = Some(request);
+        if expected_revision.is_some() {
+            expected_revision = Some(applied.revision);
+        }
         receipt = Some(applied);
         match coordinator::guard_status(root.clone(), id).await {
             Ok(current) => status = current,
@@ -96,13 +125,16 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             }
         }
     }
+    if expected_revision.is_some_and(|revision| revision != status.revision) {
+        return Err(fail(4, "保护设置已保存，但配置随后发生变化；请重新确认。"));
+    }
     if desired == Some(Desired::Enabled)
         && status.listener == ComponentState::NeedsAuthorization
         && !json
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
     {
-        let mut foreground = crate::foreground::Foreground::new();
+        foreground.check()?;
         println!(
             "缺少进程监听组件，需要 Windows 管理员授权，安装位置自动选择。\n1. 安装监听组件\n2. 暂不安装（保留实例配置）\n组件就绪后会自动检查已启用保护的实例，关闭并纠正未按要求使用代理的误启动主进程。"
         );

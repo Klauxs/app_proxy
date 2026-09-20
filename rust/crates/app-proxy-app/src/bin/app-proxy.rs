@@ -3,17 +3,19 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(version, about = "App Proxy Rust — 基础实现；尚未提供日常启动菜单")]
+#[command(version, about = "App Proxy Rust — 应用实例与代理；无参数打开中文菜单")]
 struct Cli {
     /// 数据目录，默认使用当前用户的 AppProxyRust 目录
     #[arg(long, global = true)]
     home: Option<std::path::PathBuf>,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 打开中文交互菜单
+    Menu,
     /// 启动已登记实例，或查询/取消原启动请求
     Launch(app_proxy_app::launch_cli::Command),
     /// 查看或配置实例保护；授权组件未完成时会明确提示
@@ -116,7 +118,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     use app_proxy_windows::{identity, package};
     identity::assert_ordinary_user()?;
     let cli = Cli::parse();
-    match cli.command {
+    match cli.command.unwrap_or(Commands::Menu) {
+        Commands::Menu => {
+            let root = cli
+                .home
+                .map(Ok)
+                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            runtime.block_on(app_proxy_app::menu::run(root))?;
+            Ok(())
+        }
         Commands::Guard { command, json } => {
             let root = cli
                 .home
@@ -191,7 +205,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 print(&status)
             } else {
                 println!(
-                    "协调进程已连接；配置版本 {}，应用 {}，实例 {}，代理 {}。\n可使用 launch 启动已登记实例，guard status 查看保护状态；保护组件授权和日常菜单仍在实现中。",
+                    "协调进程已连接；配置版本 {}，应用 {}，实例 {}，代理 {}。\n无参数可打开菜单，launch 启动已登记实例，guard status 查看保护状态。",
                     status.revision, status.applications, status.instances, status.profiles
                 );
                 Ok(())
@@ -216,7 +230,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "message": "已找到程序；具体代理配置仍须检查，尚未启动代理进程。"
                 })),
                 None => print(&serde_json::json!({"found": false,
-                    "message": "未找到可用的 sing-box；一键安装流程尚在实现中。"})),
+                    "message": "未找到可用的 sing-box；代理准备流程会提示安装，也可运行 core install。"})),
             }
         }
         Commands::Discover {

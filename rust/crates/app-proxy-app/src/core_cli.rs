@@ -394,15 +394,6 @@ pub(crate) async fn submit(
     (id, status, interrupted || foreground.is_cancelled())
 }
 
-pub(crate) async fn prepare_and_apply(
-    root: PathBuf,
-    action: CoreAction,
-    apply: bool,
-    json: bool,
-) -> Result<(), Failure> {
-    prepare_and_apply_with_foreground(root, action, apply, json, &mut Foreground::new()).await
-}
-
 pub(crate) async fn prepare_and_apply_with_foreground(
     root: PathBuf,
     action: CoreAction,
@@ -477,10 +468,31 @@ pub(crate) async fn ensure_download_profile(
     json: bool,
     foreground: &mut Foreground,
 ) -> Result<(), Failure> {
+    ensure_profile(root, profile_id, apply, json, foreground, false).await
+}
+
+pub(crate) async fn ensure_instance_profile(
+    root: PathBuf,
+    profile_id: Uuid,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    ensure_profile(root, profile_id, false, false, foreground, true).await
+}
+
+async fn ensure_profile(
+    root: PathBuf,
+    profile_id: Uuid,
+    apply: bool,
+    json: bool,
+    foreground: &mut Foreground,
+    probe_current: bool,
+) -> Result<(), Failure> {
+    foreground.check()?;
     let snapshot = coordinator::core_status(root.clone())
         .await
         .map_err(|e| fail(3, e.to_string()))?;
-    if matches!(snapshot.observed, CoreObserved::Listening)
+    if !probe_current
+        && matches!(snapshot.observed, CoreObserved::Listening)
         && snapshot.profiles.iter().any(|p| p.id == profile_id)
     {
         return foreground.check();

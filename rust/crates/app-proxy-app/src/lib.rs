@@ -15,6 +15,7 @@ mod guard_monitor;
 pub mod instance_cli;
 pub mod launch_cli;
 pub mod launch_engine;
+pub mod menu;
 pub mod probe;
 pub mod proxy_cli;
 pub mod proxy_health;

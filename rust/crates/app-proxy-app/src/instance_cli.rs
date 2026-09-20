@@ -163,41 +163,68 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             _ => Err(fail(6, "请求结果未确认；请查询原编号，不要自动重复创建。")),
         };
     }
-    let mut catalog = coordinator::catalog(root.clone())
+    if matches!(command, Command::List) {
+        let catalog = coordinator::catalog(root.clone())
+            .await
+            .map_err(dependency)?;
+        if json {
+            print(&catalog)?;
+        } else {
+            println!(
+                "配置版本 {}；以下为登记信息，运行及保护实际状态未检查，可使用 guard status 查询。",
+                catalog.revision
+            );
+            for instance in &catalog.instances {
+                let network = match instance.network {
+                    NetworkBinding::Direct {} => "直连".into(),
+                    NetworkBinding::Profile { profile_id } => format!("代理 {profile_id}"),
+                };
+                println!(
+                    "{}  {}  {}  {}",
+                    instance.id,
+                    display(&instance.name),
+                    if instance.isolated {
+                        "分身"
+                    } else {
+                        "原版"
+                    },
+                    network
+                );
+            }
+            if catalog.instances.is_empty() {
+                println!("尚无登记实例。");
+            }
+        }
+        return Ok(());
+    }
+    let (request_id, receipt, check_guard) = save(
+        &root,
+        command,
+        json,
+        None,
+        &mut crate::foreground::Foreground::new(),
+    )
+    .await?;
+    report_saved(root, request_id, receipt, check_guard, json).await
+}
+
+/// Menu and CLI share creation, installation resolution and durable writes.
+/// A menu supplies the revision shown in its confirmation summary.
+pub(crate) async fn save(
+    root: &std::path::Path,
+    command: Command,
+    json: bool,
+    expected_revision: Option<u64>,
+    foreground: &mut crate::foreground::Foreground,
+) -> Result<(Uuid, ConfigReceipt, bool), Failure> {
+    foreground.check()?;
+    let mut catalog = coordinator::catalog(root.into())
         .await
         .map_err(dependency)?;
+    if expected_revision.is_some_and(|revision| revision != catalog.revision) {
+        return Err(fail(4, "配置已变化，请重新确认。"));
+    }
     let action = match command {
-        Command::List => {
-            if json {
-                print(&catalog)?;
-            } else {
-                println!(
-                    "配置版本 {}；以下为登记信息，运行及保护实际状态未检查，可使用 guard status 查询。",
-                    catalog.revision
-                );
-                for instance in &catalog.instances {
-                    let network = match instance.network {
-                        NetworkBinding::Direct {} => "直连".into(),
-                        NetworkBinding::Profile { profile_id } => format!("代理 {profile_id}"),
-                    };
-                    println!(
-                        "{}  {}  {}  {}",
-                        instance.id,
-                        display(&instance.name),
-                        if instance.isolated {
-                            "分身"
-                        } else {
-                            "原版"
-                        },
-                        network
-                    );
-                }
-                if catalog.instances.is_empty() {
-                    println!("尚无登记实例。");
-                }
-            }
-            return Ok(());
-        }
         Command::Create {
             preset,
             exe,
@@ -286,8 +313,9 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                     locator,
                     template_ref: template,
                 };
+                foreground.check()?;
                 let (_, receipt) = submit(
-                    &root,
+                    root,
                     catalog.revision,
                     ConfigAction::AddApplication { application },
                     json,
@@ -362,7 +390,9 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             }
         }
         Command::Remove { id } => ConfigAction::RemoveInstance { instance_id: id },
-        Command::Request { .. } => unreachable!(),
+        Command::Request { .. } | Command::List => {
+            return Err(fail(2, "CONFIGURATION_EDIT_REQUIRED"));
+        }
     };
     let check_guard = matches!(
         &action,
@@ -370,7 +400,18 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             | ConfigAction::CloneInstance { .. }
             | ConfigAction::BindInstance { .. }
     );
-    let (request_id, receipt) = submit(&root, catalog.revision, action, json).await?;
+    foreground.check()?;
+    let (request_id, receipt) = submit(root, catalog.revision, action, json).await?;
+    Ok((request_id, receipt, check_guard))
+}
+
+async fn report_saved(
+    root: PathBuf,
+    request_id: Uuid,
+    receipt: ConfigReceipt,
+    check_guard: bool,
+    json: bool,
+) -> Result<(), Failure> {
     let mut protection = None;
     if check_guard {
         match coordinator::guard_status(root.clone(), receipt.entity_id).await {

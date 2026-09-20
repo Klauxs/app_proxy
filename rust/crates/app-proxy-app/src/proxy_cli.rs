@@ -177,9 +177,6 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
     let catalog = coordinator::catalog(root.clone())
         .await
         .map_err(|e| fail(3, e.to_string()))?;
-    // Retain all reservations through the configuration RPC. A saved endpoint is
-    // checked again for ownership/availability when the core is actually started.
-    let mut reservations = Vec::new();
     let action = match command {
         Command::List | Command::Show { .. } => {
             let selected = match command {
@@ -223,7 +220,69 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             return Ok(());
         }
         Command::Create { name, node } => {
-            let node = node.input(false)?;
+            return save_manual(
+                root,
+                catalog,
+                ManualEdit::Create { name },
+                node.input(false)?,
+                false,
+                json,
+                &mut crate::foreground::Foreground::new(),
+            )
+            .await
+            .map(|_| ());
+        }
+        Command::Update {
+            id,
+            node,
+            apply_to_running,
+        } => {
+            return save_manual(
+                root,
+                catalog,
+                ManualEdit::Update { id },
+                node.input(true)?,
+                apply_to_running,
+                json,
+                &mut crate::foreground::Foreground::new(),
+            )
+            .await
+            .map(|_| ());
+        }
+        Command::Rename { id, name } => ConfigAction::RenameProfile {
+            profile_id: id,
+            name,
+        },
+        Command::Remove { id } => ConfigAction::RemoveProfile { profile_id: id },
+        Command::Request { .. }
+        | Command::Import { .. }
+        | Command::Refresh { .. }
+        | Command::Nodes { .. }
+        | Command::Select { .. } => unreachable!(),
+    };
+    let (request_id, receipt) = instance_cli::submit(&root, catalog.revision, action, json).await?;
+    saved_output(request_id, &receipt, json)
+}
+
+pub(crate) enum ManualEdit {
+    Create { name: String },
+    Update { id: Uuid },
+}
+
+pub(crate) async fn save_manual(
+    root: PathBuf,
+    catalog: crate::configuration::CatalogPage,
+    edit: ManualEdit,
+    node: ManualProxyInput,
+    apply: bool,
+    json: bool,
+    foreground: &mut crate::foreground::Foreground,
+) -> Result<Uuid, Failure> {
+    foreground.check()?;
+    // Keep reservations until the durable configuration response is known.
+    let mut reservations = Vec::new();
+    let action = match edit {
+        ManualEdit::Create { name } => {
             let mut endpoint = None;
             for _ in 0..64 {
                 let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -248,37 +307,39 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 node,
             }
         }
-        Command::Update {
-            id,
-            node,
-            apply_to_running,
-        } => {
-            let node = node.input(true)?;
+        ManualEdit::Update { id } => {
             let snapshot = coordinator::core_status(root.clone())
                 .await
                 .map_err(|e| fail(3, e.to_string()))?;
             if snapshot.profiles.iter().any(|p| p.id == id) {
-                return update_running(root, catalog.revision, id, node, apply_to_running, json)
-                    .await;
+                crate::core_cli::prepare_and_apply_with_foreground(
+                    root,
+                    app_proxy_core::core_control::CoreAction::PrepareUpdate {
+                        expected_revision: catalog.revision,
+                        profile_id: id,
+                        node,
+                    },
+                    apply,
+                    json,
+                    foreground,
+                )
+                .await?;
+                return Ok(id);
             }
             ConfigAction::UpdateManualProfile {
                 profile_id: id,
                 node,
             }
         }
-        Command::Rename { id, name } => ConfigAction::RenameProfile {
-            profile_id: id,
-            name,
-        },
-        Command::Remove { id } => ConfigAction::RemoveProfile { profile_id: id },
-        Command::Request { .. }
-        | Command::Import { .. }
-        | Command::Refresh { .. }
-        | Command::Nodes { .. }
-        | Command::Select { .. } => unreachable!(),
     };
+    foreground.check()?;
     let (request_id, receipt) = instance_cli::submit(&root, catalog.revision, action, json).await?;
     drop(reservations);
+    saved_output(request_id, &receipt, json)?;
+    Ok(receipt.entity_id)
+}
+
+fn saved_output(request_id: Uuid, receipt: &ConfigReceipt, json: bool) -> Result<(), Failure> {
     if json {
         print(&serde_json::json!({"request_id":request_id,"receipt":receipt}))
     } else {
@@ -288,25 +349,4 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         );
         Ok(())
     }
-}
-
-async fn update_running(
-    root: PathBuf,
-    revision: u64,
-    profile_id: Uuid,
-    node: ManualProxyInput,
-    apply: bool,
-    json: bool,
-) -> Result<(), Failure> {
-    crate::core_cli::prepare_and_apply(
-        root,
-        app_proxy_core::core_control::CoreAction::PrepareUpdate {
-            expected_revision: revision,
-            profile_id,
-            node,
-        },
-        apply,
-        json,
-    )
-    .await
 }

@@ -17,7 +17,7 @@ use app_proxy_windows::{
     subscription_stage::StagedSubscription,
 };
 use std::{
-    io::{self, BufRead, IsTerminal, Read, Write},
+    io::{self, IsTerminal, Write},
     net::{Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
     time::Duration,
@@ -50,19 +50,30 @@ fn show_node(index: usize, node: &NodeSummary, selected: bool) {
 }
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
-    let mut foreground = Foreground::new();
+    run_with_foreground(root, command, json, &mut Foreground::new())
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn run_with_foreground(
+    root: PathBuf,
+    command: Command,
+    json: bool,
+    foreground: &mut Foreground,
+) -> Result<Option<Uuid>, Failure> {
+    foreground.check()?;
     match command {
         Command::Nodes { id } => {
             let page = saved_nodes(&root, id).await?;
             if json {
-                print(&page)
+                print(&page)?;
             } else {
                 for (index, node) in page.nodes.iter().enumerate() {
                     show_node(index, &node.node, node.id == page.selected_node_id);
                     println!("   {}", node.id);
                 }
-                Ok(())
             }
+            Ok(None)
         }
         Command::Select {
             id,
@@ -83,7 +94,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 for (index, node) in page.nodes.iter().enumerate() {
                     show_node(index, &node.node, node.id == page.selected_node_id);
                 }
-                page.nodes[choose_node(page.nodes.len(), &mut foreground).await?].id
+                page.nodes[choose_node(page.nodes.len(), foreground).await?].id
             };
             commit(
                 &root,
@@ -107,9 +118,10 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 },
                 apply_to_running,
                 json,
-                &mut foreground,
+                foreground,
             )
-            .await
+            .await?;
+            Ok(Some(id))
         }
         Command::Import {
             name,
@@ -121,9 +133,10 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             if node.is_none() && (json || !core_cli::interactive()) {
                 return Err(fail(2, "非交互导入请用 --node 指定准确节点名。"));
             }
-            let url = read_url(url_stdin, &mut foreground).await?;
-            prepare_route(&root, via, apply_to_running, json, &mut foreground).await?;
+            let url = read_url(url_stdin, foreground).await?;
+            prepare_route(&root, via, apply_to_running, json, foreground).await?;
             let id = Uuid::new_v4();
+            let profile_id = Uuid::new_v4();
             let result = async {
                 let nodes = preview(
                     &root,
@@ -132,7 +145,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                         url,
                         network: network(via),
                     },
-                    &mut foreground,
+                    foreground,
                 )
                 .await?;
                 let selected_name = if let Some(name) = node {
@@ -144,7 +157,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                     for (index, node) in nodes.iter().enumerate() {
                         show_node(index, node, false);
                     }
-                    nodes[choose_node(nodes.len(), &mut foreground).await?]
+                    nodes[choose_node(nodes.len(), foreground).await?]
                         .name
                         .clone()
                 };
@@ -173,22 +186,22 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                     &root,
                     id,
                     StageRequest::Import {
-                        profile_id: Uuid::new_v4(),
+                        profile_id,
                         name,
                         endpoint: endpoint
                             .ok_or_else(|| fail(3, "LOCAL_PROXY_PORT_UNAVAILABLE"))?,
                         selected_name,
                     },
-                    &mut foreground,
+                    foreground,
                 )
                 .await?;
-                let result = commit(&root, staged, apply_to_running, json, &mut foreground).await;
+                let result = commit(&root, staged, apply_to_running, json, foreground).await;
                 drop(reservations);
                 result
             }
             .await;
             let _ = coordinator::subscription_preview_close(root, id).await;
-            result
+            result.map(|_| Some(profile_id))
         }
         Command::Refresh {
             id: profile_id,
@@ -197,7 +210,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         } => {
             // Reject non-subscription targets before starting a download route.
             saved_nodes(&root, profile_id).await?;
-            prepare_route(&root, via, apply_to_running, json, &mut foreground).await?;
+            prepare_route(&root, via, apply_to_running, json, foreground).await?;
             let id = Uuid::new_v4();
             let result = async {
                 preview(
@@ -207,15 +220,15 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                         profile_id,
                         network: network(via),
                     },
-                    &mut foreground,
+                    foreground,
                 )
                 .await?;
-                let staged = stage(&root, id, StageRequest::Refresh {}, &mut foreground).await?;
-                commit(&root, staged, apply_to_running, json, &mut foreground).await
+                let staged = stage(&root, id, StageRequest::Refresh {}, foreground).await?;
+                commit(&root, staged, apply_to_running, json, foreground).await
             }
             .await;
             let _ = coordinator::subscription_preview_close(root, id).await;
-            result
+            result.map(|_| Some(profile_id))
         }
         _ => unreachable!(),
     }
@@ -226,45 +239,16 @@ async fn read_url(from_stdin: bool, foreground: &mut Foreground) -> Result<Strin
         return Err(fail(2, "请通过 --url-stdin 提供订阅地址。"));
     }
     foreground.check()?;
-    let hidden = if io::stdin().is_terminal() {
+    if io::stdin().is_terminal() {
         eprint!("请输入订阅地址（不回显）：");
         io::stderr()
             .flush()
             .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
-        Some(
-            app_proxy_windows::console::HiddenInput::begin()
-                .map_err(|_| fail(3, "SECRET_INPUT_UNAVAILABLE"))?,
-        )
-    } else {
-        None
-    };
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = io::stdin()
-            .lock()
-            .take(8195)
-            .read_until(b'\n', &mut bytes)
-            .map(|_| bytes);
-        let _ = sender.send(result);
-    });
-    let result = tokio::select! {
-        biased;
-        _ = foreground.cancelled() => Err(fail(5, "已返回；未导入订阅。")),
-        result = receiver => result.map_err(|_| fail(2, "SUBSCRIPTION_URL_INPUT_FAILED"))?
-            .map_err(|_| fail(2, "SUBSCRIPTION_URL_INPUT_FAILED")),
-    };
-    if hidden.is_some() {
-        eprintln!();
     }
-    drop(hidden);
-    let mut url = String::from_utf8(result?).map_err(|_| fail(2, "SUBSCRIPTION_URL_INVALID"))?;
-    if url.ends_with('\n') {
-        url.pop();
-        if url.ends_with('\r') {
-            url.pop();
-        }
-    }
+    let url = foreground
+        .read_secret_line(8192)
+        .await?
+        .ok_or_else(|| fail(5, "已返回；未导入订阅。"))?;
     app_proxy_core::subscription::source_url(&url)
         .map_err(|_| fail(2, "SUBSCRIPTION_URL_INVALID"))?;
     Ok(url)

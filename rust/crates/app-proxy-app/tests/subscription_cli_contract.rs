@@ -268,7 +268,7 @@ fn missing_selection_and_invalid_urls_do_not_download_or_create_profiles() {
     assert_eq!(missing.status.code(), Some(2));
     for input in [
         "https://user:private-password@invalid/",
-        "",
+        "\n",
         "https://invalid/#private-source-token",
     ] {
         let output = cli(
@@ -288,6 +288,21 @@ fn missing_selection_and_invalid_urls_do_not_download_or_create_profiles() {
         assert_eq!(output.status.code(), Some(2));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("private-"));
     }
+    let eof = cli(
+        &root,
+        &[
+            "proxy",
+            "import",
+            "--name",
+            "test",
+            "--node",
+            "Node0",
+            "--url-stdin",
+            "--json",
+        ],
+        None,
+    );
+    assert_eq!(eof.status.code(), Some(5));
     assert_eq!(server.requests.load(Ordering::SeqCst), 0);
     owner.stop();
     assert!(
