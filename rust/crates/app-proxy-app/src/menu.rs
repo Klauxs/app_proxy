@@ -1032,11 +1032,12 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
         }
     } else {
         confirm(
-            "移除此代理配置？引用或活动入口仍存在时将拒绝移除。",
+            "移除此代理配置？仍被实例或下载设置引用时将拒绝；运行中的入口会另行预览切换影响。",
             foreground,
         )
         .await?;
-        ConfigAction::RemoveProfile { profile_id: id }
+        return proxy_cli::remove(root.into(), snapshot.revision, id, false, false, foreground)
+            .await;
     };
     foreground.check()?;
     instance_cli::submit(root, snapshot.revision, action, false).await?;

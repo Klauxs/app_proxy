@@ -32,6 +32,7 @@ pub enum UpdatePhase {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UpdateChange {
     EditProfile {},
+    RemoveProfile {},
     Expand { profiles: Vec<Uuid> },
     RefreshSubscription {},
     SelectSubscriptionNode {},
@@ -62,6 +63,10 @@ pub struct CoreUpdate {
 }
 
 impl CoreUpdate {
+    pub fn removes_last(&self) -> bool {
+        matches!(self.change, UpdateChange::RemoveProfile {})
+            && self.old_generation().ok() == Some(self.candidate)
+    }
     pub fn old_generation(&self) -> Result<Uuid> {
         match self.previous {
             CoreState::Running { generation, .. } => Ok(generation),
@@ -103,6 +108,9 @@ impl Store {
         self.ensure_core_update_idle()?;
         self.recover_config_requests()?;
         let (profile_id, change) = match &request.action {
+            ConfigAction::RemoveProfile { profile_id } => {
+                (*profile_id, UpdateChange::RemoveProfile {})
+            }
             ConfigAction::UpdateManualProfile { profile_id, .. } => {
                 (*profile_id, UpdateChange::EditProfile {})
             }
@@ -135,8 +143,18 @@ impl Store {
             registry::apply(self.load()?, request).map_err(|e| Error::Invalid(e.0))?;
         after.revision = receipt.revision;
         self.stage_proxy_secret(request)?;
-        let ids: Vec<_> = active.profiles().iter().map(|p| p.id).collect();
-        let candidate = self.prepare_core_generation_for(&after, &ids)?;
+        let ids: Vec<_> = active
+            .profiles()
+            .iter()
+            .map(|p| p.id)
+            .filter(|id| !matches!(change, UpdateChange::RemoveProfile {}) || *id != profile_id)
+            .collect();
+        // Last-route removal retains the old generation solely for rollback.
+        let candidate_id = if ids.is_empty() {
+            generation
+        } else {
+            self.prepare_core_generation_for(&after, &ids)?.id()
+        };
         Ok(CoreUpdate {
             schema_version: 2,
             store_id: before.store_id,
@@ -146,7 +164,7 @@ impl Store {
             before,
             after,
             previous,
-            candidate: candidate.id(),
+            candidate: candidate_id,
             phase: UpdatePhase::Prepared {},
             execution_request: None,
             result: None,
@@ -265,6 +283,11 @@ impl Store {
             previous_generation,
             changed_profile: plan.profile_id,
             added_profiles,
+            removed_profiles: if matches!(plan.change, UpdateChange::RemoveProfile {}) {
+                vec![plan.profile_id]
+            } else {
+                vec![]
+            },
             affected_profiles,
             bound_instances,
         })
@@ -306,7 +329,11 @@ impl Store {
             {
                 return Err(Error::Invalid("CORE_UPDATE_GENERATION_MISMATCH"));
             }
-            CoreState::Stopped {} => return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE")),
+            CoreState::Stopped {}
+                if !plan.removes_last() || plan.phase != (UpdatePhase::Switching {}) =>
+            {
+                return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE"));
+            }
             _ => {}
         }
         self.transition_core_state_inner(expected, next, Some(manifest))
@@ -322,8 +349,12 @@ impl Store {
         ) {
             return Err(Error::Invalid("INVALID_CORE_UPDATE_PHASE"));
         }
-        if !matches!(self.core_state()?, CoreState::Running { generation, .. } if generation == plan.candidate)
-        {
+        let state = self.core_state()?;
+        if !(if plan.removes_last() {
+            state == (CoreState::Stopped {})
+        } else {
+            matches!(state, CoreState::Running { generation, .. } if generation == plan.candidate)
+        }) {
             return Err(Error::Invalid("CORE_UPDATE_NOT_RUNNING"));
         }
         let current = self.load()?;
@@ -346,17 +377,24 @@ impl Store {
             self.commit_snapshot(plan.before.revision, target)?;
         }
         plan.phase = UpdatePhase::Committed {};
-        let CoreState::Running {
-            generation,
-            process,
-        } = self.core_state()?
-        else {
-            return Err(Error::Invalid("CORE_COMMIT_STATE_UNKNOWN"));
-        };
-        plan.result = Some(app_proxy_core::core_control::CoreOutcome::Reconfigured {
-            generation,
-            process,
-            revision,
+        plan.result = Some(if matches!(plan.change, UpdateChange::RemoveProfile {}) {
+            app_proxy_core::core_control::CoreOutcome::ProfileRemoved {
+                profile_id: plan.profile_id,
+                revision,
+            }
+        } else {
+            let CoreState::Running {
+                generation,
+                process,
+            } = state
+            else {
+                return Err(Error::Invalid("CORE_COMMIT_STATE_UNKNOWN"));
+            };
+            app_proxy_core::core_control::CoreOutcome::Reconfigured {
+                generation,
+                process,
+                revision,
+            }
         });
         self.write_core_update(&plan)?;
         Ok(revision)
@@ -425,7 +463,12 @@ impl Store {
             registry::{ManualProxyInput, ProxyCredentialInput},
         };
         let plan = self.require_core_update(id)?;
-        let prepare = if let UpdateChange::Expand { ref profiles } = plan.change {
+        let prepare = if matches!(plan.change, UpdateChange::RemoveProfile {}) {
+            CoreAction::PrepareRemove {
+                expected_revision: plan.before.revision,
+                profile_id: plan.profile_id,
+            }
+        } else if let UpdateChange::Expand { ref profiles } = plan.change {
             CoreAction::PrepareExpand {
                 expected_revision: plan.before.revision,
                 profiles: profiles.clone(),
@@ -535,12 +578,26 @@ impl Store {
                 Some(id),
             ) => {
                 !id.is_nil()
+                    && !matches!(plan.change, UpdateChange::RemoveProfile {})
                     && *generation == plan.candidate
                     && *revision == plan.after.revision
                     && process.user_sid == header.owner_sid
                     && process.pid != 0
                     && process.creation_time != 0
                     && process.image_path.is_absolute()
+            }
+            (
+                UpdatePhase::Committed {},
+                Some(app_proxy_core::core_control::CoreOutcome::ProfileRemoved {
+                    profile_id,
+                    revision,
+                }),
+                Some(id),
+            ) => {
+                !id.is_nil()
+                    && matches!(plan.change, UpdateChange::RemoveProfile {})
+                    && *profile_id == plan.profile_id
+                    && *revision == plan.after.revision
             }
             (
                 UpdatePhase::Restored { core_down },
@@ -559,12 +616,45 @@ impl Store {
         let old = self.open_core_generation(plan.old_generation()?)?;
         let candidate = self.open_core_generation(plan.candidate)?;
         if !self.core_generation_matches(&old, &plan.before)?
-            || !self.core_generation_matches(&candidate, &plan.after)?
+            || (!plan.removes_last() && !self.core_generation_matches(&candidate, &plan.after)?)
         {
             return Err(Error::Invalid("CORE_UPDATE_GENERATION_MISMATCH"));
         }
         let old_ids: Vec<_> = old.profiles().iter().map(|p| p.id).collect();
         let candidate_ids: Vec<_> = candidate.profiles().iter().map(|p| p.id).collect();
+        if matches!(plan.change, UpdateChange::RemoveProfile {}) {
+            let retained: Vec<_> = old_ids
+                .iter()
+                .copied()
+                .filter(|id| *id != plan.profile_id)
+                .collect();
+            if !old_ids.contains(&plan.profile_id)
+                || (if retained.is_empty() {
+                    !plan.removes_last()
+                } else {
+                    retained != candidate_ids || plan.removes_last()
+                })
+            {
+                return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+            }
+            let before = store::decode(&store::encode(&plan.before, MANIFEST_LIMIT)?)?;
+            let (mut expected, receipt) = registry::apply(
+                before,
+                &ConfigRequest {
+                    request_id: plan.plan_id,
+                    expected_revision: plan.before.revision,
+                    action: ConfigAction::RemoveProfile {
+                        profile_id: plan.profile_id,
+                    },
+                },
+            )
+            .map_err(|_| Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
+            expected.revision = receipt.revision;
+            if !same(&expected, &plan.after)? {
+                return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
+            }
+            return Ok(());
+        }
         if let UpdateChange::Expand { profiles } = &plan.change {
             let mut action = app_proxy_core::core_control::CoreAction::PrepareExpand {
                 expected_revision: plan.before.revision,
@@ -1080,6 +1170,102 @@ mod tests {
             store.core_update().unwrap().unwrap().phase,
             UpdatePhase::Prepared {}
         );
+    }
+
+    #[test]
+    fn last_profile_removal_requires_stop_and_recovers_commit_on_both_sides() {
+        for after_manifest_write in [false, true] {
+            let (temp, mut store, profile) = setup();
+            let revision = store.load().unwrap().revision;
+            let plan = store
+                .prepare_core_update(&ConfigRequest {
+                    request_id: Uuid::new_v4(),
+                    expected_revision: revision,
+                    action: ConfigAction::RemoveProfile {
+                        profile_id: profile,
+                    },
+                })
+                .unwrap();
+            assert!(plan.removes_last());
+            let impact = store.publish_core_update(plan).unwrap();
+            assert_eq!(impact.removed_profiles, [profile]);
+            assert_eq!(store.load().unwrap().profiles.len(), 1);
+            let mut plan = begin(&mut store, impact.plan_id);
+            assert!(store.commit_core_update(plan.plan_id).is_err());
+            let down = CoreState::Down {
+                generation: plan.old_generation().unwrap(),
+            };
+            store
+                .transition_core_update(plan.plan_id, &plan.previous, down.clone())
+                .unwrap();
+            store
+                .transition_core_update(plan.plan_id, &down, CoreState::Stopped {})
+                .unwrap();
+            plan.phase = UpdatePhase::Committing {};
+            store.write_core_update(&plan).unwrap();
+            if after_manifest_write {
+                let mut target: Manifest =
+                    store::decode(&store::encode(&plan.after, MANIFEST_LIMIT).unwrap()).unwrap();
+                target.revision = revision;
+                store.commit_snapshot(revision, target).unwrap();
+            }
+            drop(store);
+            let mut store = Store::open(&temp.path().join("store")).unwrap();
+            assert_eq!(
+                store.commit_core_update(plan.plan_id).unwrap(),
+                revision + 1
+            );
+            assert!(store.load().unwrap().profiles.is_empty());
+            assert_eq!(store.core_state().unwrap(), CoreState::Stopped {});
+            assert!(
+                matches!(store.require_core_update(plan.plan_id).unwrap().result, Some(CoreOutcome::ProfileRemoved { profile_id, revision: r }) if profile_id == profile && r == revision + 1)
+            );
+        }
+    }
+
+    #[test]
+    fn removal_rejects_stale_confirmation_and_changed_target_snapshot() {
+        let (_temp, mut store, profile) = setup();
+        let revision = store.load().unwrap().revision;
+        let mut plan = store
+            .prepare_core_update(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: revision,
+                action: ConfigAction::RemoveProfile {
+                    profile_id: profile,
+                },
+            })
+            .unwrap();
+        plan.after.settings.test_url = "https://different.invalid/".into();
+        assert!(store.publish_core_update(plan).is_err());
+        let plan = store
+            .prepare_core_update(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: revision,
+                action: ConfigAction::RemoveProfile {
+                    profile_id: profile,
+                },
+            })
+            .unwrap();
+        let impact = store.publish_core_update(plan).unwrap();
+        let mut manifest = store.load().unwrap();
+        manifest.profiles[0].name = "renamed".into();
+        store.commit(revision, manifest).unwrap();
+        let id = Uuid::new_v4();
+        store
+            .begin_core_request(
+                id,
+                Uuid::new_v4(),
+                &CoreAction::ApplyUpdate {
+                    plan_id: impact.plan_id,
+                },
+            )
+            .unwrap();
+        assert!(store.start_core_update(impact.plan_id, id).is_err());
+        assert!(matches!(
+            store.core_state().unwrap(),
+            CoreState::Running { .. }
+        ));
     }
 
     #[test]

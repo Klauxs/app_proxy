@@ -232,6 +232,43 @@ impl Store {
         Ok(false)
     }
 
+    /// Complete older interrupted reconciliation requests for this exact
+    /// generation. Never resolve a recovery admitted for a different core.
+    pub fn resolve_core_start_recovery_receipts(
+        &mut self,
+        generation: Uuid,
+        outcome: CoreOutcome,
+        exclude: Uuid,
+    ) -> Result<()> {
+        if !matches!(&outcome, CoreOutcome::Reconciled { generation: observed, .. } if *observed == generation)
+        {
+            return Err(Error::Invalid("CORE_START_WITNESS_MISMATCH"));
+        }
+        let action = CoreAction::RecoverStart { generation };
+        let expected: [u8; 32] = Sha256::digest(store::encode(&action, LIMIT)?).into();
+        for id in self.core_request_ids()? {
+            if id == exclude {
+                continue;
+            }
+            let record = self
+                .read_core_request(id)?
+                .ok_or(Error::Invalid("CORE_REQUEST_DISAPPEARED"))?;
+            if record.digest == expected
+                && matches!(
+                    record.phase,
+                    CoreRequestPhase::Pending { .. }
+                        | CoreRequestPhase::Complete {
+                            outcome: CoreOutcome::Indeterminate { .. },
+                            ..
+                        }
+                )
+            {
+                self.resolve_core_record(record, outcome.clone())?;
+            }
+        }
+        Ok(())
+    }
+
     fn core_request_directory(&self, create: bool) -> Result<Option<OwnedHandle>> {
         let path = self.root().join("state/core-requests");
         if !path.try_exists()? {
@@ -359,10 +396,34 @@ fn validate_outcome(outcome: &CoreOutcome, owner: &str) -> Result<()> {
                     .added_profiles
                     .iter()
                     .any(|p| impact.affected_profiles.contains(p))
+                || impact.removed_profiles.iter().any(|p| {
+                    p.is_nil()
+                        || !impact.affected_profiles.contains(p)
+                        || impact.added_profiles.contains(p)
+                })
                 || impact.affected_profiles.iter().any(Uuid::is_nil)
                 || impact.bound_instances.iter().any(Uuid::is_nil)
                 || !(impact.affected_profiles.contains(&impact.changed_profile)
                     || impact.added_profiles.contains(&impact.changed_profile)) =>
+        {
+            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
+        }
+        CoreOutcome::ProfileRemoved {
+            profile_id,
+            revision,
+        } if profile_id.is_nil() || *revision == 0 => {
+            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
+        }
+        CoreOutcome::Reconciled {
+            generation,
+            process,
+        } if generation.is_nil()
+            || process.as_ref().is_some_and(|p| {
+                p.pid == 0
+                    || p.creation_time == 0
+                    || p.user_sid != owner
+                    || !p.image_path.is_absolute()
+            }) =>
         {
             return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
         }

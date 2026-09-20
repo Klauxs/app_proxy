@@ -495,11 +495,47 @@ fn proxy_cli_assigns_distinct_ports_and_rejects_removal_while_bound() {
 #[test]
 #[ignore = "requires APP_PROXY_TEST_SING_BOX; CLI confirmation with an isolated real core"]
 fn proxy_cli_previews_exact_impact_rejects_stale_confirmation_and_reports_restore_failure() {
-    preview_case(false);
-    preview_case(true);
+    preview_case(false, false);
+    preview_case(true, false);
 }
 
-fn preview_case(expanding: bool) {
+#[test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX; isolated real core recovery and removal"]
+fn proxy_cli_recovers_start_then_previews_and_removes_last_active_profile() {
+    preview_case(false, true);
+}
+
+#[test]
+#[ignore = "subprocess fixture for the interrupted real-core CLI test"]
+fn cli_start_crash_fixture() {
+    use app_proxy_windows::{core_process::CoreProcess, core_state::CoreState, singbox_binary};
+    let root = PathBuf::from(std::env::var_os("APP_PROXY_CLI_START_ROOT").unwrap());
+    let id = std::env::var("APP_PROXY_CLI_START_GENERATION")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut store = Store::open(&root).unwrap();
+    let generation = store.open_core_generation(id).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let binary = runtime
+        .block_on(singbox_binary::discover(&root))
+        .unwrap()
+        .unwrap();
+    let prepared = CoreProcess::prepare(&mut store, &binary, &generation).unwrap();
+    store
+        .transition_core_state(
+            &CoreState::Stopped {},
+            CoreState::Starting { generation: id },
+        )
+        .unwrap();
+    drop(prepared.spawn(&binary, &generation).unwrap());
+    std::process::exit(0);
+}
+
+fn preview_case(expanding: bool, removing: bool) {
     use app_proxy_windows::{core_process::CoreProcess, core_state::CoreState, singbox_binary};
     struct OwnedCore(CoreProcess);
     impl Drop for OwnedCore {
@@ -562,20 +598,48 @@ fn preview_case(expanding: bool) {
     let starting = CoreState::Starting {
         generation: generation.id(),
     };
-    store
-        .transition_core_state(&CoreState::Stopped {}, starting.clone())
-        .unwrap();
     drop(socket);
-    let core = OwnedCore(CoreProcess::spawn(&binary, &generation).unwrap());
-    store
-        .transition_core_state(
-            &starting,
-            CoreState::Running {
-                generation: generation.id(),
-                process: core.0.identity().clone(),
-            },
-        )
-        .unwrap();
+    let core = if removing {
+        drop(store);
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli_start_crash_fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("APP_PROXY_CLI_START_ROOT", &root)
+            .env(
+                "APP_PROXY_CLI_START_GENERATION",
+                generation.id().to_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        store = Store::open(&root).unwrap();
+        OwnedCore(store.inspect_core_start(generation.id()).unwrap().unwrap())
+    } else {
+        let prepared = CoreProcess::prepare(&mut store, &binary, &generation).unwrap();
+        store
+            .transition_core_state(&CoreState::Stopped {}, starting.clone())
+            .unwrap();
+        OwnedCore(prepared.spawn(&binary, &generation).unwrap())
+    };
+    if !removing {
+        store
+            .transition_core_state(
+                &starting,
+                CoreState::Running {
+                    generation: generation.id(),
+                    process: core.0.identity().clone(),
+                },
+            )
+            .unwrap();
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !core
         .0
@@ -587,6 +651,18 @@ fn preview_case(expanding: bool) {
     }
     drop(store);
     let mut owner = Owner::capture(&root);
+    if removing {
+        assert_eq!(
+            ok(&root, &["core", "status", "--json"])["observed"],
+            "indeterminate"
+        );
+        let recovered = ok(&root, &["core", "recover-start", "--json"]);
+        assert_eq!(recovered["result"]["outcome"]["outcome"], "reconciled");
+        assert_eq!(
+            recovered["result"]["outcome"]["process"]["pid"],
+            core.0.identity().pid
+        );
+    }
     let id = profile.to_string();
     let port = upstream_port.to_string();
     let added = if expanding {
@@ -614,7 +690,9 @@ fn preview_case(expanding: bool) {
     } else {
         None
     };
-    let args = if let Some(added) = &added {
+    let args = if removing {
+        vec!["proxy", "remove", &id, "--json"]
+    } else if let Some(added) = &added {
         vec!["core", "start", added.as_str(), "--json"]
     } else {
         vec![
@@ -722,6 +800,36 @@ fn preview_case(expanding: bool) {
     } else {
         cli(&root, &["core", "apply-update", plan, "--json"])
     };
+    if removing {
+        assert!(
+            applied.status.success(),
+            "{}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        let applied: Value = serde_json::from_slice(&applied.stdout).unwrap();
+        assert_eq!(applied["result"]["outcome"]["outcome"], "profile_removed");
+        assert_eq!(applied["result"]["outcome"]["profile_id"], id);
+        assert!(!core.0.is_running().unwrap());
+        assert_eq!(
+            ok(&root, &["core", "status", "--json"])["observed"],
+            "stopped"
+        );
+        assert!(
+            ok(&root, &["proxy", "list", "--json"])["profiles"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let request_id = applied["request_id"].as_str().unwrap();
+        owner.stop();
+        assert_eq!(
+            ok(&root, &["core", "request", request_id, "--json"]),
+            applied
+        );
+        owner = Owner::capture(&root);
+        owner.stop();
+        return;
+    }
     assert_eq!(
         applied.status.code(),
         Some(3),

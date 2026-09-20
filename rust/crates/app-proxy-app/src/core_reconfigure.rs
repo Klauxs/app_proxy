@@ -116,14 +116,24 @@ impl CoreManager {
                 generation: plan.old_generation()?,
             },
         )?;
+        if plan.removes_last() {
+            let mut store = self.configuration.lock()?;
+            let state = store.core_state()?;
+            store.transition_core_update(id, &state, CoreState::Stopped {})?;
+            store.commit_core_update(id)?;
+            return store
+                .require_core_update(id)?
+                .result
+                .ok_or(Error::Invalid("CORE_UPDATE_RESULT_UNKNOWN"));
+        }
         match self.launch_update(&plan, false, &binary, &probe).await {
-            Ok(ready) => {
-                let revision = self.configuration.lock()?.commit_core_update(id)?;
-                Ok(CoreOutcome::Reconfigured {
-                    generation: ready.generation,
-                    process: ready.process,
-                    revision,
-                })
+            Ok(_) => {
+                let mut store = self.configuration.lock()?;
+                store.commit_core_update(id)?;
+                store
+                    .require_core_update(id)?
+                    .result
+                    .ok_or(Error::Invalid("CORE_UPDATE_RESULT_UNKNOWN"))
             }
             Err(_) => self.restore_update(&plan, &binary, &probe).await,
         }
@@ -147,19 +157,11 @@ impl CoreManager {
                 // A durable commit intent means all candidate health checks had
                 // already passed. Complete pure writes; never spawn on this path.
                 let mut store = self.configuration.lock()?;
-                let revision = store.commit_core_update(id)?;
-                let CoreState::Running {
-                    generation,
-                    process,
-                } = store.core_state()?
-                else {
-                    return Err(Error::Invalid("CORE_COMMIT_STATE_UNKNOWN"));
-                };
-                Ok(CoreOutcome::Reconfigured {
-                    generation,
-                    process,
-                    revision,
-                })
+                store.commit_core_update(id)?;
+                store
+                    .require_core_update(id)?
+                    .result
+                    .ok_or(Error::Invalid("CORE_UPDATE_RESULT_UNKNOWN"))
             }
             UpdatePhase::Switching {} | UpdatePhase::Restoring {} => {
                 let CoreState::Running { ref process, .. } = plan.previous else {
@@ -203,25 +205,15 @@ impl CoreManager {
             .collect::<std::io::Result<_>>()
             .map_err(|_| Error::Invalid("CORE_PORT_OCCUPIED"))?;
         let starting = CoreState::Starting { generation };
-        {
+        let prepared = {
             let mut store = self.configuration.lock()?;
             let previous = store.core_state()?;
+            let prepared = CoreProcess::prepare(&mut store, binary, &candidate)?;
             store.transition_core_update(plan.plan_id, &previous, starting.clone())?;
-        }
-        drop(reservations);
-        let core = match CoreProcess::spawn(binary, &candidate) {
-            Ok(core) => core,
-            Err(error) => {
-                if matches!(error, Error::Io(_)) {
-                    self.configuration.lock()?.transition_core_update(
-                        plan.plan_id,
-                        &starting,
-                        CoreState::Down { generation },
-                    )?;
-                }
-                return Err(error);
-            }
+            prepared
         };
+        drop(reservations);
+        let core = prepared.spawn(binary, &candidate)?;
         let running = CoreState::Running {
             generation,
             process: core.identity().clone(),
@@ -241,7 +233,12 @@ impl CoreManager {
             return Err(Error::Invalid("CORE_UPDATE_IDENTITY_WRITE_FAILED"));
         }
         wait_listeners(&core, &endpoints).await?;
-        if restoring {
+        if restoring
+            || matches!(
+                plan.change,
+                app_proxy_windows::core_update::UpdateChange::RemoveProfile {}
+            )
+        {
             // Restore the shared process if at least one old route still works;
             // a previously broken unrelated route must not take every app down.
             let mut ordered = endpoints.clone();
@@ -285,9 +282,21 @@ impl CoreManager {
         F: Fn(Endpoint) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let state = self.configuration.lock()?.core_state()?;
-        if matches!(state, CoreState::Starting { .. }) {
-            return Err(Error::Invalid("CORE_UPDATE_START_UNKNOWN"));
+        let mut state = self.configuration.lock()?.core_state()?;
+        if let CoreState::Starting { generation } = state {
+            let mut store = self.configuration.lock()?;
+            let observed = store
+                .inspect_core_start(generation)
+                .map_err(|_| Error::Invalid("CORE_UPDATE_START_UNKNOWN"))?;
+            let next = match observed {
+                Some(core) if core.is_running()? => CoreState::Running {
+                    generation,
+                    process: core.identity().clone(),
+                },
+                _ => CoreState::Down { generation },
+            };
+            store.transition_core_update(plan.plan_id, &state, next.clone())?;
+            state = next;
         }
         let plan = self
             .configuration

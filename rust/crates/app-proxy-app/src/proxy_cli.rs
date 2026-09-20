@@ -98,7 +98,11 @@ pub enum Command {
     /// 改名，不重启代理进程
     Rename { id: Uuid, name: String },
     /// 移除未被引用的配置；不删除凭据文件
-    Remove { id: Uuid },
+    Remove {
+        id: Uuid,
+        #[arg(long)]
+        apply_to_running: bool,
+    },
     /// 查询原配置请求结果
     Request { id: Uuid },
 }
@@ -253,7 +257,20 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             profile_id: id,
             name,
         },
-        Command::Remove { id } => ConfigAction::RemoveProfile { profile_id: id },
+        Command::Remove {
+            id,
+            apply_to_running,
+        } => {
+            return remove(
+                root,
+                catalog.revision,
+                id,
+                apply_to_running,
+                json,
+                &mut crate::foreground::Foreground::new(),
+            )
+            .await;
+        }
         Command::Request { .. }
         | Command::Import { .. }
         | Command::Refresh { .. }
@@ -348,5 +365,57 @@ fn saved_output(request_id: Uuid, receipt: &ConfigReceipt, json: bool) -> Result
             receipt.entity_id, receipt.revision
         );
         Ok(())
+    }
+}
+
+pub(crate) async fn remove(
+    root: PathBuf,
+    revision: u64,
+    id: Uuid,
+    apply: bool,
+    json: bool,
+    foreground: &mut crate::foreground::Foreground,
+) -> Result<(), Failure> {
+    foreground.check()?;
+    let snapshot = coordinator::core_status(root.clone())
+        .await
+        .map_err(|e| fail(3, e.to_string()))?;
+    if snapshot.profiles.iter().any(|p| p.id == id) {
+        use app_proxy_windows::core_state::CoreState;
+        match snapshot.recorded {
+            CoreState::Starting { .. } => {
+                return Err(fail(
+                    6,
+                    "内核创建尚待核对；请先执行 core recover-start，再移除代理。",
+                ));
+            }
+            CoreState::Down { .. } => {
+                return Err(fail(
+                    3,
+                    "内核已退出但保留恢复集合；请先执行 core stop，再移除代理。",
+                ));
+            }
+            _ => {}
+        }
+        crate::core_cli::prepare_and_apply_with_foreground(
+            root,
+            app_proxy_core::core_control::CoreAction::PrepareRemove {
+                expected_revision: revision,
+                profile_id: id,
+            },
+            apply,
+            json,
+            foreground,
+        )
+        .await
+    } else {
+        let (request_id, receipt) = instance_cli::submit(
+            &root,
+            revision,
+            ConfigAction::RemoveProfile { profile_id: id },
+            json,
+        )
+        .await?;
+        saved_output(request_id, &receipt, json)
     }
 }

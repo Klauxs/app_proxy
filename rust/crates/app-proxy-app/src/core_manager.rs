@@ -166,6 +166,21 @@ impl CoreManager {
         F: FnOnce(Endpoint) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        self.ensure_request_with(None, profiles, required, probe)
+            .await
+    }
+
+    pub(crate) async fn ensure_request_with<F, Fut>(
+        &self,
+        request_id: Option<Uuid>,
+        profiles: &[Uuid],
+        required: Uuid,
+        probe: F,
+    ) -> Result<ReadyCore>
+    where
+        F: FnOnce(Endpoint) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
         if !profiles.contains(&required) || required.is_nil() {
             return Err(Error::Invalid("REQUIRED_PROFILE_MISSING"));
         }
@@ -280,30 +295,31 @@ impl CoreManager {
                 let starting = CoreState::Starting {
                     generation: candidate.id(),
                 };
-                {
+                let prepared = {
                     let mut store = self.configuration.lock()?;
                     if !store.core_generation_is_current(&candidate)? {
                         return Err(Error::Invalid("CORE_CONFIG_CHANGED"));
                     }
+                    let mut prepared = CoreProcess::prepare(&mut store, &binary, &candidate)?;
+                    if let Some(id) = request_id {
+                        prepared = prepared.bind_request(
+                            &mut store,
+                            id,
+                            app_proxy_core::core_control::CoreAction::Start {
+                                profiles: profiles.to_vec(),
+                                required,
+                            },
+                        )?;
+                    }
                     store.transition_core_state(&previous, starting.clone())?;
-                }
+                    prepared
+                };
                 drop(reservations);
                 // No await between spawn and the identity journal. If anything
                 // fails before identity is durable, Starting blocks blind retry.
-                let core = match CoreProcess::spawn(&binary, &candidate) {
-                    Ok(core) => core,
-                    Err(error) => {
-                        if matches!(error, Error::Io(_)) {
-                            self.configuration.lock()?.transition_core_state(
-                                &starting,
-                                CoreState::Down {
-                                    generation: candidate.id(),
-                                },
-                            )?;
-                        }
-                        return Err(error);
-                    }
-                };
+                // Even an IO error can follow successful native creation.
+                // Only the durable witness can prove that no core survives.
+                let core = prepared.spawn(&binary, &candidate)?;
                 let running = CoreState::Running {
                     generation: candidate.id(),
                     process: core.identity().clone(),
@@ -360,6 +376,64 @@ impl CoreManager {
                 result
             }
         }
+    }
+
+    /// Explicit reconciliation records process ownership, never health or a new spawn.
+    pub(crate) async fn recover_start(
+        &self,
+        expected_generation: Uuid,
+    ) -> Result<app_proxy_core::core_control::CoreOutcome> {
+        let _gate = self.gate.lock().await;
+        let mut store = self.configuration.lock()?;
+        store.ensure_core_update_idle()?;
+        store.ensure_core_launch_idle()?;
+        let mut state = store.core_state()?;
+        if !matches!(&state, CoreState::Starting { generation } | CoreState::Running { generation, .. } | CoreState::Down { generation } if *generation == expected_generation)
+        {
+            return Err(Error::Invalid("CORE_START_GENERATION_CHANGED"));
+        }
+        if let CoreState::Starting { generation } = state {
+            let observed = store.inspect_core_start(generation)?;
+            let next = match observed {
+                Some(core) if core.is_running()? => CoreState::Running {
+                    generation,
+                    process: core.identity().clone(),
+                },
+                _ => CoreState::Down { generation },
+            };
+            store.transition_core_state(&state, next.clone())?;
+            state = next;
+        }
+        let (generation, process) = match state {
+            CoreState::Running {
+                generation,
+                process,
+            } => {
+                let alive = match CoreProcess::recover(&process)? {
+                    Some(core) => core.is_running()?,
+                    None => false,
+                };
+                if alive {
+                    (generation, Some(process))
+                } else {
+                    store.transition_core_state(
+                        &CoreState::Running {
+                            generation,
+                            process,
+                        },
+                        CoreState::Down { generation },
+                    )?;
+                    (generation, None)
+                }
+            }
+            CoreState::Down { generation } => (generation, None),
+            _ => return Err(Error::Invalid("CORE_START_RECOVERY_NOT_REQUIRED")),
+        };
+        store.resolve_core_start_request(generation, process.clone())?;
+        Ok(app_proxy_core::core_control::CoreOutcome::Reconciled {
+            generation,
+            process,
+        })
     }
 
     pub async fn stop(&self) -> Result<()> {

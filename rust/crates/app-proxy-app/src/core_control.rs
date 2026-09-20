@@ -123,6 +123,19 @@ impl CoreControl {
                 .prepare_expand(job.id, expected_revision, &profiles, required)
                 .await
                 .map(|impact| CoreOutcome::Prepared { impact }),
+            CoreAction::PrepareRemove {
+                expected_revision,
+                profile_id,
+            } => self
+                .manager
+                .prepare_update(&app_proxy_core::registry::ConfigRequest {
+                    request_id: job.id,
+                    expected_revision,
+                    action: app_proxy_core::registry::ConfigAction::RemoveProfile { profile_id },
+                })
+                .await
+                .map(|impact| CoreOutcome::Prepared { impact }),
+            CoreAction::RecoverStart { generation } => self.manager.recover_start(generation).await,
             CoreAction::PrepareUpdate {
                 expected_revision,
                 profile_id,
@@ -176,7 +189,7 @@ impl CoreControl {
             CoreAction::Start { profiles, required } => {
                 let settings = self.configuration.snapshot()?.settings;
                 self.manager
-                    .ensure_with(&profiles, required, |endpoint| async move {
+                    .ensure_request_with(Some(job.id), &profiles, required, |endpoint| async move {
                         crate::proxy_health::check(
                             &endpoint,
                             &settings.test_url,
@@ -222,11 +235,17 @@ impl CoreControl {
             },
         };
         let mut store = self.configuration.lock()?;
+        if let CoreAction::RecoverStart { generation } = job.action
+            && matches!(outcome, CoreOutcome::Reconciled { .. })
+        {
+            store.resolve_core_start_recovery_receipts(generation, outcome.clone(), job.id)?;
+        }
         if let CoreAction::RecoverUpdate { plan_id } = job.action
             && matches!(
                 outcome,
                 CoreOutcome::Prepared { .. }
                     | CoreOutcome::Reconfigured { .. }
+                    | CoreOutcome::ProfileRemoved { .. }
                     | CoreOutcome::Restored { .. }
             )
         {

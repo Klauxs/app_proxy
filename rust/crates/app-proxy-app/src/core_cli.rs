@@ -37,6 +37,8 @@ pub enum Command {
     ApplyUpdate { id: Uuid },
     /// 核对并恢复中断的重配置；不重放未知的进程创建
     RecoverUpdate { id: Uuid },
+    /// 核对中断的内核创建，不自动重启或宣称代理健康
+    RecoverStart,
     /// 查看本工具的进程及监听状态，不执行网络健康检查
     Status,
     /// 查询原请求的历史结果，不会重新执行启动或停止
@@ -99,6 +101,21 @@ pub(crate) fn output(
                     outcome: CoreOutcome::Failed { .. },
                     ..
                 }) => "操作失败。",
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::ProfileRemoved { .. },
+                    ..
+                }) => "代理配置已移除；应用和凭据文件保留。",
+                Some(CoreRequestStatus::Complete {
+                    outcome:
+                        CoreOutcome::Reconciled {
+                            process: Some(_), ..
+                        },
+                    ..
+                }) => "已核对并记录原内核进程；尚未验证代理健康。",
+                Some(CoreRequestStatus::Complete {
+                    outcome: CoreOutcome::Reconciled { process: None, .. },
+                    ..
+                }) => "已确认原创建没有存活内核；未自动重启。",
                 _ => "结果未确认，请保留原请求编号。",
             }
         );
@@ -111,6 +128,8 @@ pub(crate) fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> 
         Some(CoreRequestStatus::Complete {
             outcome:
                 CoreOutcome::Ready { .. }
+                | CoreOutcome::ProfileRemoved { .. }
+                | CoreOutcome::Reconciled { .. }
                 | CoreOutcome::Prepared { .. }
                 | CoreOutcome::Reconfigured { .. }
                 | CoreOutcome::Stopped {}
@@ -201,6 +220,19 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             return outcome(status);
         }
         Command::Stop => CoreAction::Stop {},
+        Command::RecoverStart => {
+            use app_proxy_windows::core_state::CoreState;
+            let snapshot = coordinator::core_status(root.clone())
+                .await
+                .map_err(|e| fail(3, e.to_string()))?;
+            let generation = match snapshot.recorded {
+                CoreState::Starting { generation }
+                | CoreState::Running { generation, .. }
+                | CoreState::Down { generation } => generation,
+                CoreState::Stopped {} => return Err(fail(3, "没有待核对的内核创建。")),
+            };
+            CoreAction::RecoverStart { generation }
+        }
         Command::Install => CoreAction::Install {},
         Command::Cancel { id } => CoreAction::CancelInstall { request_id: id },
         Command::ApplyUpdate { id } => CoreAction::ApplyUpdate { plan_id: id },
@@ -549,11 +581,14 @@ async fn ensure_profile(
 
 pub(crate) fn show_impact(impact: &app_proxy_core::core_control::UpdateImpact) {
     println!(
-        "计划 {}：候选检查通过；将重启共享代理。以下代理的连接会短暂中断：",
+        "计划 {}：候选检查通过；将切换共享代理配置。以下代理的连接会中断：",
         impact.plan_id
     );
     for id in &impact.affected_profiles {
         println!("  代理 {id}");
+    }
+    for id in &impact.removed_profiles {
+        println!("  移除代理 {id}（最后一个入口移除后内核停止）");
     }
     for id in &impact.added_profiles {
         println!("  新增代理 {id}");

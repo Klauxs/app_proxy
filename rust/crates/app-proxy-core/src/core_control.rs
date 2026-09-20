@@ -14,6 +14,13 @@ pub enum CoreAction {
     CancelInstall {
         request_id: Uuid,
     },
+    PrepareRemove {
+        expected_revision: u64,
+        profile_id: Uuid,
+    },
+    RecoverStart {
+        generation: Uuid,
+    },
     PrepareUpdate {
         expected_revision: u64,
         profile_id: Uuid,
@@ -38,7 +45,7 @@ pub enum CoreAction {
 }
 impl CoreAction {
     pub fn normalize(&mut self) -> Result<(), ValidationError> {
-        if matches!(self, Self::PrepareUpdate { expected_revision, profile_id, .. } | Self::PrepareSubscription { expected_revision, profile_id, .. } if *expected_revision == 0 || profile_id.is_nil())
+        if matches!(self, Self::PrepareRemove { expected_revision, profile_id } | Self::PrepareUpdate { expected_revision, profile_id, .. } | Self::PrepareSubscription { expected_revision, profile_id, .. } if *expected_revision == 0 || profile_id.is_nil())
             || matches!(
                 self,
                 Self::PrepareExpand {
@@ -54,6 +61,9 @@ impl CoreAction {
             && request_id.is_nil()
         {
             return Err(ValidationError("INVALID_REQUEST_ID"));
+        }
+        if matches!(self, Self::RecoverStart { generation } if generation.is_nil()) {
+            return Err(ValidationError("INVALID_CORE_REQUEST"));
         }
         if let Self::Start { profiles, required }
         | Self::PrepareExpand {
@@ -80,6 +90,14 @@ impl CoreAction {
 pub enum CoreOutcome {
     Prepared {
         impact: UpdateImpact,
+    },
+    ProfileRemoved {
+        profile_id: Uuid,
+        revision: u64,
+    },
+    Reconciled {
+        generation: Uuid,
+        process: Option<ProcessIdentity>,
     },
     Reconfigured {
         generation: Uuid,
@@ -115,10 +133,12 @@ pub struct UpdateImpact {
     pub plan_id: Uuid,
     pub manifest_revision: u64,
     pub previous_generation: Uuid,
-    /// The profile whose health is required, including a newly added profile.
+    /// The edited, added or removed profile. Removal probes retained routes.
     pub changed_profile: Uuid,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub added_profiles: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_profiles: Vec<Uuid>,
     pub affected_profiles: Vec<Uuid>,
     /// Configured bindings, not evidence that these applications are running.
     pub bound_instances: Vec<Uuid>,

@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 3;
-const PROTOCOL_MINOR: u32 = 19;
+const PROTOCOL_MINOR: u32 = 20;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -677,6 +677,17 @@ async fn handle(
             })
             .await;
     }
+    if core_operation(&request.operation) && client_minor < 20 {
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: Reply::Error {
+                    code: "CORE_PROTOCOL_UPDATE_REQUIRED".into(),
+                },
+            })
+            .await;
+    }
     if matches!(&request.operation, Operation::Catalog { .. }) && client_minor < 11 {
         return connection
             .send(&Response {
@@ -1035,6 +1046,9 @@ async fn rpc(
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
     if shortcut_operation(&request.operation) && server.protocol_minor < 19 {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
+    if core_operation(&request.operation) && server.protocol_minor < 20 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
     if login_operation(&request.operation) && server.protocol_minor < 18 {
@@ -1685,6 +1699,15 @@ async fn ensure_store(root: &Path) -> Result<()> {
     }
     store::describe(root)?;
     Ok(())
+}
+
+fn core_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::ControlCore { .. }
+            | Operation::CoreStatus {}
+            | Operation::CoreRequestStatus { .. }
+    )
 }
 
 #[cfg(test)]

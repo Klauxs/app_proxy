@@ -2,6 +2,90 @@ use super::*;
 use app_proxy_core::{launch::LaunchPhase, model::*};
 
 #[tokio::test]
+async fn core_protocol_requires_minor_twenty_before_either_admission() {
+    let fixture = Fixture::new();
+    let operations = || {
+        [
+            Operation::CoreStatus {},
+            Operation::CoreRequestStatus {
+                request_id: Uuid::new_v4(),
+            },
+            Operation::ControlCore {
+                action: app_proxy_core::core_control::CoreAction::RecoverStart {
+                    generation: Uuid::new_v4(),
+                },
+            },
+            Operation::ControlCore {
+                action: app_proxy_core::core_control::CoreAction::PrepareRemove {
+                    expected_revision: 2,
+                    profile_id: Uuid::new_v4(),
+                },
+            },
+        ]
+    };
+    for operation in operations() {
+        let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+        let identity = fixture.shared.identity.clone();
+        let old_server = tokio::spawn(async move {
+            let mut connection = listener.accept().await.unwrap();
+            connection.receive::<Hello>().await.unwrap();
+            let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
+            greeting.protocol_minor = 19;
+            connection
+                .send(&Welcome::Ready { hello: greeting })
+                .await
+                .unwrap();
+            assert!(connection.receive::<Request>().await.is_err());
+        });
+        assert!(matches!(
+            fixture.rpc(Uuid::new_v4(), operation).await,
+            Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+        ));
+        old_server.await.unwrap();
+    }
+    let server = fixture.server();
+    for operation in operations() {
+        let policy = policy();
+        let mut connection = ipc::connect(
+            fixture.shared.identity.store_id,
+            &policy,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
+        greeting.protocol_minor = 19;
+        connection.send(&greeting).await.unwrap();
+        connection.receive::<Welcome>().await.unwrap();
+        let request_id = Uuid::new_v4();
+        connection
+            .send(&Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id,
+                operation,
+            })
+            .await
+            .unwrap();
+        let response: Response = connection.receive().await.unwrap();
+        assert!(
+            matches!(response.result, Reply::Error { code } if code == "CORE_PROTOCOL_UPDATE_REQUIRED")
+        );
+        assert!(
+            fixture
+                .shared
+                .configuration
+                .lock()
+                .unwrap()
+                .core_request_status(request_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+    server.await.unwrap().unwrap();
+    assert_eq!(fixture.shared.configuration.snapshot().unwrap().revision, 2);
+}
+
+#[tokio::test]
 async fn login_protocol_requires_minor_eighteen_before_either_admission() {
     let fixture = Fixture::new();
     let operations = || {

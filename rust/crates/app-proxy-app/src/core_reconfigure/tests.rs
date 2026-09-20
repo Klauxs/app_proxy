@@ -110,6 +110,239 @@ impl Drop for Cleanup {
 }
 
 #[tokio::test]
+#[ignore = "requires APP_PROXY_TEST_SING_BOX; owned core and loopback peers only"]
+async fn real_remove_retains_other_routes_rolls_back_failure_and_stops_last() {
+    let binary = PathBuf::from(std::env::var_os("APP_PROXY_TEST_SING_BOX").unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let mut store = Store::create(&root).unwrap();
+    let installed = root.join("bin/sing-box/1.14.1");
+    fs::create_dir_all(&installed).unwrap();
+    for name in ["sing-box.exe", "libcronet.dll"] {
+        fs::copy(binary.parent().unwrap().join(name), installed.join(name)).unwrap();
+    }
+    let peer = upstream("retained").await;
+    let mut profiles = Vec::new();
+    let mut endpoints = Vec::new();
+    let mut reserved = Vec::new();
+    for n in 0..2 {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Endpoint {
+            host: "127.0.0.1".parse().unwrap(),
+            port: socket.local_addr().unwrap().port(),
+        };
+        reserved.push(socket);
+        let id = Uuid::new_v4();
+        store
+            .apply_config(&ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: store.load().unwrap().revision,
+                action: ConfigAction::CreateManualProfile {
+                    profile_id: id,
+                    name: format!("route {n}"),
+                    endpoint: endpoint.clone(),
+                    node: input(peer.port),
+                },
+            })
+            .unwrap();
+        profiles.push(id);
+        endpoints.push(endpoint);
+    }
+    drop(reserved);
+    let configuration = Arc::new(Configuration::new(store));
+    let _cleanup = Cleanup(configuration.clone());
+    let manager = CoreManager::new(root.clone(), configuration.clone());
+    // Real native creation succeeds, but Running and the start receipt have
+    // not been written. Reconciliation must adopt only this job's exact core.
+    let core_binary = singbox_binary::discover(&root).await.unwrap().unwrap();
+    let start_request = Uuid::new_v4();
+    let action = app_proxy_core::core_control::CoreAction::Start {
+        profiles: profiles.clone(),
+        required: profiles[0],
+    };
+    let (generation, prepared) = {
+        let mut store = configuration.lock().unwrap();
+        let generation = store.prepare_core_generation(&profiles).unwrap();
+        store
+            .begin_core_request(start_request, Uuid::new_v4(), &action)
+            .unwrap();
+        let prepared = CoreProcess::prepare(&mut store, &core_binary, &generation)
+            .unwrap()
+            .bind_request(&mut store, start_request, action)
+            .unwrap();
+        store
+            .transition_core_state(
+                &CoreState::Stopped {},
+                CoreState::Starting {
+                    generation: generation.id(),
+                },
+            )
+            .unwrap();
+        (generation, prepared)
+    };
+    let orphan = prepared.spawn(&core_binary, &generation).unwrap();
+    wait_listeners(&orphan, &endpoints).await.unwrap();
+    let original_identity = orphan.identity().clone();
+    drop(orphan);
+    assert!(
+        matches!(manager.recover_start(generation.id()).await.unwrap(), CoreOutcome::Reconciled { process: Some(p), .. } if p == original_identity)
+    );
+    assert!(matches!(
+        configuration
+            .lock()
+            .unwrap()
+            .core_request_status(start_request)
+            .unwrap(),
+        Some(
+            app_proxy_windows::core_requests::CoreRequestPhase::Complete {
+                outcome: CoreOutcome::Reconciled { .. },
+                ..
+            }
+        )
+    ));
+    let ready = manager
+        .ensure_with(&profiles, profiles[0], |e| async {
+            via(e).await.map(|_| ())
+        })
+        .await
+        .unwrap();
+    let revision = configuration.snapshot().unwrap().revision;
+    let request = |profile_id| ConfigRequest {
+        request_id: Uuid::new_v4(),
+        expected_revision: configuration.snapshot().unwrap().revision,
+        action: ConfigAction::RemoveProfile { profile_id },
+    };
+    let plan = manager.prepare_update(&request(profiles[0])).await.unwrap();
+    assert_eq!(plan.removed_profiles, [profiles[0]]);
+    assert!(
+        matches!(manager.state().unwrap(), CoreState::Running { process, .. } if process == ready.process)
+    );
+    for e in &endpoints {
+        assert_eq!(via(e.clone()).await.unwrap(), "retained");
+    }
+    // Fail only the candidate probe. Old generation has both listeners, so
+    // restoring its removed route can prove the original generation healthy.
+    let removed_port = endpoints[0].port;
+    let outcome = manager
+        .apply_update(
+            plan.plan_id,
+            admit(&configuration, plan.plan_id),
+            |e| async move {
+                if e.port == removed_port {
+                    via(e).await.map(|_| ())
+                } else {
+                    Err(Error::Invalid("TEST_CANDIDATE_FAILURE"))
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        CoreOutcome::Restored { core_down: false }
+    ));
+    assert_eq!(configuration.snapshot().unwrap().revision, revision);
+    for e in &endpoints {
+        assert_eq!(via(e.clone()).await.unwrap(), "retained");
+    }
+    // A switch can hit the same gap. Recovery identifies the candidate before
+    // stopping it and restoring both old listeners; it must not duplicate it.
+    let interrupted = manager.prepare_update(&request(profiles[0])).await.unwrap();
+    let execution = admit(&configuration, interrupted.plan_id);
+    let plan = configuration
+        .lock()
+        .unwrap()
+        .start_core_update(interrupted.plan_id, execution)
+        .unwrap();
+    let CoreState::Running { ref process, .. } = plan.previous else {
+        panic!("old core")
+    };
+    CoreProcess::attach(process).unwrap().stop().unwrap();
+    let (candidate, prepared) = {
+        let mut store = configuration.lock().unwrap();
+        let down = CoreState::Down {
+            generation: plan.old_generation().unwrap(),
+        };
+        store
+            .transition_core_update(plan.plan_id, &plan.previous, down.clone())
+            .unwrap();
+        let candidate = store.open_core_generation(plan.candidate).unwrap();
+        let prepared = CoreProcess::prepare(&mut store, &core_binary, &candidate).unwrap();
+        store
+            .transition_core_update(
+                plan.plan_id,
+                &down,
+                CoreState::Starting {
+                    generation: candidate.id(),
+                },
+            )
+            .unwrap();
+        (candidate, prepared)
+    };
+    let orphan = prepared.spawn(&core_binary, &candidate).unwrap();
+    let candidate_identity = orphan.identity().clone();
+    drop(orphan);
+    assert!(matches!(
+        manager
+            .recover_update(plan.plan_id, |e| async { via(e).await.map(|_| ()) })
+            .await
+            .unwrap(),
+        CoreOutcome::Restored { core_down: false }
+    ));
+    assert!(CoreProcess::recover(&candidate_identity).unwrap().is_none());
+    for e in &endpoints {
+        assert_eq!(via(e.clone()).await.unwrap(), "retained");
+    }
+    let plan = manager.prepare_update(&request(profiles[0])).await.unwrap();
+    let outcome = manager
+        .apply_update(
+            plan.plan_id,
+            admit(&configuration, plan.plan_id),
+            |e| async { via(e).await.map(|_| ()) },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, CoreOutcome::ProfileRemoved { profile_id, revision: r } if profile_id == profiles[0] && r == revision + 1)
+    );
+    assert!(via(endpoints[0].clone()).await.is_err());
+    assert_eq!(via(endpoints[1].clone()).await.unwrap(), "retained");
+    assert_eq!(
+        manager
+            .snapshot()
+            .unwrap()
+            .profiles
+            .iter()
+            .map(|p| p.id)
+            .collect::<Vec<_>>(),
+        [profiles[1]]
+    );
+    let plan = manager.prepare_update(&request(profiles[1])).await.unwrap();
+    let outcome = manager
+        .apply_update(
+            plan.plan_id,
+            admit(&configuration, plan.plan_id),
+            |_| async { panic!("last removal must not start or probe a core") },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, CoreOutcome::ProfileRemoved { profile_id, revision: r } if profile_id == profiles[1] && r == revision + 2)
+    );
+    assert_eq!(manager.state().unwrap(), CoreState::Stopped {});
+    assert!(
+        configuration
+            .lock()
+            .unwrap()
+            .load()
+            .unwrap()
+            .profiles
+            .is_empty()
+    );
+    assert!(via(endpoints[1].clone()).await.is_err());
+}
+
+#[tokio::test]
 #[ignore = "requires APP_PROXY_TEST_SING_BOX; owned cores and loopback synthetic Shadowsocks peers only"]
 async fn real_subscription_selection_and_refresh_use_shared_core_confirmation_and_rollback() {
     use app_proxy_core::subscription;

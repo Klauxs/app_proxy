@@ -20,6 +20,9 @@ use windows_sys::Win32::{
     System::Threading::*,
 };
 
+mod start;
+pub use start::PreparedCore;
+
 pub struct CoreProcess {
     handle: OwnedHandle,
     identity: ProcessIdentity,
