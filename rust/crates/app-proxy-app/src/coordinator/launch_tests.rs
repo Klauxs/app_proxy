@@ -406,7 +406,7 @@ async fn advanced_settings_require_minor_seventeen_in_both_directions() {
 }
 
 #[tokio::test]
-async fn shortcut_protocol_requires_minor_sixteen_in_both_directions() {
+async fn shortcut_protocol_requires_minor_nineteen_in_both_directions() {
     let fixture = Fixture::new();
     let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
     let identity = fixture.shared.identity.clone();
@@ -414,7 +414,7 @@ async fn shortcut_protocol_requires_minor_sixteen_in_both_directions() {
         let mut connection = listener.accept().await.unwrap();
         connection.receive::<Hello>().await.unwrap();
         let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
-        greeting.protocol_minor = 15;
+        greeting.protocol_minor = 18;
         connection
             .send(&Welcome::Ready { hello: greeting })
             .await
@@ -435,6 +435,9 @@ async fn shortcut_protocol_requires_minor_sixteen_in_both_directions() {
     old_server.await.unwrap();
     let server = fixture.server();
     for operation in [
+        Operation::ShortcutCheck {
+            instance_id: fixture.instance,
+        },
         Operation::ShortcutStatus {
             instance_id: fixture.instance,
         },
@@ -463,7 +466,7 @@ async fn shortcut_protocol_requires_minor_sixteen_in_both_directions() {
         .await
         .unwrap();
         let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
-        greeting.protocol_minor = 15;
+        greeting.protocol_minor = 18;
         connection.send(&greeting).await.unwrap();
         connection.receive::<Welcome>().await.unwrap();
         connection

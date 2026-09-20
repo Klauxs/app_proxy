@@ -753,10 +753,10 @@ async fn manage_shortcut(
         }
         Some(entry) => {
             if let Status::Pending { action, .. } = entry.status {
-                let options = if action == Action::Create {
-                    vec!["继续原创建请求", "取消此创建并清理已创建的入口"]
-                } else {
-                    vec!["继续原删除请求"]
+                let options = match action {
+                    Action::Create => vec!["继续原创建请求", "取消此创建并清理已创建的入口"],
+                    Action::Remove => vec!["继续原删除请求"],
+                    Action::Repair => vec!["继续原恢复请求"],
                 };
                 let choice = fixed("未完成的快捷方式操作", &options, None, foreground)
                     .await?
@@ -766,6 +766,38 @@ async fn manage_shortcut(
                 }
                 confirm("取消刚显示的创建请求？用户修改过的文件会保留。", foreground).await?;
             } else {
+                let check = coordinator::shortcut_check(root.into(), id)
+                    .await
+                    .map_err(|e| fail(3, e.to_string()))?;
+                crate::shortcut_cli::print_check(&check);
+                let action = fixed(
+                    "桌面入口维护",
+                    &["恢复丢失的快捷方式", "移除桌面入口"],
+                    None,
+                    foreground,
+                )
+                .await?
+                .ok_or_else(returned)?;
+                if action == 0 {
+                    if check.revision != view.revision || check.request_id != Some(entry.request.id)
+                    {
+                        return Err(fail(4, "入口登记已变化，请重新选择。"));
+                    }
+                    confirm(
+                        "在原位置恢复入口？已有链接须保持原样，启动器和图标须仍可用。",
+                        foreground,
+                    )
+                    .await?;
+                    return crate::shortcut_cli::change(
+                        root,
+                        id,
+                        view.revision,
+                        Action::Repair,
+                        Some(entry.request.id),
+                        foreground,
+                    )
+                    .await;
+                }
                 confirm("移除此实例的桌面入口？保留应用及数据。", foreground).await?;
             }
             crate::shortcut_cli::change(

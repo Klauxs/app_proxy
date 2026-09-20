@@ -123,11 +123,11 @@ impl Drop for Fixture {
             }
             Ok(())
         })();
-        if cleanup.is_err()
+        if let Err(error) = cleanup
             && let Some(temp) = self.temp.take()
         {
             eprintln!(
-                "Fixture cleanup unresolved; retained recovery store at {}",
+                "Fixture cleanup unresolved ({error:?}); retained recovery store at {}",
                 temp.keep().display()
             );
         }
@@ -227,6 +227,87 @@ fn shortcut_cli_does_not_create_missing_store_or_accept_arbitrary_destinations()
 }
 
 #[test]
+fn real_cli_checks_repairs_and_replays_missing_owned_link_without_launching() {
+    let mut fixture = Fixture::new(fixture_executable());
+    let path = fixture
+        .temp
+        .as_ref()
+        .unwrap()
+        .path()
+        .join("repair fixture.lnk");
+    let mut store = Store::open(&fixture.root).unwrap();
+    let icon = shortcuts::icons::cache_bytes(&store, b"fixture icon").unwrap();
+    let create = Request {
+        id: Uuid::new_v4(),
+        instance_id: fixture.instance,
+        expected_revision: 2,
+        action: Action::Create,
+        expected_creation: None,
+    };
+    store
+        .apply_shortcut(
+            &create,
+            Some(Plan {
+                path: path.clone(),
+                spec: Spec {
+                    store_id: store.load().unwrap().store_id,
+                    instance_id: fixture.instance,
+                    home: fixture.root.clone(),
+                    host: env!("CARGO_BIN_EXE_app-proxy-host").into(),
+                    icon,
+                },
+            }),
+        )
+        .unwrap();
+    drop(store);
+    fixture.connect();
+    let id = fixture.instance.to_string();
+    assert_eq!(
+        fixture.ok(&["shortcut", "check", &id, "--json"])["state"],
+        "verified"
+    );
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        fixture.ok(&["shortcut", "check", &id, "--json"])["state"],
+        "missing"
+    );
+    assert!(!path.exists());
+    let repaired = fixture.ok(&["shortcut", "repair", &id, "--json"]);
+    assert_eq!(repaired["status"]["status"], "repaired");
+    assert_eq!(
+        fixture.ok(&["shortcut", "check", &id, "--json"])["state"],
+        "verified"
+    );
+    assert_eq!(
+        fixture.ok(&["shortcut", "status", &id, "--json"])["integration"]["request"]["id"],
+        create.id.to_string()
+    );
+    fs::remove_file(&path).unwrap();
+    let request = repaired["request_id"].as_str().unwrap();
+    fixture.ok(&["shortcut", "resume", request, "--json"]);
+    assert!(!path.exists());
+    fixture.ok(&["shortcut", "repair", &id, "--json"]);
+    fs::write(&path, b"user edit").unwrap();
+    assert_eq!(
+        fixture.ok(&["shortcut", "check", &id, "--json"])["state"],
+        "blocked"
+    );
+    let failed = fixture.cli(&["shortcut", "repair", &id, "--json"]);
+    assert!(!failed.status.success());
+    assert_eq!(fs::read(&path).unwrap(), b"user edit");
+    fs::remove_file(&path).unwrap();
+    fixture.ok(&["shortcut", "remove", &id, "--json"]);
+    fixture.stop();
+    let store = Store::open(&fixture.root).unwrap();
+    assert!(store.launch_attempts().unwrap().is_empty());
+    assert_eq!(store.load().unwrap().instances.len(), 1);
+}
+
+fn fixture_executable() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_app-proxy-host"))
+}
+
+#[test]
 #[ignore = "creates and removes one owned fixture link on the real user desktop; no target is launched"]
 fn native_desktop_cli_creates_exact_fixed_host_link_with_complete_icon() {
     let exe = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
@@ -293,7 +374,7 @@ fn native_menu_creates_and_removes_desktop_shortcut() {
     let mut fixture = Fixture::new(exe);
     fixture.connect();
     println!(
-        "Fixture home: {}\nChoose 3, 1, 9, 1 to create; 3, 1, 9, 1 to remove; 0 to exit. No application will be launched.",
+        "Fixture home: {}\nChoose 3, 1, 9, 1 to create; 3, 1, 9, 2, 1 to remove; 0 to exit. No application will be launched.",
         fixture.root.display()
     );
     assert!(fixture.command(&["menu"]).status().unwrap().success());

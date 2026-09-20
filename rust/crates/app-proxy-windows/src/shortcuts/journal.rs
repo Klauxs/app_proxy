@@ -16,11 +16,15 @@ const JOURNAL_LIMIT: usize = 8 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 1024;
 const RETENTION: u64 = 7 * 24 * 60 * 60;
 
+mod repair;
+pub use repair::{Check, CheckState};
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Create,
     Remove,
+    Repair,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +52,7 @@ pub enum Status {
     Created { path: PathBuf, revision: u64 },
     Removed { path: PathBuf, revision: u64 },
     Cancelled { path: PathBuf },
+    Repaired { path: PathBuf, revision: u64 },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -68,17 +73,33 @@ struct Entry {
     removal: Option<Request>,
     removed_revision: Option<u64>,
     removed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repairs: Vec<repair::Repair>,
 }
 impl Entry {
     fn request(&self, id: Uuid) -> Option<&Request> {
         if self.create.id == id {
             Some(&self.create)
         } else {
-            self.removal.as_ref().filter(|r| r.id == id)
+            self.removal.as_ref().filter(|r| r.id == id).or_else(|| {
+                self.repairs
+                    .iter()
+                    .find(|r| r.request.id == id)
+                    .map(|r| &r.request)
+            })
         }
     }
     fn status(&self, id: Uuid) -> Status {
         let path = self.plan.path.clone();
+        if let Some(repair) = self.repairs.iter().find(|r| r.request.id == id) {
+            return match repair.revision {
+                Some(revision) => Status::Repaired { path, revision },
+                None => Status::Pending {
+                    action: Action::Repair,
+                    path,
+                },
+            };
+        }
         if self.create.id == id {
             if let Some(revision) = self.created_revision {
                 Status::Created { path, revision }
@@ -167,7 +188,17 @@ impl Store {
             .into_iter()
             .find(|e| e.create.instance_id == instance_id && e.removed_revision.is_none())
             .map(|e| {
-                let request = e.removal.as_ref().unwrap_or(&e.create).clone();
+                let request = e
+                    .removal
+                    .as_ref()
+                    .or_else(|| {
+                        e.repairs
+                            .last()
+                            .filter(|r| r.revision.is_none())
+                            .map(|r| &r.request)
+                    })
+                    .unwrap_or(&e.create)
+                    .clone();
                 let status = e.status(request.id);
                 (request, status)
             }))
@@ -285,6 +316,7 @@ impl Store {
                     removal: None,
                     removed_revision: None,
                     removed_at: None,
+                    repairs: vec![],
                 });
                 reserve_completion_capacity(&journal)?;
             }
@@ -299,7 +331,18 @@ impl Store {
                 if journal.entries[index].removal.is_some() {
                     return Err(Error::Invalid("SHORTCUT_OPERATION_PENDING"));
                 }
+                if journal.entries[index]
+                    .repairs
+                    .iter()
+                    .any(|r| r.revision.is_none())
+                {
+                    return Err(Error::Invalid("SHORTCUT_OPERATION_PENDING"));
+                }
                 journal.entries[index].removal = Some(request.clone());
+            }
+            Action::Repair => {
+                let index = existing.ok_or(Error::Invalid("SHORTCUT_OWNERSHIP_UNAVAILABLE"))?;
+                repair::begin(self, &mut journal, index, request)?;
             }
         }
         self.write_shortcuts(&journal)
@@ -319,6 +362,13 @@ impl Store {
             .ok_or(Error::Invalid("SHORTCUT_REQUEST_NOT_FOUND"))?;
         if !matches!(journal.entries[index].status(id), Status::Pending { .. }) {
             return Ok(journal.entries[index].status(id));
+        }
+        if journal.entries[index]
+            .repairs
+            .iter()
+            .any(|r| r.request.id == id)
+        {
+            return self.resume_shortcut_repair(journal, index, id, checkpoint);
         }
         // Resuming a cancelled creation must never act as permission to remove.
         if journal.entries[index]
@@ -465,7 +515,16 @@ fn validate_plan(plan: &Plan, store: Uuid, instance: Uuid) -> Result<()> {
     Ok(())
 }
 fn validate(journal: &Journal, store: Uuid) -> Result<()> {
-    if journal.version != 1 || journal.store_id != store || journal.entries.len() > ENTRY_LIMIT {
+    if journal.version != 1
+        || journal.store_id != store
+        || journal.entries.len() > ENTRY_LIMIT
+        || journal
+            .entries
+            .iter()
+            .map(|e| e.repairs.len())
+            .sum::<usize>()
+            > ENTRY_LIMIT
+    {
         return Err(Error::Invalid("SHORTCUT_JOURNAL_INVALID"));
     }
     let mut ids = HashSet::new();
@@ -488,6 +547,7 @@ fn validate(journal: &Journal, store: Uuid) -> Result<()> {
             return Err(Error::Invalid("SHORTCUT_JOURNAL_INVALID"));
         }
         validate_plan(&entry.plan, store, create.instance_id)?;
+        repair::validate(entry, &mut ids)?;
         if let Some(staged) = &entry.staged {
             staging::stage_path(&staged.path)?;
             if staged.path.parent() != entry.plan.path.parent() {
@@ -514,6 +574,7 @@ fn validate(journal: &Journal, store: Uuid) -> Result<()> {
 }
 fn validate_revisions(journal: &Journal, current: u64) -> Result<()> {
     for entry in &journal.entries {
+        repair::validate_revisions(entry, current)?;
         if entry.create.expected_revision > current
             || entry
                 .created_revision
@@ -579,6 +640,7 @@ fn reserve_completion_capacity(journal: &Journal) -> Result<()> {
             });
             entry.removed_revision = Some(u64::MAX);
             entry.removed_at = Some(u64::MAX);
+            repair::reserve_capacity(entry);
         }
     }
     store::encode(&complete, JOURNAL_LIMIT).map_err(|_| Error::Invalid("SHORTCUT_RECORD_LIMIT"))?;

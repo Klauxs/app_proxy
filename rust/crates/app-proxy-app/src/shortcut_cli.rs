@@ -22,6 +22,10 @@ pub enum Command {
     Remove { id: Uuid },
     /// 查看实例入口登记及未完成请求，不操作桌面文件
     Status { id: Uuid },
+    /// 核验登记、链接文件、启动器及图标；不修复或启动应用
+    Check { id: Uuid },
+    /// 在原位置恢复丢失的已登记入口；被修改的文件保留
+    Repair { id: Uuid },
     /// 查询原请求，不自动继续创建或删除
     Request { id: Uuid },
     /// 按原请求显式恢复创建或删除
@@ -63,13 +67,16 @@ fn print(
                 println!("创建已完成：{}（历史结果，当前文件未核验）。", clean(path))
             }
             Some(Status::Removed { path, .. }) => println!("入口登记已解除：{}。", clean(path)),
+            Some(Status::Repaired { path, .. }) => {
+                println!("入口恢复已完成：{}（历史结果）。", clean(path))
+            }
             Some(Status::Cancelled { .. }) => println!("原创建已取消。"),
             Some(Status::Pending { action, path }) => println!(
                 "{}待核对：{}。",
-                if *action == Action::Create {
-                    "创建"
-                } else {
-                    "删除"
+                match action {
+                    Action::Create => "创建",
+                    Action::Remove => "删除",
+                    Action::Repair => "恢复",
                 },
                 clean(path)
             ),
@@ -91,6 +98,25 @@ pub(crate) fn print_registration(view: &InstanceStatus) {
         );
     } else {
         println!("尚未登记桌面快捷方式。");
+    }
+}
+pub(crate) fn print_check(view: &app_proxy_windows::shortcuts::journal::Check) {
+    use app_proxy_windows::shortcuts::journal::CheckState;
+    println!(
+        "桌面入口：{}。",
+        match view.state {
+            CheckState::Unregistered => "未登记",
+            CheckState::Pending => "有未完成操作，请查询或继续原请求",
+            CheckState::Verified => "链接、启动器文件及图标已核验；未启动应用",
+            CheckState::Missing => "链接丢失，可在原位置恢复",
+            CheckState::Blocked => "核验受阻，保留现有文件",
+        }
+    );
+    if let Some(id) = view.request_id {
+        println!("关联请求：{id}");
+    }
+    if let Some(code) = &view.diagnostic {
+        println!("入口诊断：{code}");
     }
 }
 fn diagnostic(error: Error) -> &'static str {
@@ -156,7 +182,12 @@ async fn perform(
     };
     print(id, status.as_ref(), error, json)?;
     match status {
-        Some(Status::Created { .. } | Status::Removed { .. } | Status::Cancelled { .. }) => Ok(()),
+        Some(
+            Status::Created { .. }
+            | Status::Removed { .. }
+            | Status::Cancelled { .. }
+            | Status::Repaired { .. },
+        ) => Ok(()),
         _ => Err(unresolved(id, root)),
     }
 }
@@ -195,6 +226,21 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             print(id, status.as_ref(), None, json)
         }
         Command::Resume { id } => perform(&root, id, None, json, &mut foreground).await,
+        Command::Check { id } => {
+            let view = coordinator::shortcut_check(root, id)
+                .await
+                .map_err(|e| fail(3, e.to_string()))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&view)
+                        .map_err(|_| fail(10, "OUTPUT_SERIALIZE_FAILED"))?
+                );
+            } else {
+                print_check(&view);
+            }
+            Ok(())
+        }
         Command::Status { id } => {
             let view = coordinator::shortcut_status(root, id)
                 .await
@@ -210,25 +256,25 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             }
             Ok(())
         }
-        Command::Create { id } | Command::Remove { id } => {
-            let action = if matches!(command, Command::Create { .. }) {
-                Action::Create
-            } else {
-                Action::Remove
+        Command::Create { id } | Command::Remove { id } | Command::Repair { id } => {
+            let action = match command {
+                Command::Create { .. } => Action::Create,
+                Command::Repair { .. } => Action::Repair,
+                _ => Action::Remove,
             };
             let view = coordinator::shortcut_status(root.clone(), id)
                 .await
                 .map_err(|e| fail(3, e.to_string()))?;
-            let expected_creation = if action == Action::Remove {
+            let expected_creation = if action != Action::Create {
                 let entry = view
                     .integration
                     .as_ref()
                     .ok_or_else(|| fail(2, "未登记快捷方式。"))?;
-                if entry.request.action == Action::Remove {
+                if entry.request.action != Action::Create {
                     return Err(fail(
                         4,
                         format!(
-                            "已有待删除请求；请使用 shortcut resume {} 继续。",
+                            "已有未完成请求；请使用 shortcut resume {} 继续。",
                             entry.request.id
                         ),
                     ));

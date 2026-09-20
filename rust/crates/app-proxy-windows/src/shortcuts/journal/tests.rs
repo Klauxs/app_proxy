@@ -66,6 +66,208 @@ fn removal(store: &Store, request: &Request) -> Request {
     }
 }
 
+fn repair_fixture() -> (tempfile::TempDir, Store, Request, Plan, Request) {
+    let (temp, mut store, create, mut plan) = fixture();
+    plan.spec.icon = crate::shortcuts::icons::cache_bytes(&store, b"fixture icon").unwrap();
+    store.apply_shortcut(&create, Some(plan.clone())).unwrap();
+    let repair = Request {
+        id: Uuid::new_v4(),
+        expected_revision: store.load().unwrap().revision,
+        action: Action::Repair,
+        expected_creation: Some(create.id),
+        ..create.clone()
+    };
+    (temp, store, create, plan, repair)
+}
+
+#[test]
+fn shortcut_check_distinguishes_missing_changed_and_pending_without_writes() {
+    let (_temp, mut store, create, plan, repair) = repair_fixture();
+    let journal = std::fs::read(store.root().join(PATH)).unwrap();
+    assert_eq!(
+        store.check_shortcut(create.instance_id).unwrap().state,
+        CheckState::Verified
+    );
+    let bytes = std::fs::read(&plan.path).unwrap();
+    super::super::tests::edit_fixture(|| std::fs::remove_file(&plan.path)).unwrap();
+    assert_eq!(
+        store.check_shortcut(create.instance_id).unwrap().state,
+        CheckState::Missing
+    );
+    assert_eq!(std::fs::read(store.root().join(PATH)).unwrap(), journal);
+    std::fs::write(&plan.path, &bytes).unwrap();
+    // Same bytes do not grant ownership of a different file.
+    assert_eq!(
+        store.check_shortcut(create.instance_id).unwrap().state,
+        CheckState::Blocked
+    );
+    assert!(store.apply_shortcut(&repair, None).is_err());
+    assert_eq!(std::fs::read(&plan.path).unwrap(), bytes);
+    super::super::tests::edit_fixture(|| std::fs::remove_file(&plan.path)).unwrap();
+    assert!(
+        store
+            .apply_shortcut_with(&repair, None, interrupt(Point::Accepted))
+            .is_err()
+    );
+    let view = store.check_shortcut(create.instance_id).unwrap();
+    assert_eq!(view.state, CheckState::Pending);
+    assert_eq!(view.request_id, Some(repair.id));
+    assert!(!plan.path.exists());
+}
+
+#[test]
+fn shortcut_repair_recovers_every_publication_boundary_and_keeps_creation_history() {
+    for point in [
+        Point::Accepted,
+        Point::Staged,
+        Point::StageRecorded,
+        Point::Published,
+        Point::Completed,
+    ] {
+        let (_temp, mut store, create, plan, repair) = repair_fixture();
+        super::super::tests::edit_fixture(|| std::fs::remove_file(&plan.path)).unwrap();
+        assert!(
+            store
+                .apply_shortcut_with(&repair, None, interrupt(point))
+                .is_err()
+        );
+        let before = plan.path.exists();
+        store = reopen(store);
+        store.shortcut_request_status(repair.id).unwrap();
+        assert_eq!(plan.path.exists(), before);
+        assert!(matches!(
+            store.apply_shortcut(&repair, None).unwrap(),
+            Status::Repaired { .. }
+        ));
+        assert_eq!(
+            store.check_shortcut(create.instance_id).unwrap().state,
+            CheckState::Verified
+        );
+        assert!(matches!(
+            store.shortcut_request_status(create.id).unwrap(),
+            Some(Status::Created { revision: 3, .. })
+        ));
+        assert_eq!(store.load().unwrap().revision, 3);
+        let journal = std::fs::read(store.root().join(PATH)).unwrap();
+        super::super::tests::edit_fixture(|| std::fs::remove_file(&plan.path)).unwrap();
+        store.resume_shortcut(repair.id).unwrap();
+        store.resume_shortcut(create.id).unwrap();
+        assert!(
+            !plan.path.exists(),
+            "historical replay must not recreate a link"
+        );
+        assert_eq!(std::fs::read(store.root().join(PATH)).unwrap(), journal);
+        let next = Request {
+            id: Uuid::new_v4(),
+            ..repair.clone()
+        };
+        store.apply_shortcut(&next, None).unwrap();
+        assert_eq!(
+            store.check_shortcut(create.instance_id).unwrap().state,
+            CheckState::Verified
+        );
+        store
+            .apply_shortcut(&removal(&store, &create), None)
+            .unwrap();
+        assert!(!plan.path.exists());
+    }
+}
+
+#[test]
+fn repair_refuses_concurrent_replacement_and_resumes_only_the_original_request() {
+    let (_temp, mut store, create, plan, repair) = repair_fixture();
+    super::super::tests::edit_fixture(|| std::fs::remove_file(&plan.path)).unwrap();
+    assert!(
+        store
+            .apply_shortcut_with(&repair, None, interrupt(Point::StageRecorded))
+            .is_err()
+    );
+    let pending = store
+        .instance_shortcut(create.instance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.0.id, repair.id);
+    assert!(
+        store
+            .apply_shortcut(&removal(&store, &create), None)
+            .is_err()
+    );
+    assert!(
+        store
+            .apply_shortcut(
+                &Request {
+                    id: Uuid::new_v4(),
+                    ..repair.clone()
+                },
+                None
+            )
+            .is_err()
+    );
+    let foreign = b"user replacement must remain";
+    std::fs::write(&plan.path, foreign).unwrap();
+    assert!(store.resume_shortcut(repair.id).is_err());
+    assert_eq!(std::fs::read(&plan.path).unwrap(), foreign);
+    super::super::tests::edit_fixture(|| std::fs::remove_file(&plan.path)).unwrap();
+    store.resume_shortcut(repair.id).unwrap();
+    assert_eq!(
+        store.check_shortcut(create.instance_id).unwrap().state,
+        CheckState::Verified
+    );
+    assert!(matches!(
+        store.apply_shortcut(
+            &Request {
+                expected_revision: 2,
+                ..repair.clone()
+            },
+            None
+        ),
+        Err(Error::Invalid("REQUEST_ID_CONFLICT"))
+    ));
+}
+
+#[test]
+fn repair_checks_revision_registration_assets_and_preserves_intact_file_identity() {
+    let (_temp, mut store, create, plan, repair) = repair_fixture();
+    let file = identity::file_identity(&plan.path).unwrap();
+    assert!(
+        store
+            .apply_shortcut(
+                &Request {
+                    expected_revision: 2,
+                    ..repair.clone()
+                },
+                None
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .apply_shortcut(
+                &Request {
+                    expected_creation: Some(Uuid::new_v4()),
+                    ..repair.clone()
+                },
+                None
+            )
+            .is_err()
+    );
+    store.apply_shortcut(&repair, None).unwrap();
+    assert_eq!(identity::file_identity(&plan.path).unwrap(), file);
+    super::super::tests::edit_fixture(|| std::fs::remove_file(&plan.path)).unwrap();
+    std::fs::remove_file(&plan.spec.host).unwrap();
+    let next = Request {
+        id: Uuid::new_v4(),
+        ..repair
+    };
+    assert!(store.apply_shortcut(&next, None).is_err());
+    assert!(store.shortcut_request_status(next.id).unwrap().is_none());
+    assert_eq!(
+        store.check_shortcut(create.instance_id).unwrap().state,
+        CheckState::Blocked
+    );
+    assert!(!plan.path.exists());
+}
+
 #[test]
 fn all_creation_boundaries_recover_explicitly_and_replay_once() {
     for point in [
@@ -219,11 +421,11 @@ fn modified_or_replaced_owned_link_blocks_removal_without_losing_receipt() {
     assert_eq!(store.load().unwrap().integrations.shortcuts.len(), 1);
     std::fs::write(&plan.path, &original).unwrap();
     let saved = temp.path().join("saved.lnk");
-    std::fs::rename(&plan.path, &saved).unwrap();
+    super::super::tests::edit_fixture(|| std::fs::rename(&plan.path, &saved)).unwrap();
     std::fs::write(&plan.path, &original).unwrap();
     assert!(store.resume_shortcut(remove.id).is_err());
-    std::fs::remove_file(&plan.path).unwrap();
-    std::fs::rename(saved, &plan.path).unwrap();
+    super::super::tests::edit_fixture(|| std::fs::remove_file(&plan.path)).unwrap();
+    super::super::tests::edit_fixture(|| std::fs::rename(&saved, &plan.path)).unwrap();
     store.resume_shortcut(remove.id).unwrap();
     assert!(!plan.path.exists());
 }

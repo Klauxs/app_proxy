@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 3;
-const PROTOCOL_MINOR: u32 = 18;
+const PROTOCOL_MINOR: u32 = 19;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -79,6 +79,9 @@ enum Operation {
         request_id: Uuid,
     },
     ShortcutStatus {
+        instance_id: Uuid,
+    },
+    ShortcutCheck {
         instance_id: Uuid,
     },
     RuntimeStatus {
@@ -166,6 +169,9 @@ enum Reply {
     },
     ShortcutStatus {
         status: crate::shortcuts::InstanceStatus,
+    },
+    ShortcutCheck {
+        check: app_proxy_windows::shortcuts::journal::Check,
     },
     RuntimeStatus {
         status: Box<crate::launch_engine::RuntimeStatus>,
@@ -348,6 +354,9 @@ impl Shared {
             }),
             Operation::ShortcutStatus { instance_id } => Ok(Reply::ShortcutStatus {
                 status: crate::shortcuts::status(&self.configuration, instance_id)?,
+            }),
+            Operation::ShortcutCheck { instance_id } => Ok(Reply::ShortcutCheck {
+                check: self.configuration.lock()?.check_shortcut(instance_id)?,
             }),
             Operation::SubscriptionNodes {
                 profile_id,
@@ -624,7 +633,7 @@ async fn handle(
             })
             .await;
     }
-    if shortcut_operation(&request.operation) && client_minor < 16 {
+    if shortcut_operation(&request.operation) && client_minor < 19 {
         return connection
             .send(&Response {
                 request_id,
@@ -1025,7 +1034,7 @@ async fn rpc(
     if matches!(&request.operation, Operation::RuntimeStatus { .. }) && server.protocol_minor < 15 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
-    if shortcut_operation(&request.operation) && server.protocol_minor < 16 {
+    if shortcut_operation(&request.operation) && server.protocol_minor < 19 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
     if login_operation(&request.operation) && server.protocol_minor < 18 {
@@ -1181,6 +1190,7 @@ fn shortcut_operation(operation: &Operation) -> bool {
             | Operation::ShortcutResume { .. }
             | Operation::ShortcutRequest { .. }
             | Operation::ShortcutStatus { .. }
+            | Operation::ShortcutCheck { .. }
     )
 }
 
@@ -1294,6 +1304,23 @@ pub async fn shortcut_status(
     .await?
     {
         Reply::ShortcutStatus { status } if status.instance_id == instance_id => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+pub async fn shortcut_check(
+    root: PathBuf,
+    instance_id: Uuid,
+) -> Result<app_proxy_windows::shortcuts::journal::Check> {
+    store::describe(&root)?;
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::ShortcutCheck { instance_id },
+    )
+    .await?
+    {
+        Reply::ShortcutCheck { check } if check.instance_id == instance_id => Ok(check),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
 }

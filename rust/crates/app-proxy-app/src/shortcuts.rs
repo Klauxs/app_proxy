@@ -79,13 +79,13 @@ fn apply_with(
     request: &Request,
     prepare: impl FnOnce(&ApplicationLocator) -> Result<Assets>,
 ) -> Result<Status> {
-    if request.action == Action::Remove && request.expected_creation.is_none() {
+    if request.action != Action::Create && request.expected_creation.is_none() {
         return Err(Error::Invalid("INVALID_SHORTCUT_REQUEST"));
     }
     let snapshot = {
         let mut store = configuration.lock()?;
         // Replay must verify the entire payload before any installation access.
-        if store.shortcut_request_status(request.id)?.is_some() || request.action == Action::Remove
+        if store.shortcut_request_status(request.id)?.is_some() || request.action != Action::Create
         {
             return store.apply_shortcut(request, None);
         }

@@ -20,10 +20,10 @@ use windows::{
     core::{Interface, PCWSTR},
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo,
-    GetFileInformationByHandle, SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FileDispositionInfo, GetFileInformationByHandle, SetFileInformationByHandle,
 };
 
 const LIMIT: usize = 1024 * 1024;
@@ -280,18 +280,32 @@ fn remove_verified(path: &Path, spec: &Spec, receipt: &Receipt) -> Result<()> {
     let (file, actual, bytes) = read_pinned(path, true)?;
     verify_bytes(spec, receipt, &actual, &bytes)?;
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-    // SAFETY: same pinned READ|DELETE handle used for identity, bytes and COM
-    // verification. No write/delete sharing allows replacement before this call.
-    if unsafe {
-        SetFileInformationByHandle(
-            file.as_raw_handle(),
-            FileDispositionInfo,
-            (&disposition as *const FILE_DISPOSITION_INFO).cast(),
-            std::mem::size_of_val(&disposition) as u32,
-        )
-    } == 0
-    {
-        return Err(last_error("ShortcutDelete"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    loop {
+        // SAFETY: same pinned READ|DELETE handle used for identity, bytes and COM
+        // verification. No write/delete sharing allows replacement while waiting.
+        if unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FileDispositionInfo,
+                (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of_val(&disposition) as u32,
+            )
+        } != 0
+        {
+            break;
+        }
+        let error = last_error("ShortcutDelete");
+        // A mapped reader can deny disposition after DELETE access was granted.
+        // Retry only on this already-authorized handle; never clear attributes,
+        // reopen a replacement, or repeat a successful disposition.
+        if !matches!(error, Error::Windows { code: 5 | 32, .. })
+            || std::time::Instant::now() >= deadline
+            || information(&file)?.dwFileAttributes & FILE_ATTRIBUTE_READONLY != 0
+        {
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     drop(file);
     match std::fs::symlink_metadata(path) {
@@ -342,13 +356,31 @@ fn pin_directory(path: &Path, after_check: impl FnOnce()) -> Result<File> {
     Ok(directory)
 }
 fn read_pinned(path: &Path, delete: bool) -> Result<(File, FileIdentity, Vec<u8>)> {
-    security::no_reparse(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .access_mode(FILE_GENERIC_READ | if delete { DELETE } else { 0 })
-        .share_mode(FILE_SHARE_READ)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
+    // Shell/AV readers may briefly hold a freshly published or edited link.
+    // Retry only handle acquisition, before any read/delete side effect; each
+    // attempt still checks reparse points and uses the same restrictive sharing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    let mut file = loop {
+        security::no_reparse(path)?;
+        match OpenOptions::new()
+            .read(true)
+            .access_mode(FILE_GENERIC_READ | if delete { DELETE } else { 0 })
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+        {
+            Ok(file) => break file,
+            Err(error)
+                if error.raw_os_error() == Some(32) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) if error.raw_os_error() == Some(32) => {
+                return Err(Error::Invalid("SHORTCUT_FILE_BUSY"));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     let info = information(&file)?;
     let length = ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64;
     if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0

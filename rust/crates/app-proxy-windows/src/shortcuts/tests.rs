@@ -1,6 +1,22 @@
 use super::*;
 use std::os::windows::process::CommandExt;
 
+// Fixture edits deliberately race Shell notifications. Retry only Windows
+// sharing violations; never hide content/identity assertions or other errors.
+pub(super) fn edit_fixture(mut edit: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match edit() {
+            Err(error)
+                if error.raw_os_error() == Some(32) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
 pub(super) fn setup() -> (tempfile::TempDir, Spec, PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("数据 store");
@@ -113,7 +129,12 @@ fn field_changes_runas_and_in_use_links_refuse_cleanup() {
         .share_mode(FILE_SHARE_READ)
         .open(&path)
         .unwrap();
-    assert!(remove(&path, &spec, &receipt).is_err());
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        remove(&path, &spec, &receipt),
+        Err(Error::Invalid("SHORTCUT_FILE_BUSY"))
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     drop(held);
     remove(&path, &spec, &receipt).unwrap();
@@ -141,6 +162,81 @@ fn two_publishers_cannot_replace_each_other_or_leave_partial_links() {
     let receipt = receipts.pop().unwrap();
     verify(&path, &spec, &receipt).unwrap();
     remove(&path, &spec, &receipt).unwrap();
+}
+
+#[test]
+fn transient_reader_is_bounded_and_file_is_revalidated_after_the_wait() {
+    for change in [false, true] {
+        let (_root, spec, path) = setup();
+        let bytes = encode(&spec).unwrap();
+        let receipt = publish(&path, &spec, &bytes).unwrap();
+        let mut held = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            if change {
+                held.write_all(b"changed while waiting").unwrap();
+                held.sync_all().unwrap();
+            }
+            drop(held);
+        });
+        let result = remove(&path, &spec, &receipt);
+        release.join().unwrap();
+        if change {
+            assert!(matches!(result, Err(Error::Invalid("SHORTCUT_CHANGED"))));
+            assert!(path.exists());
+        } else {
+            result.unwrap();
+            assert!(!path.exists());
+        }
+    }
+}
+
+#[test]
+fn mapped_reader_can_release_after_delete_access_is_granted() {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Memory::*;
+    let (_root, spec, path) = setup();
+    let bytes = encode(&spec).unwrap();
+    let receipt = publish(&path, &spec, &bytes).unwrap();
+    let mapped_path = path.clone();
+    let (ready, wait) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let source = OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .open(mapped_path)
+            .unwrap();
+        // SAFETY: read-only mapping of a live fixture handle; section adopted once,
+        // view unmapped before section/file drop; no pointers leave this thread.
+        unsafe {
+            let section = CreateFileMappingW(
+                source.as_raw_handle(),
+                std::ptr::null(),
+                PAGE_READONLY,
+                0,
+                0,
+                std::ptr::null(),
+            );
+            assert!(!section.is_null());
+            let section = OwnedHandle::from_raw_handle(section);
+            let view = MapViewOfFile(section.as_raw_handle(), FILE_MAP_READ, 0, 0, 0);
+            assert!(!view.Value.is_null());
+            ready.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            assert_ne!(UnmapViewOfFile(view), 0);
+        }
+    });
+    wait.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let result = remove(&path, &spec, &receipt);
+    reader.join().unwrap();
+    result.unwrap();
+    assert!(!path.exists());
 }
 
 #[test]
