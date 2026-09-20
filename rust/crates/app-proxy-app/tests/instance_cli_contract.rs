@@ -90,7 +90,10 @@ fn successful_setup_is_quiet_and_guard_summary_uses_name() {
     assert!(status.status.success());
     let summary = String::from_utf8_lossy(&status.stdout);
     assert!(summary.contains("交互验证：保护已关闭。"), "{summary}");
-    assert!(summary.contains("登录自启动：未登记。"), "{summary}");
+    assert!(
+        summary.contains("守护进程随登录启动（所有实例共用）：未登记。"),
+        "{summary}"
+    );
     assert!(!summary.contains(id));
     let stopped = cli(&root, &["core", "stop", "--json"]);
     assert!(

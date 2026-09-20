@@ -100,6 +100,9 @@ async fn choose(
                 ""
             }
         );
+        if option.contains('\n') {
+            println!();
+        }
     }
     println!("0. 返回");
     loop {
@@ -143,6 +146,20 @@ fn network_label(catalog: &CatalogPage, network: NetworkBinding) -> String {
             .unwrap_or_else(|| "代理记录不可用".into()),
     }
 }
+fn network_field(catalog: &CatalogPage, network: NetworkBinding) -> String {
+    match network {
+        NetworkBinding::Direct {} => "网络：直连".into(),
+        NetworkBinding::Profile { profile_id } => format!(
+            "代理：{}",
+            catalog
+                .profiles
+                .iter()
+                .find(|p| p.id == profile_id)
+                .map(|p| display(&p.name))
+                .unwrap_or_else(|| "代理记录不可用".into())
+        ),
+    }
+}
 fn instance_label(catalog: &CatalogPage, instance: &InstanceSummary) -> String {
     let app = catalog
         .applications
@@ -151,7 +168,7 @@ fn instance_label(catalog: &CatalogPage, instance: &InstanceSummary) -> String {
         .map(|a| display(&a.name))
         .unwrap_or_else(|| "应用记录不可用".into());
     format!(
-        "{} · {} · {} · {}",
+        "{}\n   应用：{}\n   数据：{}\n   {}",
         display(&instance.name),
         app,
         if instance.isolated {
@@ -159,7 +176,7 @@ fn instance_label(catalog: &CatalogPage, instance: &InstanceSummary) -> String {
         } else {
             "原版"
         },
-        network_label(catalog, instance.network)
+        network_field(catalog, instance.network)
     )
 }
 fn observation(status: Option<&GuardStatus>, revision: u64) -> (&'static str, &'static str) {
@@ -264,7 +281,7 @@ async fn select_instance(
             crate::instance_status::label(s, snapshot.revision)
         });
         options.push(format!(
-            "{} · 进程：{running} · 保护：{guard}",
+            "{}\n   进程：{running}\n   保护：{guard}",
             instance_label(&snapshot, instance)
         ));
     }
@@ -422,10 +439,10 @@ async fn add_instance(root: &Path, foreground: &mut Foreground) -> Result<(), Fa
     let snapshot = catalog(root).await?;
     let name = automatic_instance_name(&snapshot, &title, isolated);
     println!(
-        "\n添加：{} · {} · {}",
+        "\n添加实例：{}\n   数据：{}\n   {}",
         display(&name),
         if isolated { "空白分身" } else { "原版" },
-        network_label(&snapshot, network)
+        network_field(&snapshot, network)
     );
     let guarded = matches!(network, NetworkBinding::Profile { .. })
         && (preset.is_some() || matches!(adapter, Some(Adapter::Codex | Adapter::Claude)));
@@ -863,7 +880,7 @@ async fn manual_input(foreground: &mut Foreground) -> Result<ManualProxyInput, F
         None
     };
     println!(
-        "上游 {} {}:{} · {}",
+        "上游：{} {}:{}\n认证：{}",
         match protocol {
             ManualProtocol::Http => "HTTP",
             ManualProtocol::Socks5 => "SOCKS5",
@@ -939,7 +956,7 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
     let options = snapshot
         .profiles
         .iter()
-        .map(|p| format!("{} · {}", display(&p.name), p.upstream_label()))
+        .map(|p| format!("{}\n   上游：{}", display(&p.name), p.upstream_label()))
         .collect::<Vec<_>>();
     let selected = choose("选择代理", &options, None, foreground)
         .await?
@@ -980,7 +997,7 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
     }
     if !subscription && selected == 0 {
         println!(
-            "{}\n代理编号 {id} · 本地入口 {}:{} · {}",
+            "代理：{}\n代理编号：{id}\n本地入口：{}:{}\n认证：{}",
             display(&profile.name),
             profile.endpoint.host,
             profile.endpoint.port,

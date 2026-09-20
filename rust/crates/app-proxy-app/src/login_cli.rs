@@ -29,7 +29,7 @@ pub(crate) struct Outcome {
 }
 pub(crate) fn print_view(view: &View) {
     println!(
-        "登录自启动：{}。",
+        "守护进程随登录启动（所有实例共用）：{}。",
         if view.ready {
             "已开启"
         } else if view.integration.is_none() && view.diagnostic.is_none() {
