@@ -24,6 +24,20 @@ use std::{
 };
 use uuid::Uuid;
 
+mod selection;
+
+fn show_groups(nodes: &[&NodeSummary], selected: &[usize]) -> Vec<(&'static str, Vec<usize>)> {
+    let groups = selection::groups(nodes.iter().map(|n| n.name.as_str()));
+    println!("地区按节点名称识别；* 表示已选。多选后自动测速切换。");
+    for (group, (region, indices)) in groups.iter().enumerate() {
+        println!("\n[G{}] {}（{} 个节点）", group + 1, region, indices.len());
+        for index in indices {
+            show_node(*index, nodes[*index], selected.contains(index));
+        }
+    }
+    groups
+}
+
 fn print(value: &impl serde::Serialize) -> Result<(), Failure> {
     println!(
         "{}",
@@ -68,9 +82,19 @@ pub(crate) async fn run_with_foreground(
             if json {
                 print(&page)?;
             } else {
-                for (index, node) in page.nodes.iter().enumerate() {
-                    show_node(index, &node.node, node.id == page.selected_node_id);
-                    println!("   {}", node.id);
+                let groups = show_groups(
+                    &page.nodes.iter().map(|n| &n.node).collect::<Vec<_>>(),
+                    &page
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, n)| page.selected_node_ids.contains(&n.id).then_some(i))
+                        .collect::<Vec<_>>(),
+                );
+                for (_, indices) in groups {
+                    for index in indices {
+                        println!("{}. {}", index + 1, page.nodes[index].id);
+                    }
                 }
             }
             Ok(None)
@@ -81,20 +105,32 @@ pub(crate) async fn run_with_foreground(
             apply_to_running,
         } => {
             let page = saved_nodes(&root, id).await?;
-            let selected = if let Some(id) = node {
-                page.nodes
+            let selected = if !node.is_empty() {
+                if node
                     .iter()
-                    .find(|n| n.id == id)
-                    .ok_or_else(|| fail(2, "SELECTED_NODE_NOT_FOUND"))?
-                    .id
+                    .any(|id| !page.nodes.iter().any(|n| n.id == *id))
+                {
+                    return Err(fail(2, "SELECTED_NODE_NOT_FOUND"));
+                }
+                node
             } else {
                 if json || !core_cli::interactive() {
                     return Err(fail(2, "请提供节点 ID，或在终端交互选择。"));
                 }
-                for (index, node) in page.nodes.iter().enumerate() {
-                    show_node(index, &node.node, node.id == page.selected_node_id);
-                }
-                page.nodes[choose_node(page.nodes.len(), foreground).await?].id
+                let groups = show_groups(
+                    &page.nodes.iter().map(|n| &n.node).collect::<Vec<_>>(),
+                    &page
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, n)| page.selected_node_ids.contains(&n.id).then_some(i))
+                        .collect::<Vec<_>>(),
+                );
+                choose_nodes(page.nodes.len(), &groups, foreground)
+                    .await?
+                    .into_iter()
+                    .map(|i| page.nodes[i].id)
+                    .collect()
             };
             commit(
                 &root,
@@ -106,7 +142,7 @@ pub(crate) async fn run_with_foreground(
                             profile_id: id,
                             edit: SubscriptionEdit::Select {
                                 expected_source_revision: page.source_revision,
-                                node_id: selected,
+                                node_ids: selected,
                             },
                         },
                     },
@@ -130,15 +166,16 @@ pub(crate) async fn run_with_foreground(
             via,
             apply_to_running,
         } => {
-            if node.is_none() && (json || !core_cli::interactive()) {
+            if node.is_empty() && (json || !core_cli::interactive()) {
                 return Err(fail(2, "非交互导入请用 --node 指定准确节点名。"));
             }
             let url = read_url(url_stdin, foreground).await?;
+            let fallback_title = selection::source_label(&url);
             prepare_route(&root, via, apply_to_running, json, foreground).await?;
             let id = Uuid::new_v4();
             let profile_id = Uuid::new_v4();
             let result = async {
-                let nodes = preview(
+                let (nodes, title) = preview(
                     &root,
                     id,
                     PreviewRequest::Import {
@@ -148,22 +185,33 @@ pub(crate) async fn run_with_foreground(
                     foreground,
                 )
                 .await?;
-                let selected_name = if let Some(name) = node {
-                    if !nodes.iter().any(|n| n.name == name) {
+                let selected_names = if !node.is_empty() {
+                    if node
+                        .iter()
+                        .any(|name| !nodes.iter().any(|n| n.name == *name))
+                    {
                         return Err(fail(2, "SELECTED_NODE_NOT_FOUND"));
                     }
-                    name
+                    node
                 } else {
-                    for (index, node) in nodes.iter().enumerate() {
-                        show_node(index, node, false);
-                    }
-                    nodes[choose_node(nodes.len(), foreground).await?]
-                        .name
-                        .clone()
+                    let groups = show_groups(&nodes.iter().collect::<Vec<_>>(), &[]);
+                    choose_nodes(nodes.len(), &groups, foreground)
+                        .await?
+                        .into_iter()
+                        .map(|i| nodes[i].name.clone())
+                        .collect()
                 };
                 let catalog = coordinator::catalog(root.clone())
                     .await
                     .map_err(|e| fail(3, e.to_string()))?;
+                let name = name.unwrap_or_else(|| {
+                    selection::automatic_name(
+                        title.as_deref().unwrap_or(&fallback_title),
+                        &selected_names,
+                        &app_proxy_windows::local_time::name_timestamp(),
+                        catalog.profiles.iter().map(|p| p.name.as_str()),
+                    )
+                });
                 let mut reservations = Vec::new();
                 let mut endpoint = None;
                 for _ in 0..64 {
@@ -190,7 +238,7 @@ pub(crate) async fn run_with_foreground(
                         name,
                         endpoint: endpoint
                             .ok_or_else(|| fail(3, "LOCAL_PROXY_PORT_UNAVAILABLE"))?,
-                        selected_name,
+                        selected_names,
                     },
                     foreground,
                 )
@@ -282,25 +330,26 @@ async fn saved_nodes(root: &Path, id: Uuid) -> Result<SavedPage, Failure> {
     }
     Ok(page)
 }
-async fn choose_node(count: usize, foreground: &mut Foreground) -> Result<usize, Failure> {
+async fn choose_nodes(
+    count: usize,
+    groups: &[(&str, Vec<usize>)],
+    foreground: &mut Foreground,
+) -> Result<Vec<usize>, Failure> {
     loop {
-        eprint!("选择节点 [1-{count}]，回车返回：");
+        eprint!("选择节点 [1-{count}]：如 1,3-5；G1 选整组；all 全选；0/回车返回：");
         io::stderr()
             .flush()
             .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
         let Some(input) = foreground.read_optional_line().await? else {
             return Err(fail(5, "已返回；原配置保留。"));
         };
-        if input.trim().is_empty() {
+        if input.trim().is_empty() || input.trim() == "0" {
             return Err(fail(5, "已返回；原配置保留。"));
         }
-        if let Ok(n) = input.trim().parse::<usize>()
-            && n > 0
-            && n <= count
-        {
-            return Ok(n - 1);
+        if let Some(selected) = selection::parse(&input, count, groups) {
+            return Ok(selected);
         }
-        eprintln!("请输入列表中的编号。");
+        eprintln!("请输入有效节点编号、范围或地区组编号，可用逗号分隔。");
     }
 }
 async fn preview(
@@ -308,7 +357,7 @@ async fn preview(
     id: Uuid,
     request: PreviewRequest,
     foreground: &mut Foreground,
-) -> Result<Vec<NodeSummary>, Failure> {
+) -> Result<(Vec<NodeSummary>, Option<String>), Failure> {
     foreground.check()?;
     eprintln!("正在读取订阅…");
     let mut response = coordinator::subscription_preview(root.into(), id, request).await;
@@ -322,7 +371,9 @@ async fn preview(
                     nodes: _,
                     unsupported,
                 } => {
-                    eprintln!("订阅读取完成；不支持的条目 {unsupported} 个。");
+                    if unsupported > 0 {
+                        eprintln!("已忽略 {unsupported} 个不支持的条目。");
+                    }
                     let mut nodes = page.nodes;
                     let mut offset = page.next_offset;
                     while let Some(next) = offset {
@@ -333,7 +384,7 @@ async fn preview(
                         nodes.extend(page.nodes);
                         offset = page.next_offset;
                     }
-                    return Ok(nodes);
+                    return Ok((nodes, page.title));
                 }
                 PreviewStatus::Pending {} => {}
             },
@@ -405,6 +456,7 @@ async fn commit(
     foreground.check()?;
     let request = staged.request;
     let id = request.request_id;
+    let summary = saved_summary(&request.action, &staged.changes);
     let prepare =
         if let ConfigAction::EditSubscriptionProfile { profile_id, edit } = &request.action {
             Some(CoreAction::PrepareSubscription {
@@ -415,25 +467,9 @@ async fn commit(
         } else {
             None
         };
-    eprintln!(
-        "新增节点：{}；删除节点：{}；不支持条目：{}。",
-        staged
-            .changes
-            .added
-            .iter()
-            .map(|n| display(n))
-            .collect::<Vec<_>>()
-            .join("、"),
-        staged
-            .changes
-            .removed
-            .iter()
-            .map(|n| display(n))
-            .collect::<Vec<_>>()
-            .join("、"),
-        staged.changes.unsupported
-    );
-    eprintln!("请求编号：{id}；结果不明时运行 proxy request {id} 查询。");
+    if json {
+        eprintln!("请求编号：{id}；结果不明时运行 proxy request {id} 查询。");
+    }
     let result = match coordinator::configure(root.into(), request).await {
         Ok(outcome) => Some(outcome),
         Err(_) => match coordinator::request_status(root.into(), id).await {
@@ -448,10 +484,7 @@ async fn commit(
                     &serde_json::json!({"request_id":id,"receipt":receipt,"changes":staged.changes}),
                 )?;
             } else {
-                println!(
-                    "代理配置已保存：{}，版本 {}。",
-                    receipt.entity_id, receipt.revision
-                );
+                println!("{summary}");
             }
             Ok(())
         }
@@ -479,5 +512,40 @@ async fn commit(
             6,
             format!("结果未确认，请用 proxy request {id} 查询；不要自动重新提交。"),
         )),
+    }
+}
+
+fn saved_summary(action: &ConfigAction, changes: &SubscriptionChanges) -> String {
+    let mode = |count| {
+        if count > 1 {
+            "自动测速切换"
+        } else {
+            "固定节点"
+        }
+    };
+    match action {
+        ConfigAction::AddProfile { profile } => {
+            let count = profile.selected_node_ids().len();
+            format!(
+                "\n已保存：{}\n{count} 个节点 · {}",
+                display(&profile.name),
+                mode(count)
+            )
+        }
+        ConfigAction::EditSubscriptionProfile {
+            edit: SubscriptionEdit::Select { node_ids, .. },
+            ..
+        } => {
+            format!(
+                "\n已保存：{} 个节点 · {}",
+                node_ids.len(),
+                mode(node_ids.len())
+            )
+        }
+        _ => format!(
+            "\n订阅已刷新：新增 {} 个，移除 {} 个。",
+            changes.added.len(),
+            changes.removed.len()
+        ),
     }
 }

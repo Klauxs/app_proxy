@@ -16,6 +16,8 @@ tempfile.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 sha2 = "0.10"
+base64 = "0.22"
+percent-encoding = "2"
 reqwest = { version = "0.13.5", default-features = false, features = ["native-tls"] }
 async-compression = { version = "0.4", features = ["tokio", "gzip", "brotli", "zlib", "zstd"] }
 

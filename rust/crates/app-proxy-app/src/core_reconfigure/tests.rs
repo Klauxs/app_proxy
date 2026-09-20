@@ -425,7 +425,7 @@ async fn real_subscription_selection_and_refresh_use_shared_core_confirmation_an
             port: ports[2],
         },
         url: "https://synthetic.invalid/never-downloaded".into(),
-        selected_name: "A".into(),
+        selected_names: vec!["A".into()],
     };
     let staged = store
         .stage_subscription_import(&import, &parsed(ports[1]))
@@ -480,7 +480,7 @@ async fn real_subscription_selection_and_refresh_use_shared_core_confirmation_an
                 profile_id: import.profile_id,
                 edit: SubscriptionEdit::Select {
                     expected_source_revision: 1,
-                    node_id: second_node,
+                    node_ids: vec![second_node],
                 },
             },
         })

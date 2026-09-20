@@ -345,6 +345,23 @@ async fn prepare_network(
     foreground.check()
 }
 
+fn automatic_instance_name(snapshot: &CatalogPage, title: &str, isolated: bool) -> String {
+    if !isolated {
+        return format!("{title} 原版");
+    }
+    for number in 1.. {
+        let name = format!("{title} 分身 {number}");
+        if !snapshot
+            .instances
+            .iter()
+            .any(|instance| instance.name == name)
+        {
+            return name;
+        }
+    }
+    unreachable!()
+}
+
 async fn add_instance(root: &Path, foreground: &mut Foreground) -> Result<(), Failure> {
     let app = fixed(
         "选择应用",
@@ -401,15 +418,9 @@ async fn add_instance(root: &Path, foreground: &mut Foreground) -> Result<(), Fa
         .await?
         .ok_or_else(returned)?
         == 1;
-    let default_name = format!("{title} {}", if isolated { "分身" } else { "原版" });
-    let name = text(
-        &format!("名称（默认 {}）：", display(&default_name)),
-        Some(&default_name),
-        foreground,
-    )
-    .await?;
     let network = choose_network(root, foreground).await?;
     let snapshot = catalog(root).await?;
+    let name = automatic_instance_name(&snapshot, &title, isolated);
     println!(
         "\n添加：{} · {} · {}",
         display(&name),
@@ -515,9 +526,10 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
             if !application.template_ref.supports_isolation() {
                 return Err(fail(2, "此应用类型不支持分身。"));
             }
-            let name = text("新分身名称（空白返回）：", None, foreground).await?;
+            let name = automatic_instance_name(&snapshot, &application.name, true);
             println!(
-                "继承应用、参数和网络：{}；创建独立空白数据，不复制登录。",
+                "创建：{}。继承应用、参数和网络：{}；使用独立空白数据，不复制登录。",
+                display(&name),
                 network_label(&snapshot, instance.network)
             );
             if matches!(application.template_ref, Template::Codex | Template::Claude)
@@ -813,24 +825,6 @@ async fn manage_shortcut(
     }
 }
 
-async fn download_route(root: &Path, foreground: &mut Foreground) -> Result<Option<Uuid>, Failure> {
-    let snapshot = catalog(root).await?;
-    let mut options = vec!["直接下载".into()];
-    options.extend(
-        snapshot
-            .profiles
-            .iter()
-            .map(|p| format!("通过 {} 下载", display(&p.name))),
-    );
-    let selected = choose("订阅下载方式", &options, Some(0), foreground)
-        .await?
-        .ok_or_else(returned)?;
-    Ok(if selected == 0 {
-        None
-    } else {
-        Some(snapshot.profiles[selected - 1].id)
-    })
-}
 async fn manual_input(foreground: &mut Foreground) -> Result<ManualProxyInput, Failure> {
     let protocol = if fixed("手动上游协议", &["HTTP", "SOCKS5"], Some(0), foreground)
         .await?
@@ -890,53 +884,52 @@ async fn manual_input(foreground: &mut Foreground) -> Result<ManualProxyInput, F
     })
 }
 async fn add_proxy(root: &Path, foreground: &mut Foreground) -> Result<Uuid, Failure> {
-    let kind = fixed(
-        "添加代理",
-        &["订阅", "手动 HTTP / SOCKS5"],
+    subscription_cli::run_with_foreground(
+        root.into(),
+        proxy_cli::Command::Import {
+            name: None,
+            url_stdin: false,
+            node: vec![],
+            via: None,
+            apply_to_running: false,
+        },
+        false,
+        foreground,
+    )
+    .await?
+    .ok_or_else(|| fail(6, "订阅保存结果未确认。"))
+}
+async fn add_manual_proxy(root: &Path, foreground: &mut Foreground) -> Result<Uuid, Failure> {
+    let snapshot = catalog(root).await?;
+    let name = text("代理名称（空白返回）：", None, foreground).await?;
+    let node = manual_input(foreground).await?;
+    confirm("保存此代理配置？", foreground).await?;
+    proxy_cli::save_manual(
+        root.into(),
+        snapshot,
+        proxy_cli::ManualEdit::Create { name },
+        node,
+        false,
+        false,
+        foreground,
+    )
+    .await
+}
+async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure> {
+    let action = fixed(
+        "代理配置",
+        &["添加代理（订阅）", "管理已有代理", "手动添加 HTTP / SOCKS5"],
         None,
         foreground,
     )
     .await?
     .ok_or_else(returned)?;
-    let name = text("代理名称（空白返回）：", None, foreground).await?;
-    if kind == 0 {
-        let via = download_route(root, foreground).await?;
-        subscription_cli::run_with_foreground(
-            root.into(),
-            proxy_cli::Command::Import {
-                name,
-                url_stdin: false,
-                node: None,
-                via,
-                apply_to_running: false,
-            },
-            false,
-            foreground,
-        )
-        .await?
-        .ok_or_else(|| fail(6, "订阅保存结果未确认。"))
-    } else {
-        let snapshot = catalog(root).await?;
-        let node = manual_input(foreground).await?;
-        confirm("保存此代理配置？", foreground).await?;
-        proxy_cli::save_manual(
-            root.into(),
-            snapshot,
-            proxy_cli::ManualEdit::Create { name },
-            node,
-            false,
-            false,
-            foreground,
-        )
-        .await
-    }
-}
-async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure> {
-    let action = fixed("代理配置", &["添加代理", "管理已有代理"], None, foreground)
-        .await?
-        .ok_or_else(returned)?;
     if action == 0 {
         add_proxy(root, foreground).await?;
+        return Ok(());
+    }
+    if action == 2 {
+        add_manual_proxy(root, foreground).await?;
         return Ok(());
     }
     let snapshot = catalog(root).await?;
@@ -946,15 +939,7 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
     let options = snapshot
         .profiles
         .iter()
-        .map(|p| {
-            format!(
-                "{} · {} {}:{}",
-                display(&p.name),
-                p.protocol.label(),
-                display(&p.host),
-                p.port
-            )
-        })
+        .map(|p| format!("{} · {}", display(&p.name), p.upstream_label()))
         .collect::<Vec<_>>();
     let selected = choose("选择代理", &options, None, foreground)
         .await?
@@ -981,12 +966,12 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
             0 => proxy_cli::Command::Nodes { id },
             1 => proxy_cli::Command::Select {
                 id,
-                node: None,
+                node: vec![],
                 apply_to_running: false,
             },
             _ => proxy_cli::Command::Refresh {
                 id,
-                via: download_route(root, foreground).await?,
+                via: None,
                 apply_to_running: false,
             },
         };

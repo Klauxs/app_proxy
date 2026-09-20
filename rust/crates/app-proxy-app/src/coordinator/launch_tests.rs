@@ -932,9 +932,9 @@ async fn subscription_preview_and_nodes_require_their_minor_in_both_directions()
     ] {
         let fixture = Fixture::new();
         let previous_minor = if matches!(&operation, Operation::SubscriptionNodes { .. }) {
-            13
+            20
         } else {
-            12
+            21
         };
         let bytes = serde_json::to_vec(&operation).unwrap();
         let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
@@ -1693,7 +1693,7 @@ async fn guard_status_requires_current_minor_in_both_directions() {
 }
 
 #[tokio::test]
-async fn subscription_catalog_requires_minor_eleven_in_both_directions() {
+async fn subscription_catalog_requires_minor_twenty_one_in_both_directions() {
     let fixture = Fixture::new();
     let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
     let identity = fixture.shared.identity.clone();
@@ -1701,7 +1701,7 @@ async fn subscription_catalog_requires_minor_eleven_in_both_directions() {
         let mut connection = listener.accept().await.unwrap();
         connection.receive::<Hello>().await.unwrap();
         let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
-        greeting.protocol_minor = 10;
+        greeting.protocol_minor = 20;
         connection
             .send(&Welcome::Ready { hello: greeting })
             .await
@@ -1731,7 +1731,7 @@ async fn subscription_catalog_requires_minor_eleven_in_both_directions() {
     .await
     .unwrap();
     let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
-    greeting.protocol_minor = 10;
+    greeting.protocol_minor = 20;
     connection.send(&greeting).await.unwrap();
     connection.receive::<Welcome>().await.unwrap();
     connection
@@ -1754,13 +1754,13 @@ async fn subscription_catalog_requires_minor_eleven_in_both_directions() {
 }
 
 #[tokio::test]
-async fn subscription_edits_require_minor_twelve_before_either_admission() {
+async fn subscription_edits_require_minor_twenty_one_before_either_admission() {
     for core in [false, true] {
         let fixture = Fixture::new();
         let operation = || {
             let edit = app_proxy_core::registry::SubscriptionEdit::Select {
                 expected_source_revision: 1,
-                node_id: Uuid::new_v4(),
+                node_ids: vec![Uuid::new_v4()],
             };
             if core {
                 Operation::ControlCore {
@@ -1786,7 +1786,7 @@ async fn subscription_edits_require_minor_twelve_before_either_admission() {
             let mut connection = listener.accept().await.unwrap();
             connection.receive::<Hello>().await.unwrap();
             let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
-            greeting.protocol_minor = 11;
+            greeting.protocol_minor = 20;
             connection
                 .send(&Welcome::Ready { hello: greeting })
                 .await
@@ -1808,7 +1808,7 @@ async fn subscription_edits_require_minor_twelve_before_either_admission() {
         .await
         .unwrap();
         let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
-        greeting.protocol_minor = 11;
+        greeting.protocol_minor = 20;
         connection.send(&greeting).await.unwrap();
         connection.receive::<Welcome>().await.unwrap();
         let request_id = Uuid::new_v4();

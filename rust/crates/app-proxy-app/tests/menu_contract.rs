@@ -113,6 +113,7 @@ fn console_original_save_return_rename_and_unsupported_clone() {
         "Add other / Environment / default original / menu-original / direct; save, decline launch. Rename to menu-renamed; attempt clone (must reject before any input or network); exit."
     );
     assert!(cli(&root).status().unwrap().success());
+    drop(Owner::capture(&root));
     drop(owner);
     let store = Store::open(&root).unwrap();
     let saved = store.load().unwrap();
@@ -142,6 +143,7 @@ fn console_missing_core_return_preserves_proxy_without_creating_instance() {
         "Create HTTP menu-proxy at 127.0.0.1:1; user menu-user / password menu-secret-value (hidden). Add Environment original using this proxy; confirm, then Return at missing sing-box; exit."
     );
     assert!(cli(&root).env("PATH", "").status().unwrap().success());
+    drop(Owner::capture(&root));
     drop(owner);
     let store = Store::open(&root).unwrap();
     let saved = store.load().unwrap();
@@ -176,6 +178,7 @@ fn console_cancel_password_exits_without_saving() {
     let owner = Owner::capture(&root);
     println!("Add manual HTTP proxy, choose username/password, press Ctrl+C at password.");
     assert_eq!(cli(&root).status().unwrap().code(), Some(5));
+    drop(Owner::capture(&root));
     drop(owner);
     let store = Store::open(&root).unwrap();
     let saved = store.load().unwrap();
@@ -216,6 +219,7 @@ fn console_stale_confirmation_does_not_overwrite_external_edit() {
         "Manage / rename to menu-edit; pause at confirmation; external CLI rename to external-edit; confirm stale menu; exit."
     );
     assert!(cli(&root).status().unwrap().success());
+    drop(Owner::capture(&root));
     drop(owner);
     let store = Store::open(&root).unwrap();
     let saved = store.load().unwrap();

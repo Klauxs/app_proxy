@@ -150,7 +150,7 @@ impl Http {
                     let body = payload.lock().unwrap().clone();
                     let _ = stream.write_all(
                     format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 200 OK\r\nprofile-title: Example Subscription\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     )
                     .as_bytes(),
@@ -187,6 +187,146 @@ fn setup() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("subscription store");
     (temp, root)
+}
+
+#[test]
+fn automatic_names_multiple_nodes_and_refresh_survive_coordinator_restart() {
+    let (_temp, root) = setup();
+    let server = Http::new(body(3));
+    let mut owner = Owner::capture(&root);
+    let imported = ok(
+        &root,
+        &[
+            "proxy",
+            "import",
+            "--node",
+            "Node0",
+            "--node",
+            "Node1",
+            "--url-stdin",
+            "--json",
+        ],
+        Some(&server.url),
+    );
+    let id = imported["receipt"]["entity_id"].as_str().unwrap();
+    let profile = ok(&root, &["proxy", "show", id, "--json"], None);
+    let first_name = profile["profiles"][0]["name"].as_str().unwrap();
+    assert!(first_name.starts_with("Example Subscription · 其他地区 · "));
+    assert_eq!(profile["profiles"][0]["auto_test_nodes"], 2);
+    let nodes = ok(&root, &["proxy", "nodes", id, "--json"], None);
+    assert_eq!(nodes["selected_node_ids"].as_array().unwrap().len(), 2);
+    let ids: Vec<_> = nodes["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap().to_owned())
+        .collect();
+    owner.stop();
+    owner = Owner::capture(&root);
+    assert_eq!(
+        ok(&root, &["proxy", "nodes", id, "--json"], None)["selected_node_ids"],
+        nodes["selected_node_ids"]
+    );
+    ok(
+        &root,
+        &["proxy", "select", id, &ids[1], &ids[2], "--json"],
+        None,
+    );
+    assert_eq!(
+        ok(&root, &["proxy", "nodes", id, "--json"], None)["selected_node_ids"],
+        serde_json::json!([ids[1], ids[2]])
+    );
+    // A vanished member is removed; new subscription nodes are never silently selected.
+    *server.body.lock().unwrap() = body(2);
+    ok(&root, &["proxy", "refresh", id, "--json"], None);
+    let after = ok(&root, &["proxy", "nodes", id, "--json"], None);
+    assert_eq!(after["selected_node_ids"], serde_json::json!([ids[1]]));
+    assert_eq!(
+        ok(&root, &["proxy", "show", id, "--json"], None)["profiles"][0]["auto_test_nodes"],
+        0
+    );
+    *server.body.lock().unwrap() = body(1);
+    let failed = cli(&root, &["proxy", "refresh", id, "--json"], None);
+    assert!(!failed.status.success());
+    assert_eq!(ok(&root, &["proxy", "nodes", id, "--json"], None), after);
+    let second = ok(
+        &root,
+        &[
+            "proxy",
+            "import",
+            "--node",
+            "Node0",
+            "--url-stdin",
+            "--json",
+        ],
+        Some(&server.url),
+    );
+    let second_profile = ok(
+        &root,
+        &[
+            "proxy",
+            "show",
+            second["receipt"]["entity_id"].as_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    let second_name = second_profile["profiles"][0]["name"].as_str().unwrap();
+    assert!(second_name.starts_with("Example Subscription · 其他地区 · "));
+    assert_ne!(first_name, second_name);
+    owner.stop();
+}
+
+#[test]
+fn successful_text_output_is_short_and_uses_names_instead_of_internal_ids() {
+    let (_temp, root) = setup();
+    let server = Http::new(body(85));
+    let mut owner = Owner::capture(&root);
+    let output = cli(
+        &root,
+        &[
+            "proxy",
+            "import",
+            "--node",
+            "Node0",
+            "--node",
+            "Node1",
+            "--url-stdin",
+        ],
+        Some(&server.url),
+    );
+    assert!(output.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("已保存：Example Subscription · 其他地区 · "));
+    assert!(text.contains("2 个节点 · 自动测速切换"));
+    assert!(text.lines().filter(|s| !s.trim().is_empty()).count() <= 3);
+    for hidden in [
+        "Node84",
+        "新增节点",
+        "请求编号",
+        "版本",
+        "private-node-password",
+        "private-source-token",
+    ] {
+        assert!(!text.contains(hidden), "{hidden}");
+    }
+    let profile = ok(&root, &["proxy", "list", "--json"], None);
+    let id = profile["profiles"][0]["id"].as_str().unwrap();
+    assert!(!text.contains(id));
+    let nodes = ok(&root, &["proxy", "nodes", id, "--json"], None);
+    let node = nodes["nodes"][0]["id"].as_str().unwrap();
+    let output = cli(&root, &["proxy", "select", id, node], None);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "已保存：1 个节点 · 固定节点"
+    );
+    assert!(output.stderr.is_empty());
+    owner.stop();
 }
 
 #[test]
@@ -454,7 +594,7 @@ fn real_cli_uses_owned_download_route_and_previews_only_connection_changes() {
                 name: "active subscription".into(),
                 endpoint: endpoint(0),
                 url: server.url.clone(),
-                selected_name: "Node0".into(),
+                selected_names: vec!["Node0".into()],
             },
             &subscription::parse(&body(2)).unwrap(),
         )
@@ -597,7 +737,7 @@ fn console_missing_core_return_preserves_subscription() {
                     port: 18123,
                 },
                 url: server.url.clone(),
-                selected_name: "Node0".into(),
+                selected_names: vec!["Node0".into()],
             },
             &subscription::parse(&body(2)).unwrap(),
         )

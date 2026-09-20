@@ -27,7 +27,7 @@ fn input() -> ImportRequest {
             port: 18998,
         },
         url: "https://source.invalid/?token=fixture".into(),
-        selected_name: "A".into(),
+        selected_names: vec!["A".into()],
     }
 }
 fn apply(store: &mut Store, request: &ConfigRequest) {
@@ -164,7 +164,7 @@ fn refresh_preserves_identity_and_current_selection_and_reuses_unchanged_secrets
                 profile_id: input.profile_id,
                 edit: SubscriptionEdit::Select {
                     expected_source_revision: 2,
-                    node_id: before[1].id,
+                    node_ids: vec![before[1].id],
                 },
             },
         },
@@ -304,7 +304,7 @@ fn active_generation_allows_non_connection_edits_but_requires_confirmation_for_s
                 profile_id: input.profile_id,
                 edit: SubscriptionEdit::Select {
                     expected_source_revision: 3,
-                    node_id: second,
+                    node_ids: vec![second],
                 },
             },
         },
@@ -321,7 +321,8 @@ fn active_generation_allows_non_connection_edits_but_requires_confirmation_for_s
 fn subscription_update_journal_validates_exact_edit_and_recovers_receipts_after_commit() {
     use app_proxy_core::core_control::{CoreAction, CoreOutcome};
     use app_proxy_windows::core_requests::CoreRequestPhase;
-    for selection in [false, true] {
+    for mode in 0..3 {
+        let selection = mode != 0;
         let (temp, mut store, input) = create();
         let generation = store
             .prepare_core_generation(&[input.profile_id])
@@ -346,7 +347,11 @@ fn subscription_update_journal_validates_exact_edit_and_recovers_receipts_after_
                     profile_id: input.profile_id,
                     edit: SubscriptionEdit::Select {
                         expected_source_revision: 1,
-                        node_id: nodes(&store)[1].id,
+                        node_ids: if mode == 2 {
+                            nodes(&store).iter().map(|n| n.id).collect()
+                        } else {
+                            vec![nodes(&store)[1].id]
+                        },
                     },
                 },
             }
@@ -435,6 +440,12 @@ fn subscription_update_journal_validates_exact_edit_and_recovers_receipts_after_
             })
         ));
         assert_eq!(store.load().unwrap().revision, 3);
+        if mode == 2 {
+            assert_eq!(
+                store.load().unwrap().profiles[0].selected_node_ids(),
+                nodes(&store).iter().map(|n| n.id).collect::<Vec<_>>()
+            );
+        }
         let ProxySource::Subscription { revision, .. } = store.load().unwrap().profiles[0].source
         else {
             panic!()

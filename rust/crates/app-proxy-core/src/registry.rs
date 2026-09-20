@@ -87,7 +87,7 @@ pub enum SubscriptionEdit {
     },
     Select {
         expected_source_revision: u64,
-        node_id: Uuid,
+        node_ids: Vec<Uuid>,
     },
 }
 
@@ -107,6 +107,7 @@ fn edit_subscription(
         revision,
         url_secret_id,
         nodes,
+        auto_test_node_ids,
     } = &mut profile.source
     else {
         return Err(ValidationError("SUBSCRIPTION_PROFILE_REQUIRED"));
@@ -133,11 +134,13 @@ fn edit_subscription(
             if url_secret_id != expected_url_secret_id {
                 return Err(ValidationError("STALE_SUBSCRIPTION_SOURCE"));
             }
-            let selected = nodes
-                .iter()
-                .find(|n| n.id == profile.selected_node_id)
-                .ok_or(ValidationError("SELECTED_NODE_NOT_FOUND"))?;
-            if !next.iter().any(|n| n.name == selected.name) {
+            let mut retained = if auto_test_node_ids.is_empty() {
+                vec![profile.selected_node_id]
+            } else {
+                auto_test_node_ids.clone()
+            };
+            retained.retain(|id| next.iter().any(|n| n.id == *id));
+            if retained.is_empty() {
                 return Err(ValidationError("SUBSCRIPTION_SELECTED_NODE_REMOVED"));
             }
             // Existing identities stay attached to the same names. This prevents
@@ -150,14 +153,33 @@ fn edit_subscription(
                     return Err(ValidationError("SUBSCRIPTION_NODE_ID_CHANGED"));
                 }
             }
+            profile.selected_node_id = retained[0];
+            *auto_test_node_ids = if retained.len() > 1 { retained } else { vec![] };
             *revision = next_revision(*revision)?;
             *nodes = next.clone();
         }
-        SubscriptionEdit::Select { node_id, .. } => {
-            if !nodes.iter().any(|node| node.id == *node_id) {
+        SubscriptionEdit::Select { node_ids, .. } => {
+            if node_ids.is_empty()
+                || node_ids
+                    .iter()
+                    .any(|id| !nodes.iter().any(|node| node.id == *id))
+            {
                 return Err(ValidationError("SELECTED_NODE_NOT_FOUND"));
             }
-            profile.selected_node_id = *node_id;
+            if node_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != node_ids.len()
+            {
+                return Err(ValidationError("INVALID_NODE_SELECTION"));
+            }
+            profile.selected_node_id = node_ids[0];
+            *auto_test_node_ids = if node_ids.len() > 1 {
+                node_ids.clone()
+            } else {
+                vec![]
+            };
         }
     }
     profile.revision = next_revision(profile.revision)?;

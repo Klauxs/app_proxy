@@ -123,7 +123,7 @@ fn import(profile_id: Uuid, selected_name: &str) -> StageRequest {
             host: "127.0.0.1".parse().unwrap(),
             port: 18998,
         },
-        selected_name: selected_name.into(),
+        selected_names: vec![selected_name.into()],
     }
 }
 async fn until(mut check: impl FnMut() -> bool) {

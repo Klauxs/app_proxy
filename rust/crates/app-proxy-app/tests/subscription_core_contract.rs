@@ -250,6 +250,7 @@ async fn saved_subscription_profiles_compile_together_with_manual_profile_for_re
                 url_secret_id: Uuid::new_v4(),
                 revision: 1,
                 nodes: vec![saved],
+                auto_test_node_ids: vec![],
             },
         });
     }

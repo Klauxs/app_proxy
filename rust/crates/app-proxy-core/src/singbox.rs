@@ -72,6 +72,31 @@ pub fn compile(
                 }
                 outbound
             }
+            ProxySource::Subscription {
+                nodes,
+                auto_test_node_ids,
+                ..
+            } if !auto_test_node_ids.is_empty() => {
+                let mut tags = Vec::new();
+                for node_id in auto_test_node_ids {
+                    let saved = nodes
+                        .iter()
+                        .find(|n| n.id == *node_id)
+                        .ok_or(ValidationError("SELECTED_NODE_NOT_FOUND"))?;
+                    let node = saved
+                        .resolve(&secret(saved.secret_id)?)
+                        .map_err(|_| ValidationError("INVALID_SUBSCRIPTION_SECRET"))?;
+                    let tag = format!("node-{id}-{node_id}");
+                    outbounds.push(
+                        node.outbound(&tag)
+                            .map_err(|_| ValidationError("INVALID_SUBSCRIPTION_NODE"))?,
+                    );
+                    tags.push(tag);
+                }
+                json!({"type":"urltest", "tag":outgoing, "outbounds":tags,
+                    "url":manifest.settings.test_url, "interval":"3m", "tolerance":50,
+                    "interrupt_exist_connections":false})
+            }
             ProxySource::Subscription { nodes, .. } => {
                 let saved = nodes
                     .iter()

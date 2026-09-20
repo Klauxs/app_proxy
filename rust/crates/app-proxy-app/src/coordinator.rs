@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 3;
-const PROTOCOL_MINOR: u32 = 20;
+const PROTOCOL_MINOR: u32 = 22;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -644,7 +644,7 @@ async fn handle(
             })
             .await;
     }
-    if matches!(&request.operation, Operation::SubscriptionNodes { .. }) && client_minor < 14 {
+    if matches!(&request.operation, Operation::SubscriptionNodes { .. }) && client_minor < 21 {
         return connection
             .send(&Response {
                 request_id,
@@ -655,7 +655,7 @@ async fn handle(
             })
             .await;
     }
-    if subscription_preview_operation(&request.operation) && client_minor < 13 {
+    if subscription_preview_operation(&request.operation) && client_minor < 22 {
         return connection
             .send(&Response {
                 request_id,
@@ -666,7 +666,7 @@ async fn handle(
             })
             .await;
     }
-    if subscription_edit_operation(&request.operation) && client_minor < 12 {
+    if subscription_edit_operation(&request.operation) && client_minor < 21 {
         return connection
             .send(&Response {
                 request_id,
@@ -688,7 +688,7 @@ async fn handle(
             })
             .await;
     }
-    if matches!(&request.operation, Operation::Catalog { .. }) && client_minor < 11 {
+    if matches!(&request.operation, Operation::Catalog { .. }) && client_minor < 21 {
         return connection
             .send(&Response {
                 request_id,
@@ -1060,17 +1060,17 @@ async fn rpc(
     if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 10 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
-    if matches!(&request.operation, Operation::Catalog { .. }) && server.protocol_minor < 11 {
+    if matches!(&request.operation, Operation::Catalog { .. }) && server.protocol_minor < 21 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
-    if subscription_edit_operation(&request.operation) && server.protocol_minor < 12 {
+    if subscription_edit_operation(&request.operation) && server.protocol_minor < 21 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
-    if subscription_preview_operation(&request.operation) && server.protocol_minor < 13 {
+    if subscription_preview_operation(&request.operation) && server.protocol_minor < 22 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
     if matches!(&request.operation, Operation::SubscriptionNodes { .. })
-        && server.protocol_minor < 14
+        && server.protocol_minor < 21
     {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }

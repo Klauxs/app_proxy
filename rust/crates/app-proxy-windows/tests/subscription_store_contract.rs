@@ -40,6 +40,7 @@ fn stage(store: &Store) -> ProxyProfile {
                 .unwrap(),
             revision: 1,
             nodes,
+            auto_test_node_ids: vec![],
         },
     }
 }

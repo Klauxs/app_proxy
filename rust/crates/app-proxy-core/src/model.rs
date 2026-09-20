@@ -188,7 +188,22 @@ pub enum ProxySource {
         url_secret_id: Uuid,
         revision: u64,
         nodes: Vec<crate::subscription::saved::SavedNode>,
+        /// Empty means a fixed node; otherwise every member participates in urltest.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        auto_test_node_ids: Vec<Uuid>,
     },
+}
+
+impl ProxyProfile {
+    /// Configured candidates, not the runtime winner of an automatic group.
+    pub fn selected_node_ids(&self) -> Vec<Uuid> {
+        match &self.source {
+            ProxySource::Subscription {
+                auto_test_node_ids, ..
+            } if !auto_test_node_ids.is_empty() => auto_test_node_ids.clone(),
+            _ => vec![self.selected_node_id],
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -379,12 +394,24 @@ impl Manifest {
                     url_secret_id,
                     revision,
                     nodes,
+                    auto_test_node_ids,
                 } => {
                     if url_secret_id.is_nil()
                         || *revision == 0
                         || nodes.len() > crate::subscription::NODE_LIMIT
                     {
                         return Err(ValidationError("INVALID_SUBSCRIPTION_SOURCE"));
+                    }
+                    if !auto_test_node_ids.is_empty()
+                        && (auto_test_node_ids.len() < 2
+                            || auto_test_node_ids.first() != Some(&profile.selected_node_id)
+                            || auto_test_node_ids.iter().collect::<HashSet<_>>().len()
+                                != auto_test_node_ids.len()
+                            || auto_test_node_ids
+                                .iter()
+                                .any(|id| !nodes.iter().any(|n| n.id == *id)))
+                    {
+                        return Err(ValidationError("INVALID_NODE_SELECTION"));
                     }
                     for node in nodes {
                         node.validate()

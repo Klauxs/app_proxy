@@ -47,7 +47,7 @@ pub enum StageRequest {
         profile_id: Uuid,
         name: String,
         endpoint: Endpoint,
-        selected_name: String,
+        selected_names: Vec<String>,
     },
     Refresh {},
 }
@@ -72,6 +72,7 @@ pub struct NodeSummary {
 #[serde(deny_unknown_fields)]
 pub struct PreviewPage {
     pub status: PreviewStatus,
+    pub title: Option<String>,
     pub nodes: Vec<NodeSummary>,
     pub next_offset: Option<usize>,
 }
@@ -89,6 +90,7 @@ pub struct SavedPage {
     pub revision: u64,
     pub source_revision: u64,
     pub selected_node_id: Uuid,
+    pub selected_node_ids: Vec<Uuid>,
     pub nodes: Vec<SavedNodeSummary>,
     pub next_offset: Option<usize>,
 }
@@ -120,6 +122,7 @@ pub fn saved_page(
         revision: manifest.revision,
         source_revision: *revision,
         selected_node_id: profile.selected_node_id,
+        selected_node_ids: profile.selected_node_ids(),
         nodes: nodes
             .iter()
             .skip(offset)
@@ -151,6 +154,7 @@ enum Source {
 struct Ready {
     source: Source,
     parsed: Parsed,
+    title: Option<String>,
 }
 enum State {
     Pending,
@@ -349,7 +353,11 @@ impl PreviewService {
         if *cancelled.borrow() {
             return Err("SUBSCRIPTION_PREVIEW_CANCELLED".into());
         }
-        Ok(Ready { source, parsed })
+        Ok(Ready {
+            source,
+            parsed,
+            title: downloaded.title().map(str::to_owned),
+        })
     }
 
     pub fn page(&self, id: Uuid, offset: usize) -> Result<PreviewPage> {
@@ -384,6 +392,10 @@ impl PreviewService {
         };
         Ok(PreviewPage {
             status: entry.status(),
+            title: match &entry.state {
+                State::Ready(ready) => ready.title.clone(),
+                _ => None,
+            },
             nodes,
             next_offset,
         })
@@ -462,7 +474,7 @@ impl PreviewService {
                         profile_id,
                         name,
                         endpoint,
-                        selected_name,
+                        selected_names,
                     },
                 ) => {
                     let expected_revision = store.load()?.revision;
@@ -474,7 +486,7 @@ impl PreviewService {
                             name,
                             endpoint,
                             url,
-                            selected_name,
+                            selected_names,
                         },
                         &parsed,
                     )?

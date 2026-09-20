@@ -170,6 +170,7 @@ fn subscription_dependency_tracks_selected_secret_and_preserves_legacy_manual_di
         url_secret_id: Uuid::new_v4(),
         revision: 1,
         nodes,
+        auto_test_node_ids: vec![],
     };
     let before = dependency_digest(&manifest, id).unwrap();
     manifest.profiles[0].name = "display only".into();
@@ -177,6 +178,7 @@ fn subscription_dependency_tracks_selected_secret_and_preserves_legacy_manual_di
         url_secret_id,
         revision,
         nodes,
+        ..
     } = &mut manifest.profiles[0].source
     else {
         panic!()
@@ -190,6 +192,26 @@ fn subscription_dependency_tracks_selected_secret_and_preserves_legacy_manual_di
     };
     nodes[0].secret_id = Uuid::new_v4();
     assert_ne!(dependency_digest(&manifest, id).unwrap(), before);
+    let ProxySource::Subscription {
+        nodes,
+        auto_test_node_ids,
+        ..
+    } = &mut manifest.profiles[0].source
+    else {
+        panic!()
+    };
+    *auto_test_node_ids = vec![nodes[0].id, nodes[1].id];
+    let group = dependency_digest(&manifest, id).unwrap();
+    let ProxySource::Subscription { nodes, .. } = &mut manifest.profiles[0].source else {
+        panic!()
+    };
+    nodes[2].secret_id = Uuid::new_v4();
+    assert_eq!(dependency_digest(&manifest, id).unwrap(), group);
+    let ProxySource::Subscription { nodes, .. } = &mut manifest.profiles[0].source else {
+        panic!()
+    };
+    nodes[1].secret_id = Uuid::new_v4();
+    assert_ne!(dependency_digest(&manifest, id).unwrap(), group);
 }
 
 fn hold_replacement(path: &Path) -> std::fs::File {

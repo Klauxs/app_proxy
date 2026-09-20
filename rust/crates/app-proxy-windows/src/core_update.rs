@@ -807,7 +807,7 @@ fn subscription_edit(plan: &CoreUpdate) -> Result<Option<registry::SubscriptionE
         }
         UpdateChange::SelectSubscriptionNode {} => SubscriptionEdit::Select {
             expected_source_revision: *revision,
-            node_id: after.selected_node_id,
+            node_ids: after.selected_node_ids(),
         },
         _ => unreachable!(),
     }))

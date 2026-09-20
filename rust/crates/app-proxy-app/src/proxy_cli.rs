@@ -45,13 +45,13 @@ pub enum Command {
     /// 导入订阅；地址通过交互输入或 --url-stdin 读取
     Import {
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         /// 从标准输入读取一行订阅地址，避免命令行泄露 token
         #[arg(long)]
         url_stdin: bool,
-        /// 选择准确节点名；交互模式省略时显示列表
+        /// 选择准确节点名；可重复 --node 多选，省略时按地区交互选择
         #[arg(long)]
-        node: Option<String>,
+        node: Vec<String>,
         /// 使用本工具管理的代理下载；默认直接下载
         #[arg(long)]
         via: Option<Uuid>,
@@ -71,7 +71,7 @@ pub enum Command {
     /// 选择已保存的订阅节点；省略节点 ID 时交互选择
     Select {
         id: Uuid,
-        node: Option<Uuid>,
+        node: Vec<Uuid>,
         #[arg(long)]
         apply_to_running: bool,
     },
@@ -199,14 +199,11 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 print(&serde_json::json!({"revision":catalog.revision,"profiles":profiles}))?;
             } else {
                 for p in profiles {
-                    let protocol = p.protocol.label();
                     println!(
-                        "{}  {}  {} {}:{}  入口 {}:{}  {}",
+                        "{}  {}  {}  入口 {}:{}  {}",
                         p.id,
                         display(&p.name),
-                        protocol,
-                        display(&p.host),
-                        p.port,
+                        p.upstream_label(),
                         p.endpoint.host,
                         p.endpoint.port,
                         if p.authenticated {

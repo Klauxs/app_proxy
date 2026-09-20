@@ -7,6 +7,8 @@ use reqwest::{Client, ClientBuilder, Proxy, Url, header};
 use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+mod title;
+
 pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -54,10 +56,14 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 // No Debug/Serialize: text can include both proxy credentials and provider tokens.
 pub struct Downloaded {
     text: String,
+    title: Option<String>,
 }
 impl Downloaded {
     pub fn text(&self) -> &str {
         &self.text
+    }
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
     }
 }
 
@@ -150,6 +156,7 @@ async fn fetch(client: &Client, target: &Url, agent: &str) -> Result<Downloaded>
     if !response.status().is_success() {
         return Err(Error::HttpStatus(response.status().as_u16()));
     }
+    let title = title::from_headers(response.headers(), target);
     // Inspect original headers before decompression can remove duplicate values.
     let mut encodings = response.headers().get_all(header::CONTENT_ENCODING).iter();
     let encoding = match encodings.next().map(|v| v.as_bytes()) {
@@ -181,7 +188,7 @@ async fn fetch(client: &Client, target: &Url, agent: &str) -> Result<Downloaded>
         return Err(Error::Empty);
     }
     let text = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
-    Ok(Downloaded { text })
+    Ok(Downloaded { text, title })
 }
 async fn decode(bytes: Vec<u8>, encoding: &str) -> Result<Vec<u8>> {
     if encoding == "identity" {

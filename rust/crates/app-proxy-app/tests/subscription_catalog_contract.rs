@@ -32,6 +32,7 @@ fn catalog_reads_only_metadata_and_supports_all_subscription_protocols() {
             url_secret_id,
             revision: 1,
             nodes: vec![saved],
+            auto_test_node_ids: vec![],
         };
         let page = catalog_page(manifest, 0, None).unwrap();
         assert_eq!(page.profiles[0].protocol.label(), expected);

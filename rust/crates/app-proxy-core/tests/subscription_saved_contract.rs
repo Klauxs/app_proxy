@@ -32,8 +32,62 @@ fn fixture() -> (Manifest, HashMap<Uuid, String>) {
         url_secret_id,
         revision: 1,
         nodes,
+        auto_test_node_ids: vec![],
     };
     (manifest, secrets)
+}
+
+#[test]
+fn automatic_group_compiles_only_selected_members_and_rejects_corrupt_selections() {
+    let (mut manifest, secrets) = fixture();
+    let ProxySource::Subscription {
+        nodes,
+        auto_test_node_ids,
+        ..
+    } = &mut manifest.profiles[0].source
+    else {
+        panic!()
+    };
+    let chosen = vec![nodes[0].id, nodes[2].id];
+    *auto_test_node_ids = chosen.clone();
+    let config = singbox::compile(&manifest, &[manifest.profiles[0].id], |id| {
+        Ok(secrets[&id].clone())
+    })
+    .unwrap();
+    let config: Value = serde_json::from_slice(config.bytes()).unwrap();
+    let outbounds = config["outbounds"].as_array().unwrap();
+    assert_eq!(outbounds.len(), 3);
+    assert_eq!(outbounds[2]["type"], "urltest");
+    assert_eq!(
+        outbounds[2]["outbounds"],
+        json!([outbounds[0]["tag"], outbounds[1]["tag"]])
+    );
+    assert_eq!(config["route"]["rules"][0]["outbound"], outbounds[2]["tag"]);
+    assert_eq!(outbounds[2]["url"], manifest.settings.test_url);
+    assert_eq!(outbounds[2]["interval"], "3m");
+    assert!(!outbounds.iter().any(|o| o["type"] == "direct"));
+    assert_eq!(
+        serde_json::from_str::<Manifest>(&serde_json::to_string(&manifest).unwrap())
+            .unwrap()
+            .profiles[0]
+            .selected_node_ids(),
+        chosen
+    );
+    for bad in [
+        vec![chosen[0]],
+        vec![chosen[0], chosen[0]],
+        vec![chosen[0], Uuid::new_v4()],
+        vec![chosen[1], chosen[0]],
+    ] {
+        let ProxySource::Subscription {
+            auto_test_node_ids, ..
+        } = &mut manifest.profiles[0].source
+        else {
+            panic!()
+        };
+        *auto_test_node_ids = bad;
+        assert!(manifest.validate().is_err());
+    }
 }
 
 #[test]
@@ -184,6 +238,7 @@ fn subscription_manifest_rejects_invalid_source_selection_duplicates_and_manual_
             url_secret_id,
             revision,
             nodes,
+            ..
         } = &mut profile.source
         else {
             panic!()

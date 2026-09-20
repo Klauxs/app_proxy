@@ -904,6 +904,12 @@ fn dependency_digest(manifest: &Manifest, id: Uuid) -> Result<[u8; 32]> {
     #[derive(serde::Serialize)]
     #[serde(untagged)]
     enum Connection<'a> {
+        AutoTest(
+            (
+                &'a app_proxy_core::model::Endpoint,
+                Vec<&'a app_proxy_core::subscription::saved::SavedNode>,
+            ),
+        ),
         Manual(
             (
                 &'a app_proxy_core::model::Endpoint,
@@ -948,6 +954,22 @@ fn dependency_digest(manifest: &Manifest, id: Uuid) -> Result<[u8; 32]> {
                         node.port,
                         &node.credentials,
                     ))
+                }
+                ProxySource::Subscription {
+                    nodes,
+                    auto_test_node_ids,
+                    ..
+                } if !auto_test_node_ids.is_empty() => {
+                    let selected = auto_test_node_ids
+                        .iter()
+                        .map(|id| {
+                            nodes
+                                .iter()
+                                .find(|n| n.id == *id)
+                                .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Connection::AutoTest((&profile.endpoint, selected))
                 }
                 ProxySource::Subscription { nodes, .. } => {
                     let node = nodes

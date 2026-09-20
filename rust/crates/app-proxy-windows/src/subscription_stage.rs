@@ -19,7 +19,7 @@ pub struct ImportRequest {
     pub name: String,
     pub endpoint: Endpoint,
     pub url: String,
-    pub selected_name: String,
+    pub selected_names: Vec<String>,
 }
 
 /// Retain/replay this exact request after a lost commit response. A new download
@@ -51,11 +51,20 @@ impl Store {
             secrets.push((saved.secret_id, encoded));
             nodes.push(saved);
         }
-        let selected_node_id = nodes
+        let selected = input
+            .selected_names
             .iter()
-            .find(|n| n.name == input.selected_name)
-            .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?
-            .id;
+            .map(|name| {
+                nodes
+                    .iter()
+                    .find(|n| n.name == *name)
+                    .map(|n| n.id)
+                    .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let selected_node_id = *selected
+            .first()
+            .ok_or(Error::Invalid("SELECTED_NODE_NOT_FOUND"))?;
         let changes = SubscriptionChanges {
             added: nodes.iter().map(|n| n.name.clone()).collect(),
             removed: vec![],
@@ -76,6 +85,7 @@ impl Store {
                         url_secret_id: input.request_id,
                         revision: 1,
                         nodes,
+                        auto_test_node_ids: if selected.len() > 1 { selected } else { vec![] },
                     },
                 },
             },
@@ -104,6 +114,7 @@ impl Store {
             revision,
             url_secret_id,
             nodes: before,
+            ..
         } = &profile.source
         else {
             return Err(Error::Invalid("SUBSCRIPTION_PROFILE_REQUIRED"));

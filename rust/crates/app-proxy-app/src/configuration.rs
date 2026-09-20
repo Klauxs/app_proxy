@@ -37,6 +37,22 @@ pub struct ProfileSummary {
     pub host: String,
     pub port: u16,
     pub authenticated: bool,
+    pub auto_test_nodes: usize,
+}
+
+impl ProfileSummary {
+    pub fn upstream_label(&self) -> String {
+        if self.auto_test_nodes > 1 {
+            format!("自动测速 · {} 个候选节点", self.auto_test_nodes)
+        } else {
+            let host: String = self
+                .host
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            format!("{} {}:{}", self.protocol.label(), host, self.port)
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,6 +140,7 @@ pub fn catalog_page(
             .skip(offset)
             .take(PAGE)
             .map(|p| {
+                let count = p.selected_node_ids().len();
                 let (protocol, host, port, authenticated) = match p.source {
                     model::ProxySource::Manual { nodes } => {
                         let node = nodes
@@ -159,6 +176,7 @@ pub fn catalog_page(
                     host,
                     port,
                     authenticated,
+                    auto_test_nodes: if count > 1 { count } else { 0 },
                 })
             })
             .collect::<Result<Vec<_>>>()?,
