@@ -21,6 +21,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new(valid: bool, proxy: bool) -> Self {
+        let mut fixture = Self::unconnected(valid, proxy);
+        fixture.capture_owner();
+        fixture
+    }
+    fn unconnected(valid: bool, proxy: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("store");
         let exe = temp
@@ -111,16 +116,14 @@ impl Fixture {
         });
         store.commit(manifest.revision, manifest).unwrap();
         drop(store);
-        let mut fixture = Self {
+        Self {
             root,
             exe,
             events,
             instance,
             owner: None,
             _temp: temp,
-        };
-        fixture.capture_owner();
-        fixture
+        }
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_app-proxy"));
@@ -181,6 +184,189 @@ impl Drop for Fixture {
             let _ = process::terminate_exact(&owner);
         }
     }
+}
+
+#[test]
+fn hidden_shortcut_launch_reuses_engine_and_running_session_without_output() {
+    let fixture = Fixture::new(true, false);
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_app-proxy-host"))
+            .arg("launch")
+            .arg(fixture.instance.to_string())
+            .arg("--home")
+            .arg(&fixture.root)
+            .arg("--notify")
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(first.stdout.is_empty() && first.stderr.is_empty());
+    fixture.events(1);
+    let before: Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("state/launch.json")).unwrap()).unwrap();
+    let attempts = before["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["origin"], "shortcut");
+    let process: ProcessIdentity =
+        serde_json::from_value(attempts[0]["phase"]["process"].clone()).unwrap();
+    assert!(process::is_running_exact(&process).unwrap());
+    let repeated = run();
+    assert!(repeated.status.success());
+    assert!(repeated.stdout.is_empty() && repeated.stderr.is_empty());
+    fixture.events(1);
+    let after: Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("state/launch.json")).unwrap()).unwrap();
+    assert_eq!(after["attempts"], before["attempts"]);
+}
+
+#[test]
+fn hidden_entry_rejects_missing_store_and_reports_exact_failed_request_without_ui() {
+    let temp = tempfile::tempdir().unwrap();
+    let absent = temp.path().join("missing");
+    let output = Command::new(env!("CARGO_BIN_EXE_app-proxy-host"))
+        .args(["launch", &Uuid::new_v4().to_string(), "--home"])
+        .arg(&absent)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!absent.exists());
+    for proxy in [false, true] {
+        let fixture = Fixture::new(proxy, proxy);
+        let output = Command::new(env!("CARGO_BIN_EXE_app-proxy-host"))
+            .arg("launch")
+            .arg(fixture.instance.to_string())
+            .arg("--home")
+            .arg(&fixture.root)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let report = String::from_utf8(output.stderr).unwrap();
+        let journal: Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("state/launch.json")).unwrap())
+                .unwrap();
+        let attempts = journal["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["phase"]["phase"], "failed");
+        assert_eq!(attempts[0]["origin"], "shortcut");
+        assert!(report.contains(attempts[0]["id"].as_str().unwrap()));
+        assert!(!report.contains("never-display-cli-private-value"));
+        assert_eq!(fs::read_dir(&fixture.events).unwrap().count(), 0);
+    }
+}
+
+#[test]
+#[ignore = "opens an isolated foreground console and selects Return; explicit desktop validation"]
+fn shortcut_missing_core_returns_from_shared_foreground_without_launch() {
+    use std::os::windows::process::CommandExt;
+    let temp = tempfile::tempdir().unwrap();
+    let result = temp.path().join("result.txt");
+    // Preserve the production peer policy: this test client occupies the CLI
+    // slot beside a private copy of the real host, not a bypass or extra peer.
+    let client = temp.path().join("app-proxy.exe");
+    fs::copy(std::env::current_exe().unwrap(), &client).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_app-proxy-host"),
+        temp.path().join("app-proxy-host.exe"),
+    )
+    .unwrap();
+    let mut child = Command::new(client)
+        .args(["--ignored", "--exact", "shortcut_prompt_child"])
+        .env("APP_PROXY_SHORTCUT_TEST_OUTPUT", &result)
+        .creation_flags(0x00000008) // Match a GUI host with no associated console.
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                status.success(),
+                "{status:?}\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("shortcut prompt fixture timed out");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs::read(result).unwrap(),
+        b"returned without application or installation"
+    );
+}
+
+#[test]
+#[ignore = "child for shortcut_missing_core_returns_from_shared_foreground_without_launch"]
+fn shortcut_prompt_child() {
+    let output =
+        PathBuf::from(std::env::var_os("APP_PROXY_SHORTCUT_TEST_OUTPUT").expect("fixture output"));
+    let mut fixture = Fixture::unconnected(true, true);
+    let writer = std::thread::spawn(|| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if app_proxy_windows::console::test_support::line("2\r").is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shared prompt console never appeared"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(app_proxy_app::launch_cli::from_shortcut(
+        fixture.root.clone(),
+        fixture.instance,
+        true,
+    ));
+    let status = runtime
+        .block_on(app_proxy_app::coordinator::status(fixture.root.clone()))
+        .unwrap();
+    let owner = identity::inspect(status.coordinator_pid).unwrap();
+    assert_eq!(
+        owner.image_file,
+        identity::file_identity(
+            &std::env::current_exe()
+                .unwrap()
+                .with_file_name("app-proxy-host.exe")
+        )
+        .unwrap()
+    );
+    fixture.owner = Some(owner);
+    writer.join().unwrap();
+    let error = result.unwrap_err();
+    assert_eq!(error.exit_code, 5);
+    let journal: Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("state/launch.json")).unwrap()).unwrap();
+    let attempts = journal["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["phase"]["code"], "CORE_BINARY_MISSING");
+    assert!(
+        error
+            .to_string()
+            .contains(attempts[0]["id"].as_str().unwrap())
+    );
+    assert_eq!(fs::read_dir(&fixture.events).unwrap().count(), 0);
+    assert!(!fixture.root.join("state/core-requests").exists());
+    fs::write(output, b"returned without application or installation").unwrap();
 }
 
 #[test]

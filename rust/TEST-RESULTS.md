@@ -2,6 +2,20 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：快捷方式 host 隐藏启动与前台依赖流程**
+
+host 新增 `launch <实例ID> --home <目录> --notify`，复用已有 launch_cli 的提交/查询/取消/依赖修复逻辑，仅将来源设为 Shortcut。先 describe 已有 store，不创建丢失目录。正常成功不打开控制台、不输出文本；确定需要安装/共享 core 确认时才打开前台，复用现有中文选择、具体影响、配置版本核验和失败后继续规则。未知请求不换编号重试；失败消息框保留原 launch/core 请求编号及数据目录。无 notify 只返回退出码与错误，不进入交互依赖处理。
+
+原生前台控制台保留并恢复原标准句柄，显式绑定 CONIN$/CONOUT$ 处理重定向场景。独立审查发现仅 spawn ctrl_c future 会在第一次 poll 前留下默认终止窗口，现于首提示前同步构造 Windows CtrlC stream，注册失败拒绝继续。该时序修复同样作用于普通 CLI/menu；既有取消语义不变。
+
+新增两项默认真实 host 契约：正常成功无 stdout/stderr，journal 来源 Shortcut、重复启动复用同一会话且只创建一次自有 child；缺 store 不创建，非法 EXE/缺内核保持单失败 attempt、返回原编号且零目标、无凭据输出。已有 3 项 launch/状态 CLI 回归同时通过。
+
+三项 ignored 原生测试显式通过，并经独立复跑：① detached 独立控制台从重定向标准句柄切换成功，在 current-thread runtime 未 poll 信号任务前立即产生本控制台 Ctrl+C，sticky 取消与后续读拒绝通过，Drop 恢复原重定向；② 私有 CLI 槽测试程序与真实 host 保持原 peer 身份策略，缺内核时输入 2 返回，单 CORE_BINARY_MISSING attempt、零应用及零安装请求；③ 自有原生消息框回读实际控件，launch/core 两个编号可见，点击真实 Button 关闭。消息框测试最初错误假定 MB_OK 的内部按钮 ID 为 IDOK，本机实际为 IDCANCEL；修正为操作实际控件后通过。测试仅使用自身进程/独占控制台和临时目录，不操作用户应用/桌面链接，不安装内核或提权。
+
+独立审查无剩余阻塞，共独立复跑 5 项默认与 3 项原生契约。全量 workspace **384 项通过、0 失败、47 项顶层 ignored**，日志 `.tools/shortcut-launch-final-tests.log`；clippy -D warnings、fmt/diff 通过。最后完善缺失 store 的路径诊断后对应真实 host 契约再次通过。提交主题 `feat(rust): launch shortcuts quietly with shared foreground recovery`。
+
+本批不包括快捷方式创建事务/恢复、菜单创建入口和真实桌面点击，也未通过快捷方式进行真实网络安装或共享 core 重启。
+
 **2026-09-20：原生快捷方式与完整图标缓存平台**
 
 Shell Link 在 COM 内存流编码并回读，固定 host/实例/store 参数及归属标记；禁止自动链接跟踪、环境替换、runas 等额外标志。发布前要求上层 journal（尚待接入），平台使用同目录临时文件与不覆盖发布；receipt 记录实际文件身份和 SHA256。删除核对身份、原始内容和 Shell 字段后用同一 READ|DELETE 句柄标记删除，不按路径重开删文件。原有、被修改、被替换、硬链接或占用链接均保留；输出目录 root→leaf 句柄核验实际属性且禁止删除共享。审查发现预检后 junction 替换窗口，现已修复并通过故障注入；仅 READ_ATTRIBUTES 不足以固定目录，最终输出使用 FILE_GENERIC_READ。

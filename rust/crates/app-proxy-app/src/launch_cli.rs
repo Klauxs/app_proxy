@@ -72,7 +72,10 @@ impl Report {
             dependency: None,
         }
     }
-    fn output(&self, json: bool) -> Result<(), Failure> {
+    fn output(&self, json: bool, foreground: &Foreground) -> Result<(), Failure> {
+        if foreground.quiet() {
+            return Ok(());
+        }
         if json {
             println!(
                 "{}",
@@ -145,7 +148,45 @@ fn error_exit(code: &str) -> i32 {
 }
 
 pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
-    run_with_foreground(root, command, None, &mut Foreground::new()).await
+    run_with_foreground(
+        root,
+        command,
+        None,
+        LaunchOrigin::Interactive,
+        &mut Foreground::new(),
+    )
+    .await
+}
+
+/// Hidden shortcut entry. It cannot initialize a missing store. Dependency
+/// prompts use the same workflow and request IDs as CLI/menu launch.
+pub async fn from_shortcut(root: PathBuf, instance: Uuid, notify: bool) -> Result<(), Failure> {
+    app_proxy_windows::store::describe(&root)
+        .map_err(|e| fail(3, format!("无法打开实例数据目录：{}\n{e}", root.display())))?;
+    let mut foreground = Foreground::detached(notify);
+    let result = run_with_foreground(
+        root.clone(),
+        Command {
+            instance: Some(instance),
+            request_id: None,
+            json: false,
+            action: None,
+        },
+        None,
+        LaunchOrigin::Shortcut,
+        &mut foreground,
+    )
+    .await;
+    result.map_err(|error| {
+        fail(
+            error.exit_code,
+            format!(
+                "{error}\n\n{}数据目录：{}\n结果未确认时先查询原编号，不要重复启动。",
+                foreground.request_summary(),
+                root.display()
+            ),
+        )
+    })
 }
 
 pub(crate) async fn from_menu(
@@ -163,6 +204,7 @@ pub(crate) async fn from_menu(
             action: None,
         },
         Some(revision),
+        LaunchOrigin::Interactive,
         foreground,
     )
     .await
@@ -172,6 +214,7 @@ async fn run_with_foreground(
     root: PathBuf,
     command: Command,
     menu_revision: Option<u64>,
+    origin: LaunchOrigin,
     foreground: &mut Foreground,
 ) -> Result<(), Failure> {
     foreground.check()?;
@@ -186,7 +229,7 @@ async fn run_with_foreground(
             Ok(attempt) => report.attempt = attempt,
             Err(e) => report.error = Some(e.to_string()),
         }
-        report.output(json)?;
+        report.output(json, foreground)?;
         return report.outcome();
     }
     let instance_id = command
@@ -205,7 +248,7 @@ async fn run_with_foreground(
         return Err(fail(4, "配置已变化，请重新确认启动。"));
     }
     let instance = catalog.instances.iter().find(|i| i.id == instance_id);
-    if instance.is_some_and(|i| i.guard == Desired::Enabled) {
+    if !foreground.quiet() && instance.is_some_and(|i| i.guard == Desired::Enabled) {
         eprintln!("启动结果不表示保护已生效；请以实例详情中的实际保护状态为准。");
     }
     let mut installed = false;
@@ -215,7 +258,7 @@ async fn run_with_foreground(
         let request = LaunchRequest {
             request_id: id,
             instance_id,
-            origin: LaunchOrigin::Interactive,
+            origin,
         };
         let expected =
             menu_revision.or_else(|| (installed || expanded).then_some(catalog.revision));
@@ -235,7 +278,7 @@ async fn run_with_foreground(
         let expand =
             repairable && !expanded && code == Some("CORE_RECONFIGURE_REQUIRES_CONFIRMATION");
         if !install && !expand {
-            report.output(json)?;
+            report.output(json, foreground)?;
             return if interrupted {
                 Err(fail(
                     5,
@@ -247,13 +290,17 @@ async fn run_with_foreground(
         }
         if install {
             report.requires_action = Some(RequiredAction::InstallSingBox {});
-            if json || !core_cli::interactive() {
-                report.output(json)?;
+            if json || !foreground.can_prompt() {
+                report.output(json, foreground)?;
                 return report.outcome();
             }
+            foreground.show_console()?;
             core_cli::install_interactively(root.clone(), foreground).await?;
             installed = true;
         } else {
+            if !json && foreground.can_prompt() {
+                foreground.show_console()?;
+            }
             let profile = match instance.map(|i| &i.network) {
                 Some(NetworkBinding::Profile { profile_id }) => *profile_id,
                 _ => return Err(fail(4, "LAUNCH_CONFIG_CHANGED")),
@@ -276,21 +323,21 @@ async fn run_with_foreground(
                 ..
             }) = &prepared
             else {
-                if !json {
+                if !json && !foreground.quiet() {
                     core_cli::output(core_id, &prepared, false)?;
                 }
                 report.dependency = Some(CoreDependency {
                     request_id: core_id,
                     result: prepared.clone(),
                 });
-                report.output(json)?;
+                report.output(json, foreground)?;
                 return core_cli::outcome(prepared);
             };
             report.requires_action = Some(RequiredAction::ConfirmCoreUpdate {
                 impact: impact.clone(),
             });
-            if interrupted || json || !core_cli::interactive() {
-                report.output(json)?;
+            if interrupted || json || !foreground.can_prompt() {
+                report.output(json, foreground)?;
                 return report.outcome();
             }
             core_cli::show_impact(impact);
@@ -339,7 +386,10 @@ async fn submit(
     foreground: &mut Foreground,
 ) -> (Report, bool, bool) {
     let id = request.request_id;
-    eprintln!("启动请求编号：{id}；结果不明时运行 launch inspect {id} 查询。");
+    foreground.remember_launch(id);
+    if !foreground.quiet() {
+        eprintln!("启动请求编号：{id}；结果不明时运行 launch inspect {id} 查询。");
+    }
     let mut report = Report::new(id, None);
     let initial = coordinator::launch_at_revision(root.clone(), request, expected_revision).await;
     let fresh = matches!(&initial, Ok(a) if a.finished_at.is_none() && a.phase.before_spawn());

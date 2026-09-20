@@ -12,6 +12,14 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    Launch {
+        instance: uuid::Uuid,
+        #[arg(long)]
+        home: PathBuf,
+        /// 需要用户选择时显示前台流程，失败时保留通知
+        #[arg(long)]
+        notify: bool,
+    },
     GuardInstall {
         #[arg(long)]
         ticket: String,
@@ -40,6 +48,33 @@ enum Commands {
 
 fn main() {
     let result = match Cli::parse().command {
+        Commands::Launch {
+            instance,
+            home,
+            notify,
+        } => {
+            let result = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime
+                    .block_on(app_proxy_app::launch_cli::from_shortcut(
+                        home, instance, notify,
+                    ))
+                    .map_err(|e| (e.exit_code, e.to_string())),
+                Err(error) => Err((1, error.to_string())),
+            };
+            if let Err((code, message)) = result {
+                if notify {
+                    let _ = app_proxy_windows::console::notify_launch_failure(&message);
+                } else {
+                    eprintln!("{message}");
+                }
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Commands::GuardInstall { ticket } => {
             app_proxy_windows::guard_install::elevated(&ticket).map_err(Into::into)
         }
