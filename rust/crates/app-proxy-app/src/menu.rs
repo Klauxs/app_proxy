@@ -466,7 +466,6 @@ async fn finish_instance(
     saved_revision: u64,
     foreground: &mut Foreground,
 ) -> Result<(), Failure> {
-    println!("实例已保存：{id}。后续返回或授权取消均保留此实例。");
     foreground.check()?;
     let snapshot = catalog(root).await?;
     if snapshot.revision != saved_revision {
@@ -477,6 +476,7 @@ async fn finish_instance(
         .iter()
         .find(|i| i.id == id)
         .ok_or_else(|| fail(4, "实例已变化。"))?;
+    println!("已保存：{}。", display(&instance.name));
     if instance.guard == Desired::Enabled {
         guard_cli::run_with_foreground(
             root.into(),

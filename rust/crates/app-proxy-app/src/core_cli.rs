@@ -369,10 +369,7 @@ pub(crate) async fn submit(
     }
     let installing = matches!(action, CoreAction::Install {});
     foreground.remember_core(id);
-    // Keep the ID for hidden-launch failure notification as well as terminal output.
-    if !foreground.quiet() {
-        eprintln!("请求编号：{id}；结果不明时运行 core request {id} 查询。");
-    }
+    // The foreground retains recovery IDs; normal success needs no UUID banner.
     let initial = coordinator::control_core(root.clone(), id, action).await;
     let mut status = match initial {
         Ok(status) => Some(status),

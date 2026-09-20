@@ -10,6 +10,91 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+fn normalize_listener_wait(status: &mut GuardStatus) {
+    if status.desired == Desired::Enabled
+        && matches!(
+            status.diagnostic.as_deref(),
+            Some("GUARD_RESOLUTION_BUSY" | "GUARD_SCAN_BUSY" | "GUARD_LISTENER_CHECK_BUSY")
+        )
+    {
+        status.phase = GuardPhase::Starting;
+    }
+    // Unverified + a cached missing/start marker means the RPC's independent
+    // deployment check passed, but the monitor has not connected yet. A truly
+    // missing deployment is NeedsAuthorization and must never be hidden.
+    if status.listener == ComponentState::Unverified
+        && matches!(
+            status.diagnostic.as_deref(),
+            Some(
+                "GUARD_LISTENER_MISSING"
+                    | "GUARD_TASK_MISSING"
+                    | "GUARD_LISTENER_START_PENDING"
+                    | "GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED"
+            )
+        )
+    {
+        status.phase = GuardPhase::Starting;
+        status.diagnostic = Some("GUARD_LISTENER_START_PENDING".into());
+    }
+}
+
+fn listener_registered(status: &GuardStatus) -> bool {
+    matches!(
+        status.listener,
+        ComponentState::ActiveEtw | ComponentState::ActivePolling
+    ) || matches!(
+        status.diagnostic.as_deref(),
+        Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED" | "GUARD_LISTENER_START_PENDING")
+    )
+}
+
+fn settling(status: &GuardStatus) -> bool {
+    status.phase == GuardPhase::Starting
+        || matches!(
+            status.diagnostic.as_deref(),
+            Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED" | "GUARD_LISTENER_START_PENDING")
+        )
+}
+
+async fn settle_status<F, Fut>(
+    mut status: GuardStatus,
+    foreground: &mut crate::foreground::Foreground,
+    mut poll: F,
+) -> Result<GuardStatus, Failure>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = app_proxy_windows::Result<GuardStatus>>,
+{
+    normalize_listener_wait(&mut status);
+    let revision = status.revision;
+    // Covers the resident monitor's 30-second retry and a bounded connection.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
+    while settling(&status) {
+        tokio::select! {
+            biased;
+            _ = foreground.cancelled() => return Err(fail(5, "已停止等待；实例和已登记的登录自启动均保留。")),
+            _ = tokio::time::sleep_until(deadline) => break,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+        }
+        let next = tokio::select! {
+            biased;
+            _ = foreground.cancelled() => return Err(fail(5, "已停止等待；实例和已登记的登录自启动均保留。")),
+            result = tokio::time::timeout_at(deadline, poll()) => result,
+        };
+        match next {
+            Ok(Ok(current)) => {
+                status = current;
+                normalize_listener_wait(&mut status);
+            }
+            _ => break,
+        }
+        if status.revision != revision || status.desired != Desired::Enabled {
+            break;
+        }
+    }
+    Ok(status)
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// 查看或恢复本数据目录的登录启动入口
@@ -107,6 +192,7 @@ pub(crate) async fn run_with_foreground(
     let mut confirmed_revision = status.revision;
     let mut request_id = None;
     let mut receipt = None;
+    let mut installed_now = false;
     if let Some(desired) = desired
         && status.desired != desired
     {
@@ -212,7 +298,8 @@ pub(crate) async fn run_with_foreground(
             };
             match installed {
                 Ok(_) => {
-                    println!("监听组件已安装并核验，自动检查将接入；请以接下来的保护状态为准。")
+                    installed_now = true;
+                    println!("监听组件已安装，正在连接…")
                 }
                 Err(app_proxy_windows::Error::Invalid("GUARD_INSTALL_CANCELLED")) => {
                     return Err(fail(5, "已取消 Windows 授权，实例配置保留。"));
@@ -238,6 +325,23 @@ pub(crate) async fn run_with_foreground(
             "配置已变化；未继续登记登录入口，请重新确认保护设置。",
         ));
     }
+    normalize_listener_wait(&mut status);
+    if desired == Some(Desired::Enabled)
+        && !installed_now
+        && !listener_registered(&status)
+        && settling(&status)
+    {
+        if !json {
+            println!("正在确认监听组件…");
+        }
+        status = settle_status(status, foreground, || {
+            coordinator::guard_status(root.clone(), id)
+        })
+        .await?;
+        if status.revision != confirmed_revision {
+            return Err(fail(4, "配置已变化，请重新确认保护设置。"));
+        }
+    }
     let mut login = login_view(root.clone()).await;
     let mut login_operation = None;
     if desired == Some(Desired::Enabled) {
@@ -245,12 +349,13 @@ pub(crate) async fn run_with_foreground(
         if login.revision != 0 && login.revision != confirmed_revision {
             return Err(fail(4, "配置已变化，请重新确认保护设置。"));
         }
-        let listener_verified = matches!(
-            status.listener,
-            ComponentState::ActiveEtw | ComponentState::ActivePolling
-        ) || status.diagnostic.as_deref()
-            == Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED");
+        // Installation authority is independent of the first event heartbeat.
+        // Native login admission re-verifies the deployment before registering.
+        let listener_verified = installed_now || listener_registered(&status);
         if listener_verified && login.integration.is_none() && login.diagnostic.is_none() {
+            if !json {
+                println!("正在登记登录自启动…");
+            }
             use app_proxy_windows::guard_task::login::journal::{Action, Request, Status};
             let request = Request {
                 id: Uuid::new_v4(),
@@ -281,6 +386,16 @@ pub(crate) async fn run_with_foreground(
             }
         }
     }
+    if desired == Some(Desired::Enabled) && status.revision == confirmed_revision {
+        normalize_listener_wait(&mut status);
+        if settling(&status) && !json {
+            println!("正在确认监听和保护状态…");
+        }
+        status = settle_status(status, foreground, || {
+            coordinator::guard_status(root.clone(), id)
+        })
+        .await?;
+    }
     let changed = status.revision != confirmed_revision
         || (login.revision != 0 && login.revision != confirmed_revision);
     if changed {
@@ -308,18 +423,41 @@ pub(crate) async fn run_with_foreground(
             .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
         );
     } else {
-        crate::login_cli::print_view(&login);
         if let Some(outcome) = &login_operation {
-            println!("登录入口请求：{}。", outcome.request_id);
             if let Some(code) = &outcome.error {
                 println!(
                     "登录入口诊断：{code}；请用 guard login request {} 查询原请求。",
                     outcome.request_id
                 );
+            } else if !matches!(
+                outcome.status,
+                Some(app_proxy_windows::guard_task::login::journal::Status::Created { .. })
+            ) {
+                println!(
+                    "登录自启动登记结果待确认；请用 guard login request {} 查询。",
+                    outcome.request_id
+                );
             }
         }
+        let name = coordinator::catalog(root.clone())
+            .await
+            .ok()
+            .and_then(|catalog| {
+                catalog
+                    .instances
+                    .into_iter()
+                    .find(|instance| instance.id == id)
+            })
+            .map(|instance| {
+                instance
+                    .name
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect::<String>()
+            })
+            .unwrap_or_else(|| "当前实例".into());
         println!(
-            "实例 {id}：{}；监听：{}。",
+            "{name}：{}。\n进程监听：{}。",
             match status.phase {
                 GuardPhase::Disabled => "保护已关闭",
                 GuardPhase::NeedsAuthorization => "保护未生效，等待组件授权",
@@ -330,17 +468,18 @@ pub(crate) async fn run_with_foreground(
             },
             component(status.listener)
         );
+        crate::login_cli::print_view(&login);
         if let Some(scan) = status.scan {
             use crate::launch_engine::GuardObservation;
             match scan.observation {
                 GuardObservation::Disabled {} => {}
-                GuardObservation::Pending { attempt_id } => {
-                    println!("启动请求 {attempt_id} 尚未结束，暂缓检查。")
+                GuardObservation::Pending { .. } => {
+                    println!("应用正在启动，稍后继续检查。")
                 }
                 GuardObservation::Session { process, .. } => {
                     println!("已确认会话 PID {} 仍按启动时的配置保留。", process.pid)
                 }
-                GuardObservation::Absent {} => println!("未发现目标实例主进程。"),
+                GuardObservation::Absent {} => println!("应用尚未启动。"),
                 GuardObservation::Compliant { process } => println!(
                     "主进程 PID {} 的代理参数匹配；网络可用性需单独检查。",
                     process.pid
@@ -353,15 +492,38 @@ pub(crate) async fn run_with_foreground(
             }
         }
         if let Some(code) = status.diagnostic {
-            if code == "GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED" {
-                println!("监听组件注册已核验，运行连接尚未确认。");
+            if matches!(
+                code.as_str(),
+                "GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED" | "GUARD_LISTENER_START_PENDING"
+            ) {
+                println!("组件已安装，正在等待后台连接，无需重复安装。");
+            } else if matches!(
+                code.as_str(),
+                "GUARD_INITIAL_SCAN_PENDING"
+                    | "GUARD_SCAN_REFRESH_PENDING"
+                    | "GUARD_RESOLUTION_BUSY"
+                    | "GUARD_SCAN_BUSY"
+                    | "GUARD_LISTENER_CHECK_BUSY"
+            ) || code.starts_with("GUARD_CORRECTION_PENDING:")
+                || code.starts_with("GUARD_LAUNCH_PENDING:")
+            {
+                println!("正在完成首次检查或自动纠正，请稍候。");
             } else {
                 println!("保护诊断：{code}。");
             }
         }
-        if requires_action.is_some() {
+        if let Some(action) = requires_action {
             println!(
-                "实例配置已保留；监听组件可在交互式 guard enable 中授权安装，后台不会弹出 UAC。完整保护仍待组件就绪。"
+                "{}",
+                match action {
+                    "verify_guard_login" =>
+                        "本次保护状态如上；登录自启动尚未就绪，可在管理实例中选择启用或修复保护。",
+                    "authorize_guard_components" =>
+                        "实例已保留；请在管理实例中启用保护并授权安装监听组件。",
+                    "wait_for_guard_check" =>
+                        "后台仍在准备，稍后在管理实例中查看保护状态，无需重复创建实例。",
+                    _ => "实例已保留；请按上述诊断处理，可在管理实例中重新查看保护状态。",
+                }
             );
         }
     }
@@ -369,4 +531,120 @@ pub(crate) async fn run_with_foreground(
         return Err(fail(5, "保护尚未完全就绪，请按状态提示处理。"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn pending() -> GuardStatus {
+        GuardStatus {
+            instance_id: Uuid::new_v4(),
+            revision: 7,
+            desired: Desired::Enabled,
+            phase: GuardPhase::Starting,
+            listener: ComponentState::Unverified,
+            scan: None,
+            diagnostic: Some("GUARD_LISTENER_START_PENDING".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn registration_does_not_wait_for_heartbeat_but_success_display_does() {
+        let status = pending();
+        assert!(listener_registered(&status));
+        let mut foreground = crate::foreground::Foreground::detached(false);
+        let mut polls = 0;
+        let ready = settle_status(status, &mut foreground, || {
+            polls += 1;
+            let mut next = pending();
+            next.phase = GuardPhase::Active;
+            next.listener = ComponentState::ActiveEtw;
+            next.diagnostic = None;
+            std::future::ready(Ok(next))
+        })
+        .await
+        .unwrap();
+        assert_eq!(polls, 1);
+        assert!(ready.phase == GuardPhase::Active);
+        assert!(ready.diagnostic.is_none());
+    }
+
+    #[tokio::test]
+    async fn settling_stops_on_configuration_change_and_does_not_retry_real_failures() {
+        let mut foreground = crate::foreground::Foreground::detached(false);
+        let changed = settle_status(pending(), &mut foreground, || {
+            let mut next = pending();
+            next.revision = 8;
+            std::future::ready(Ok(next))
+        })
+        .await
+        .unwrap();
+        assert_eq!(changed.revision, 8);
+        let mut failed = pending();
+        failed.phase = GuardPhase::Blocked;
+        failed.diagnostic = Some("GUARD_COORDINATOR_CHANGED".into());
+        assert!(!listener_registered(&failed));
+        let failed = settle_status(failed, &mut foreground, || async {
+            panic!("must not retry permanent failure")
+        })
+        .await
+        .unwrap();
+        assert!(failed.phase == GuardPhase::Blocked);
+    }
+
+    #[tokio::test]
+    async fn cached_missing_after_verified_install_waits_without_reinstalling() {
+        let mut status = pending();
+        status.phase = GuardPhase::Blocked;
+        status.diagnostic = Some("GUARD_LISTENER_MISSING".into());
+        normalize_listener_wait(&mut status);
+        assert!(listener_registered(&status));
+        assert!(settling(&status));
+        let mut polls = 0;
+        let mut foreground = crate::foreground::Foreground::detached(false);
+        let ready = settle_status(status, &mut foreground, || {
+            polls += 1;
+            let mut next = pending();
+            if polls == 1 {
+                next.phase = GuardPhase::Blocked;
+                next.diagnostic = Some("GUARD_LISTENER_MISSING".into());
+            } else {
+                next.phase = GuardPhase::Active;
+                next.listener = ComponentState::ActiveEtw;
+                next.diagnostic = None;
+            }
+            std::future::ready(Ok(next))
+        })
+        .await
+        .unwrap();
+        assert_eq!(polls, 2);
+        assert!(ready.phase == GuardPhase::Active);
+
+        let mut missing = pending();
+        missing.listener = ComponentState::NeedsAuthorization;
+        missing.phase = GuardPhase::NeedsAuthorization;
+        missing.diagnostic = Some("GUARD_LISTENER_MISSING".into());
+        normalize_listener_wait(&mut missing);
+        assert!(!listener_registered(&missing));
+        assert!(!settling(&missing));
+    }
+
+    #[tokio::test]
+    async fn transient_resolution_contention_is_waited_out_before_reporting() {
+        let mut busy = pending();
+        busy.phase = GuardPhase::Blocked;
+        busy.listener = ComponentState::ActiveEtw;
+        busy.diagnostic = Some("GUARD_RESOLUTION_BUSY".into());
+        let mut foreground = crate::foreground::Foreground::detached(false);
+        let ready = settle_status(busy, &mut foreground, || {
+            let mut next = pending();
+            next.phase = GuardPhase::Active;
+            next.listener = ComponentState::ActiveEtw;
+            next.diagnostic = None;
+            std::future::ready(Ok(next))
+        })
+        .await
+        .unwrap();
+        assert!(ready.phase == GuardPhase::Active);
+    }
 }

@@ -29,11 +29,13 @@ pub(crate) struct Outcome {
 }
 pub(crate) fn print_view(view: &View) {
     println!(
-        "下次登录：{}。",
+        "登录自启动：{}。",
         if view.ready {
-            "启动入口已核验"
+            "已开启"
+        } else if view.integration.is_none() && view.diagnostic.is_none() {
+            "未登记"
         } else {
-            "启动入口未就绪"
+            "待处理"
         }
     );
     if let Some(entry) = &view.integration

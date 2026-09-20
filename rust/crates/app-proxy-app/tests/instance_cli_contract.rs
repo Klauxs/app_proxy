@@ -60,6 +60,50 @@ fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 #[test]
+fn successful_setup_is_quiet_and_guard_summary_uses_name() {
+    let (_temp, root, exe) = setup();
+    let _owner = Owner::capture(&root);
+    let created = cli(
+        &root,
+        &[
+            "instance",
+            "create",
+            "--exe",
+            exe.to_str().unwrap(),
+            "--adapter",
+            "environment",
+            "--direct",
+            "--name",
+            "交互验证",
+            "--json",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&created.stderr).contains("请求编号"));
+    let created: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let id = created["receipt"]["entity_id"].as_str().unwrap();
+    let status = cli(&root, &["guard", "status", id]);
+    assert!(status.status.success());
+    let summary = String::from_utf8_lossy(&status.stdout);
+    assert!(summary.contains("交互验证：保护已关闭。"), "{summary}");
+    assert!(summary.contains("登录自启动：未登记。"), "{summary}");
+    assert!(!summary.contains(id));
+    let stopped = cli(&root, &["core", "stop", "--json"]);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&stopped.stderr).contains("请求编号"));
+    let stopped: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+    assert!(stopped["request_id"].as_str().is_some());
+}
+
+#[test]
 fn advanced_cli_edits_uninstalled_application_with_private_input_and_revision_check() {
     let (_temp, root, exe) = setup();
     let created = create(&root, &exe, &[]);

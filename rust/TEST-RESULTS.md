@@ -704,3 +704,8 @@ run 只供已核对普通 coordinator 使用，显式当前 session>0，空替�
 5 项新增测试及独立复跑通过：中文/空格/空参数/引号/尾反斜杠和原始 UTF-16 保留；固定边界/UUID/缺失目标/相对路径/大小/NUL 拒绝；目标路径与真实 host 归属、fileID 正反例；当前普通 token 及合成不支持上下文；原生 GetCommandLineW 与当前 argv 对照、未知登记拒绝。测试的正向路径绑定是合成元数据，未创建真实受保护安装，不能替代正向完整 verify 或原生 IFEO 重定向实测。
 
 全量 workspace 300 项通过、26 项顶层 ignored（.tools/ifeo-entry-final-tests.log），workspace clippy -D warnings、fmt/diff 通过。没有 UAC、HKLM 写入或用户应用操作；host 模式、认证转交、cwd/环境/STARTUPINFO/继承句柄/Job、模板激活及防递归/辅助 continuation 仍待接入验收。
+# 2026-09-20：保护启用与前台摘要修复
+
+- 前台正常保存与代理验证不再提前打印请求 UUID；JSON 和失败/结果未确认时的查询编号保留。实例摘要使用名称，分别展示进程监听和登录自启动。
+- 已核验安装不再依赖后台第一条心跳才登记登录入口；前台区分旧的缺失缓存、真实组件缺失和其他故障，启用后最多等待 40 秒覆盖后台现有重试周期。等待可取消，已保存的实例和自启动登记保留。
+- 回归：4 项 Guard 前台状态测试通过；实例 CLI 合约 12 项通过、4 项环境专项忽略。实际用户实例补登记后已查询到 ETW active、login ready=true；本轮未启动真实应用做关闭测试，也未注销 Windows 测试登录触发。

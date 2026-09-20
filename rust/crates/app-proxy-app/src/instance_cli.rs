@@ -532,7 +532,6 @@ pub(crate) async fn submit(
     json: bool,
 ) -> Result<(Uuid, ConfigReceipt), Failure> {
     let request_id = Uuid::new_v4();
-    eprintln!("请求编号：{request_id}（响应中断时使用 instance request 查询）");
     let result = coordinator::configure(
         root.into(),
         ConfigRequest {
