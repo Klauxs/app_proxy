@@ -198,7 +198,10 @@ impl CoreControl {
                 cancelled = job.cancellation.wait_for(|value| *value) => cancelled
                     .map(|_| CoreOutcome::Cancelled {})
                     .map_err(|_| Error::Invalid("CORE_CANCEL_RESULT_UNKNOWN")),
-                installed = self.installer.install() => installed.map(|()| CoreOutcome::Installed { version: app_proxy_windows::singbox_install::VERSION.into() }),
+                installed = self.installer.install() => Ok(match installed {
+                    Ok(()) => CoreOutcome::Installed { version: app_proxy_windows::singbox_install::VERSION.into() },
+                    Err(failure) => failure.outcome(),
+                }),
             },
             CoreAction::CancelInstall { request_id } => self
                 .cancel_install(request_id)
@@ -640,7 +643,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(
-                matches!(control.request_status(surviving).unwrap(), Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == "CORE_DOWNLOAD_FAILED")
+                matches!(control.request_status(surviving).unwrap(), Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code.starts_with("CORE_DOWNLOAD_FAILED; phase="))
             );
         }
     }

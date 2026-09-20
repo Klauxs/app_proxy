@@ -18,6 +18,24 @@ use std::{
 use uuid::Uuid;
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
 
+// Keep the native error and the bounded operation name without logging paths.
+fn install_io<T>(operation: &'static str, result: std::io::Result<T>) -> Result<T> {
+    result.map_err(|error| match error.raw_os_error() {
+        Some(code) => Error::Windows {
+            operation,
+            code: code as u32,
+        },
+        None => Error::Io(error),
+    })
+}
+
+fn install_store_io<T>(operation: &'static str, result: Result<T>) -> Result<T> {
+    result.or_else(|error| match error {
+        Error::Io(error) => install_io(operation, Err(error)),
+        other => Err(other),
+    })
+}
+
 pub const VERSION: &str = "1.14.1";
 pub const URL: &str = "https://github.com/SagerNet/sing-box/releases/download/v1.14.1/sing-box-1.14.1-windows-amd64.zip";
 pub const ARCHIVE_SIZE: usize = 32_841_719;
@@ -101,8 +119,8 @@ impl CoreInstallation {
         let mut pins = Vec::new();
         for relative in ["", "bin", "bin/sing-box"] {
             let path = self.root.join(relative);
-            if create && !path.try_exists()? {
-                fs::create_dir(&path)?;
+            if create && !install_io("CoreInstallInspectParent", path.try_exists())? {
+                install_io("CoreInstallCreateParent", fs::create_dir(&path))?;
             }
             let pin = security::directory(&path, false)?;
             security::verify(pin.as_raw_handle(), &self.sid, false)?;
@@ -114,7 +132,7 @@ impl CoreInstallation {
     /// Existing complete versions are verified and retained, never overwritten.
     pub fn core_is_installed(&self) -> Result<bool> {
         let path = self.root.join(format!("bin/sing-box/{VERSION}"));
-        if !path.try_exists()? {
+        if !install_io("CoreInstallInspectDestination", path.try_exists())? {
             return Ok(false);
         }
         let _parents = self.install_parents(false)?;
@@ -136,7 +154,7 @@ impl CoreInstallation {
         let path = self
             .root
             .join(format!("bin/sing-box/.staging-{}", Uuid::new_v4()));
-        fs::create_dir(&path)?;
+        install_io("CoreInstallCreateStaging", fs::create_dir(&path))?;
         let directory = security::directory(&path, false)?;
         security::verify(directory.as_raw_handle(), &self.sid, false)?;
         let mut stage = InstallStage {
@@ -152,7 +170,10 @@ impl CoreInstallation {
             _owner: self.owner.clone(),
         };
         for (name, data) in members {
-            store::write_new(&stage.path.join(name), &data, &stage.sid)?;
+            install_store_io(
+                "CoreInstallWriteMember",
+                store::write_new(&stage.path.join(name), &data, &stage.sid),
+            )?;
         }
         let receipt = Receipt {
             schema_version: 1,
@@ -161,12 +182,18 @@ impl CoreInstallation {
             source: URL.into(),
             archive_sha256: ARCHIVE_SHA256.into(),
         };
-        store::write_new(
-            &stage.path.join("installation.json"),
-            &store::encode(&receipt, 4096)?,
-            &stage.sid,
+        install_store_io(
+            "CoreInstallWriteReceipt",
+            store::write_new(
+                &stage.path.join("installation.json"),
+                &store::encode(&receipt, 4096)?,
+                &stage.sid,
+            ),
         )?;
-        store::write_new(&stage.path.join(".check.json"), CHECK, &stage.sid)?;
+        install_store_io(
+            "CoreInstallWriteCheck",
+            store::write_new(&stage.path.join(".check.json"), CHECK, &stage.sid),
+        )?;
         stage.files = pin_members(&stage.path, &stage.sid)?;
         Ok(stage)
     }
@@ -183,10 +210,16 @@ impl CoreInstallation {
         // Parent handles stay pinned, and publication never replaces a target.
         stage.files.clear();
         stage.directory.take();
-        fs::remove_file(stage.path.join(".check.json"))?;
-        fs::rename(
-            &stage.path,
-            self.root.join(format!("bin/sing-box/{VERSION}")),
+        install_io(
+            "CoreInstallRemoveCheck",
+            fs::remove_file(stage.path.join(".check.json")),
+        )?;
+        install_io(
+            "CoreInstallRenameDirectory",
+            fs::rename(
+                &stage.path,
+                self.root.join(format!("bin/sing-box/{VERSION}")),
+            ),
         )?;
         stage.published = true;
         if !self.core_is_installed()? {
@@ -204,7 +237,11 @@ impl InstallStage {
         if binary.version() != VERSION {
             return Err(Error::Invalid("CORE_INSTALL_VERSION_MISMATCH"));
         }
-        if store::read_protected(&self.path.join(".check.json"), &self.sid, 4096)? != CHECK {
+        if install_store_io(
+            "CoreInstallReadCheck",
+            store::read_protected(&self.path.join(".check.json"), &self.sid, 4096),
+        )? != CHECK
+        {
             return Err(Error::Invalid("CORE_INSTALL_CHECK_CHANGED"));
         }
         binary.check_config(&self.path.join(".check.json")).await?;
@@ -295,19 +332,23 @@ fn pin_members(path: &Path, sid: &str) -> Result<Vec<File>> {
     for member in &MEMBERS {
         let path = path.join(member.name);
         security::no_reparse(&path)?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(&path)?;
+        let mut file = install_io(
+            "CoreInstallOpenMember",
+            OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&path),
+        )?;
         security::verify(file.as_raw_handle(), sid, false)?;
-        if !file.metadata()?.is_file() || file.metadata()?.len() != member.size as u64 {
+        let metadata = install_io("CoreInstallInspectMember", file.metadata())?;
+        if !metadata.is_file() || metadata.len() != member.size as u64 {
             return Err(Error::Invalid("CORE_MEMBER_DIGEST_MISMATCH"));
         }
         let mut hash = Sha256::new();
         let mut buffer = [0; 64 * 1024];
         loop {
-            let n = file.read(&mut buffer)?;
+            let n = install_io("CoreInstallReadMember", file.read(&mut buffer))?;
             if n == 0 {
                 break;
             }
@@ -322,10 +363,9 @@ fn pin_members(path: &Path, sid: &str) -> Result<Vec<File>> {
 }
 
 fn verify_receipt(path: &Path, id: Uuid, sid: &str) -> Result<()> {
-    let receipt: Receipt = store::decode(&store::read_protected(
-        &path.join("installation.json"),
-        sid,
-        4096,
+    let receipt: Receipt = store::decode(&install_store_io(
+        "CoreInstallReadReceipt",
+        store::read_protected(&path.join("installation.json"), sid, 4096),
     )?)?;
     if receipt.schema_version != 1
         || receipt.store_id != id
@@ -425,6 +465,43 @@ mod tests {
         assert!(!installer.core_is_installed().unwrap());
         drop(installer);
         assert!(Store::open(&root).is_ok());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires APP_PROXY_TEST_SING_BOX_ZIP; injects a file lock only in a temporary store"]
+    async fn official_bundle_publication_reports_native_file_lock_operation() {
+        let archive = fs::read(
+            std::env::var_os("APP_PROXY_TEST_SING_BOX_ZIP").expect("official fixture archive"),
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::create(&temp.path().join("store")).unwrap();
+        let installer = store.core_installation().unwrap();
+        let mut stage = installer.prepare_core_install(&archive).unwrap();
+        stage.validate().await.unwrap();
+        let path = stage.path.clone();
+        let lock = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path.join(".check.json"))
+            .unwrap();
+        let error = installer.publish_core_install(stage).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::Windows {
+                    operation: "CoreInstallRemoveCheck",
+                    code: 32
+                }
+            ),
+            "{error:?}"
+        );
+        drop(lock);
+        assert!(!installer.core_is_installed().unwrap());
+        let mut retry = installer.prepare_core_install(&archive).unwrap();
+        retry.validate().await.unwrap();
+        installer.publish_core_install(retry).unwrap();
+        assert!(installer.core_is_installed().unwrap());
     }
 
     #[tokio::test]

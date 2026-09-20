@@ -1,24 +1,94 @@
 //! Download only after explicit installation intent. Network, extraction and
 //! hashes run outside the configuration gate. No application is ever launched.
 use crate::configuration::Configuration;
-use app_proxy_core::core_control::{InstallPhase, InstallProgress};
+use app_proxy_core::core_control::{CoreOutcome, InstallPhase, InstallProgress};
 use app_proxy_windows::{Error, Result, singbox_install};
 use std::{
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
 
 pub(crate) struct CoreInstaller {
     configuration: Arc<Configuration>,
     generation: AtomicU64,
-    attempt: Mutex<Option<std::result::Result<(), &'static str>>>,
+    attempt: Mutex<Option<std::result::Result<(), InstallFailure>>>,
     progress: std::sync::Mutex<InstallProgress>,
     #[cfg(test)]
     pub(crate) test_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+}
+
+/// Safe diagnostics only: never retain OS message text, command lines or URLs.
+#[derive(Clone, Debug)]
+pub(crate) struct InstallFailure {
+    code: &'static str,
+    phase: InstallPhase,
+    operation: &'static str,
+    win32: Option<u32>,
+    io_kind: Option<std::io::ErrorKind>,
+    downloaded: usize,
+    elapsed_ms: u128,
+}
+
+impl InstallFailure {
+    fn capture(error: Error, progress: InstallProgress, elapsed: Duration) -> Self {
+        let (code, operation, win32, io_kind) = match error {
+            Error::Invalid(code) => (code, "validation", None, None),
+            Error::Windows { operation, code } => (
+                "CORE_INSTALL_IO_FAILED",
+                operation,
+                Some(code),
+                Some(std::io::Error::from_raw_os_error(code as i32).kind()),
+            ),
+            Error::Io(error) => (
+                "CORE_INSTALL_IO_FAILED",
+                "filesystem",
+                error.raw_os_error().map(|c| c as u32),
+                Some(error.kind()),
+            ),
+            _ => ("CORE_INSTALL_IO_FAILED", "internal", None, None),
+        };
+        Self {
+            code,
+            phase: progress.phase,
+            operation,
+            win32,
+            io_kind,
+            downloaded: progress.downloaded,
+            elapsed_ms: elapsed.as_millis(),
+        }
+    }
+
+    pub(crate) fn outcome(self) -> CoreOutcome {
+        let phase = match self.phase {
+            InstallPhase::CheckingExisting => "checking_existing",
+            InstallPhase::Downloading => "downloading",
+            InstallPhase::Verifying => "verifying",
+            InstallPhase::CheckingBinary => "checking_binary",
+            InstallPhase::Publishing => "publishing",
+        };
+        let code = format!(
+            "{}; phase={phase}; operation={}; win32={}; io_kind={}; downloaded_bytes={}; elapsed_ms={}",
+            self.code,
+            self.operation,
+            self.win32
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "none".into()),
+            self.io_kind
+                .map(|kind| format!("{kind:?}"))
+                .unwrap_or_else(|| "none".into()),
+            self.downloaded,
+            self.elapsed_ms
+        );
+        if self.code.contains("UNKNOWN") || self.code.contains("UNCONFIRMED") {
+            CoreOutcome::Indeterminate { code }
+        } else {
+            CoreOutcome::Failed { code }
+        }
+    }
 }
 
 impl CoreInstaller {
@@ -37,30 +107,31 @@ impl CoreInstaller {
         }
     }
 
-    pub async fn install(&self) -> Result<()> {
+    pub async fn install(&self) -> std::result::Result<(), InstallFailure> {
         self.run_attempt(self.perform()).await
     }
 
     async fn run_attempt(
         &self,
         operation: impl std::future::Future<Output = Result<()>>,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), InstallFailure> {
         let observed = self.generation.load(Ordering::SeqCst);
         let mut last = self.attempt.lock().await;
         // Concurrent callers share the attempt that ran while they waited,
         // including failures. A later explicit retry starts a new attempt.
         if observed != self.generation.load(Ordering::SeqCst) {
             return last
+                .as_ref()
                 .expect("completed installation attempt")
-                .map_err(Error::Invalid);
+                .clone();
         }
-        let result = operation.await.map_err(|error| match error {
-            Error::Invalid(code) => code,
-            _ => "CORE_INSTALL_IO_FAILED",
-        });
-        *last = Some(result);
+        let started = Instant::now();
+        let result = operation
+            .await
+            .map_err(|error| InstallFailure::capture(error, self.progress(), started.elapsed()));
+        *last = Some(result.clone());
         self.generation.fetch_add(1, Ordering::SeqCst);
-        result.map_err(Error::Invalid)
+        result
     }
 
     async fn perform(&self) -> Result<()> {
@@ -96,7 +167,10 @@ impl CoreInstaller {
     }
     fn phase(&self, phase: InstallPhase) {
         let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
-        if matches!(phase, InstallPhase::Downloading) {
+        if matches!(
+            phase,
+            InstallPhase::CheckingExisting | InstallPhase::Downloading
+        ) {
             progress.downloaded = 0;
         }
         progress.phase = phase;
@@ -190,6 +264,74 @@ mod tests {
     use app_proxy_windows::store::Store;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[test]
+    fn install_failure_diagnostics_survive_store_reopen_without_error_message_leaks() {
+        use app_proxy_core::core_control::CoreAction;
+        use app_proxy_windows::core_requests::CoreRequestPhase;
+        let progress = InstallProgress {
+            phase: InstallPhase::Publishing,
+            downloaded: singbox_install::ARCHIVE_SIZE,
+            total: singbox_install::ARCHIVE_SIZE,
+        };
+        let outcome = InstallFailure::capture(
+            Error::Windows {
+                operation: "CoreInstallRenameDirectory",
+                code: 32,
+            },
+            progress.clone(),
+            Duration::from_millis(1234),
+        )
+        .outcome();
+        let CoreOutcome::Failed { code } = &outcome else {
+            panic!("expected failure")
+        };
+        for detail in [
+            "CORE_INSTALL_IO_FAILED;",
+            "phase=publishing",
+            "operation=CoreInstallRenameDirectory",
+            "win32=32",
+            "downloaded_bytes=32841719",
+            "elapsed_ms=1234",
+        ] {
+            assert!(code.contains(detail), "{code}");
+        }
+        let expected = code.clone();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let mut store = Store::create(&root).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let epoch = uuid::Uuid::new_v4();
+        store
+            .begin_core_request(id, epoch, &CoreAction::Install {})
+            .unwrap();
+        store.finish_core_request(id, epoch, outcome).unwrap();
+        drop(store);
+        let store = Store::open(&root).unwrap();
+        assert!(
+            matches!(store.core_request_status(id).unwrap(), Some(CoreRequestPhase::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == expected)
+        );
+
+        let failure = InstallFailure::capture(
+            Error::Io(std::io::Error::other("secret-token-private-path")),
+            progress.clone(),
+            Duration::ZERO,
+        );
+        assert!(!format!("{failure:?}").contains("secret-token"));
+        let CoreOutcome::Failed { code } = failure.outcome() else {
+            panic!("expected failure")
+        };
+        assert!(!code.contains("secret-token"));
+        assert!(matches!(
+            InstallFailure::capture(
+                Error::Invalid("CORE_INSTALL_PUBLICATION_UNCONFIRMED"),
+                progress,
+                Duration::ZERO
+            )
+            .outcome(),
+            CoreOutcome::Indeterminate { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn download_body_requires_success_exact_length_and_bounded_streams() {
         for (wire, expected) in [
@@ -271,7 +413,7 @@ mod tests {
         while let Some(result) = tasks.join_next().await {
             assert!(matches!(
                 result.unwrap(),
-                Err(Error::Invalid("CORE_DOWNLOAD_FAILED"))
+                Err(failure) if failure.code == "CORE_DOWNLOAD_FAILED"
             ));
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
