@@ -134,6 +134,7 @@ impl Store {
         }
         if self.core_request_status(request.request_id)?.is_some()
             || self.config_request_status(request.request_id)?.is_some()
+            || self.shortcut_request_status(request.request_id)?.is_some()
         {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }

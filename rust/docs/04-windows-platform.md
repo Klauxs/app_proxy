@@ -104,7 +104,11 @@ ETW 所属记录固定保存在受保护 store 目录的 `events-<session>.json`
 
 通过 Shell Link COM 创建 `.lnk`，目标是安装中的固定 `app-proxy-host.exe`，参数为 launch + instance ID + store locator。名字采用可读实例名加短 ID；用户改名可更新显示，但数据 ID 和 target 不变。图标从实际 EXE 完整提取到持久 cache，按内容 hash 命名，必要时调用 SHChangeNotify。
 
-原生平台已实现内存编码/回读、同目录原子不覆盖发布，以及按文件身份、内容 hash 和目标参数核验后使用同一句柄删除。发布/删除期间固定输出目录链，拒绝重解析点、硬链接和额外启动标志；不调用 Resolve 或运行链接。[Shell Link 接口](https://learn.microsoft.com/en-us/windows/win32/shell/links)。调用方仍须在外部写入前记录 intent，并保存发布 receipt；该集成事务和菜单创建入口尚未接入。
+原生平台已实现内存编码/回读、同目录原子不覆盖发布，以及按文件身份、内容 hash 和目标参数核验后使用同一句柄删除。发布/删除期间固定输出目录链，拒绝重解析点、硬链接和额外启动标志；不调用 Resolve 或运行链接。[Shell Link 接口](https://learn.microsoft.com/en-us/windows/win32/shell/links)。
+
+Store 集成记录先保存意图，再准备不可直接启动的 `.app-proxy-stage-*.tmp`，持久化其 fileID/hash 后才通过同一已核验句柄改名为 `.lnk`，禁止覆盖迟到的占位文件。[FILE_RENAME_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info)。打开 store 和查询只读状态不恢复外部操作；显式重试同一请求时核对临时文件/目标和 manifest，保留用户修改、身份替换和未知结果。文件已发布而 manifest 尚未提交时合并最新配置，已完成请求仅重放历史回执。临时文件创建后、身份落盘前中断可能留下未知 `.tmp`，不按名字认领或清理。
+
+有效入口的归属记录持续保留，解除后的历史请求保留七天；新增前按所有活动记录的完整终态预留 8 MiB 内的空间，记录上限不阻止已有入口清理。接受意图前先恢复配置请求，同一实例尚有快捷方式或未决操作时拒绝删除实例。coordinator RPC、菜单创建/清理和真实桌面点击仍待接入，本平台 API 不接收来自生产客户端的自定义路径。
 
 host 的 `launch --notify` 已复用 CLI/menu 启动流程，来源为 Shortcut。正常成功不打开控制台；确定需要前台依赖操作后才打开中文窗口，展示影响/安装与返回选择。控制台标准句柄显式绑定 CONIN$/CONOUT$，离开时恢复原句柄；分配后、首个提示前同步注册 Ctrl+C，因为 [AllocConsole 会重置控制处理器](https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler)。失败和未知结果显示系统消息框，含已有请求编号及数据目录；不通过关闭窗口推断已接受操作已撤销。无 notify 不弹窗、不执行交互安装。先只读验证 store 归属，丢失/损坏数据目录不会被静默重建。
 

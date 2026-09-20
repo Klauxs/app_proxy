@@ -28,6 +28,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 const LIMIT: usize = 1024 * 1024;
 pub mod icons;
+pub mod journal;
+pub mod staging;
 const TRACKING_DISABLED: u32 = (SLDF_FORCE_NO_LINKTRACK.0
     | SLDF_DISABLE_LINK_PATH_TRACKING.0
     | SLDF_DISABLE_KNOWNFOLDER_RELATIVE_TRACKING.0
@@ -253,11 +255,28 @@ pub fn verify(path: &Path, spec: &Spec, receipt: &Receipt) -> Result<()> {
     verify_bytes(spec, receipt, &actual, &bytes)
 }
 
+/// Missing is meaningful only after the entire parent chain was verified and
+/// pinned. An inaccessible/moved parent is uncertainty, not a deleted shortcut.
+fn present(path: &Path, spec: &Spec, receipt: &Receipt) -> Result<bool> {
+    let _parents = parent(path)?;
+    match read_pinned(path, false) {
+        Ok((_file, actual, bytes)) => {
+            verify_bytes(spec, receipt, &actual, &bytes)?;
+            Ok(true)
+        }
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Mark precisely the verified file for deletion; never delete through a new
 /// path lookup. Caller keeps its journal until this returns confirmed success.
 pub fn remove(path: &Path, spec: &Spec, receipt: &Receipt) -> Result<()> {
     identity::assert_ordinary_user()?;
     let _directory = parent(path)?;
+    remove_verified(path, spec, receipt)
+}
+fn remove_verified(path: &Path, spec: &Spec, receipt: &Receipt) -> Result<()> {
     let (file, actual, bytes) = read_pinned(path, true)?;
     verify_bytes(spec, receipt, &actual, &bytes)?;
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };

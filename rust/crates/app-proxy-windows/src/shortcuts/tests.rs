@@ -1,7 +1,7 @@
 use super::*;
 use std::os::windows::process::CommandExt;
 
-fn setup() -> (tempfile::TempDir, Spec, PathBuf) {
+pub(super) fn setup() -> (tempfile::TempDir, Spec, PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("数据 store");
     std::fs::create_dir(&home).unwrap();

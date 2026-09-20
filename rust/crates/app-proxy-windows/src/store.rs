@@ -221,6 +221,7 @@ impl Store {
             .checked_add(1)
             .ok_or(Error::Invalid("REVISION_EXHAUSTED"))?;
         self.validate(&manifest)?;
+        self.ensure_shortcut_instances(&manifest)?;
         let bytes = encode(&manifest, MANIFEST_LIMIT)?;
         // Backup replacement completes before touching the authoritative snapshot.
         self.replace(

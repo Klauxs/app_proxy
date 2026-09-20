@@ -75,6 +75,7 @@ impl Store {
         }
         if self.core_request_status(request.request_id)?.is_some()
             || self.launch_request(request.request_id)?.is_some()
+            || self.shortcut_request_status(request.request_id)?.is_some()
         {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }
@@ -103,6 +104,7 @@ impl Store {
     ) -> Result<ConfigOutcome> {
         if self.core_request_status(request.request_id)?.is_some()
             || self.launch_request(request.request_id)?.is_some()
+            || self.shortcut_request_status(request.request_id)?.is_some()
         {
             return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
         }
@@ -140,8 +142,9 @@ impl Store {
                 // Ensure the complete snapshot fits and all referenced secrets exist
                 // before a pending record can authorize changing the manifest.
                 store::encode(&target, MANIFEST_LIMIT)?;
-                let rejection =
-                    rejection.or(self.profile_edit_rejection(&request.action, &target)?);
+                let rejection = rejection
+                    .or(self.profile_edit_rejection(&request.action, &target)?)
+                    .or(self.shortcut_edit_rejection(&request.action)?);
                 if rejection.is_none() {
                     self.stage_proxy_secret(request)?;
                 }
@@ -512,6 +515,69 @@ mod tests {
         };
         assert_eq!(receipt.revision, revision);
         receipt.entity_id
+    }
+
+    #[test]
+    fn pending_instance_removal_finishes_before_shortcut_can_reserve_it() {
+        use crate::shortcuts::{
+            Spec,
+            journal::{Action, Plan, Request},
+        };
+        use app_proxy_core::model::*;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let mut store = Store::create(&root).unwrap();
+        let app = applied(store.apply_config(&add(1)).unwrap(), 2);
+        let instance_id = Uuid::new_v4();
+        let create = ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 2,
+            action: ConfigAction::CreateInstance {
+                instance: registry::NewInstance {
+                    id: instance_id,
+                    application_id: app,
+                    name: "fixture".into(),
+                    data: registry::NewData::Original {},
+                    network: NetworkBinding::Direct {},
+                    guard: None,
+                    args: vec![],
+                    env: SavedEnvironment::default(),
+                    cwd: WorkingDirectory::Application {},
+                },
+            },
+        };
+        applied(store.apply_config(&create).unwrap(), 3);
+        let remove = ConfigRequest {
+            request_id: Uuid::new_v4(),
+            expected_revision: 3,
+            action: ConfigAction::RemoveInstance { instance_id },
+        };
+        stage(&store, &remove);
+        let request = Request {
+            id: Uuid::new_v4(),
+            instance_id,
+            expected_revision: 3,
+            action: Action::Create,
+        };
+        let path = temp.path().join("entry.lnk");
+        let plan = Plan {
+            path: path.clone(),
+            spec: Spec {
+                store_id: store.load().unwrap().store_id,
+                instance_id,
+                home: root,
+                host: temp.path().join("app-proxy-host.exe"),
+                icon: temp.path().join("icon.ico"),
+            },
+        };
+        assert!(matches!(
+            store.apply_shortcut(&request, Some(plan)),
+            Err(Error::Invalid("STALE_MANIFEST_REVISION"))
+        ));
+        assert!(store.load().unwrap().instances.is_empty());
+        assert_eq!(store.load().unwrap().revision, 4);
+        assert!(store.shortcut_request_status(request.id).unwrap().is_none());
+        assert!(!path.exists());
     }
 
     fn add_proxy() -> ConfigRequest {
