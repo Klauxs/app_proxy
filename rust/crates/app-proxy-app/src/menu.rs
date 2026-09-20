@@ -486,6 +486,7 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
             "启用或修复保护",
             "关闭保护",
             "移除登记（保留数据）",
+            "桌面快捷方式",
         ],
         None,
         foreground,
@@ -632,7 +633,54 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
             println!("登记已移除，数据已保留。");
             Ok(())
         }
+        8 => manage_shortcut(root, id, foreground).await,
         _ => unreachable!(),
+    }
+}
+
+async fn manage_shortcut(
+    root: &Path,
+    id: Uuid,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    use app_proxy_windows::shortcuts::journal::{Action, Status};
+    let view = coordinator::shortcut_status(root.into(), id)
+        .await
+        .map_err(|e| fail(3, e.to_string()))?;
+    crate::shortcut_cli::print_registration(&view);
+    match view.integration {
+        None => {
+            confirm("在当前用户桌面创建此实例的快捷方式？", foreground).await?;
+            crate::shortcut_cli::change(root, id, view.revision, Action::Create, None, foreground)
+                .await
+        }
+        Some(entry) => {
+            if let Status::Pending { action, .. } = entry.status {
+                let options = if action == Action::Create {
+                    vec!["继续原创建请求", "取消此创建并清理已创建的入口"]
+                } else {
+                    vec!["继续原删除请求"]
+                };
+                let choice = fixed("未完成的快捷方式操作", &options, None, foreground)
+                    .await?
+                    .ok_or_else(returned)?;
+                if choice == 0 {
+                    return crate::shortcut_cli::resume(root, entry.request.id, foreground).await;
+                }
+                confirm("取消刚显示的创建请求？用户修改过的文件会保留。", foreground).await?;
+            } else {
+                confirm("移除此实例的桌面入口？保留应用及数据。", foreground).await?;
+            }
+            crate::shortcut_cli::change(
+                root,
+                id,
+                view.revision,
+                Action::Remove,
+                Some(entry.request.id),
+                foreground,
+            )
+            .await
+        }
     }
 }
 

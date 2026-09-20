@@ -20,7 +20,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
 const PROTOCOL_MAJOR: u32 = 2;
-const PROTOCOL_MINOR: u32 = 15;
+const PROTOCOL_MINOR: u32 = 16;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -56,6 +56,18 @@ struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    ShortcutApply {
+        request: app_proxy_windows::shortcuts::journal::Request,
+    },
+    ShortcutResume {
+        request_id: Uuid,
+    },
+    ShortcutRequest {
+        request_id: Uuid,
+    },
+    ShortcutStatus {
+        instance_id: Uuid,
+    },
     RuntimeStatus {
         instance_id: Uuid,
     },
@@ -127,6 +139,12 @@ struct Response {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
+    ShortcutRequest {
+        status: Option<app_proxy_windows::shortcuts::journal::Status>,
+    },
+    ShortcutStatus {
+        status: crate::shortcuts::InstanceStatus,
+    },
     RuntimeStatus {
         status: Box<crate::launch_engine::RuntimeStatus>,
     },
@@ -170,6 +188,8 @@ enum Reply {
 }
 
 struct Shared {
+    root: PathBuf,
+    shortcut_jobs: Arc<tokio::sync::Semaphore>,
     identity: Status,
     configuration: Arc<Configuration>,
     core: CoreControl,
@@ -188,7 +208,7 @@ impl Shared {
         let resources = app_proxy_windows::instance_resource::ResourceRegistry::for_test_at(
             &root.join("test-resources"),
         )?;
-        let core = CoreControl::new(root, configuration.clone(), identity.epoch);
+        let core = CoreControl::new(root.clone(), configuration.clone(), identity.epoch);
         #[cfg(not(test))]
         let launch = crate::launch_engine::LaunchEngine::new(
             configuration.clone(),
@@ -203,6 +223,8 @@ impl Shared {
             resources,
         )?;
         Ok(Self {
+            root,
+            shortcut_jobs: Arc::new(tokio::sync::Semaphore::new(1)),
             subscription: crate::subscription_preview::PreviewService::new(
                 configuration.clone(),
                 core.manager(),
@@ -247,6 +269,30 @@ impl Shared {
     }
     fn execute(&self, request: Request) -> Result<Reply> {
         match request.operation {
+            Operation::ShortcutApply { request: shortcut } => {
+                if request.request_id != shortcut.id {
+                    return Err(Error::Invalid("INVALID_SHORTCUT_REQUEST"));
+                }
+                Ok(Reply::ShortcutRequest {
+                    status: Some(crate::shortcuts::apply(
+                        &self.configuration,
+                        &self.root,
+                        &shortcut,
+                    )?),
+                })
+            }
+            Operation::ShortcutResume { request_id } => Ok(Reply::ShortcutRequest {
+                status: Some(self.configuration.lock()?.resume_shortcut(request_id)?),
+            }),
+            Operation::ShortcutRequest { request_id } => Ok(Reply::ShortcutRequest {
+                status: self
+                    .configuration
+                    .lock()?
+                    .shortcut_request_status(request_id)?,
+            }),
+            Operation::ShortcutStatus { instance_id } => Ok(Reply::ShortcutStatus {
+                status: crate::shortcuts::status(&self.configuration, instance_id)?,
+            }),
             Operation::SubscriptionNodes {
                 profile_id,
                 offset,
@@ -496,6 +542,17 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
+    if shortcut_operation(&request.operation) && client_minor < 16 {
+        return connection
+            .send(&Response {
+                request_id,
+                epoch,
+                result: Reply::Error {
+                    code: "SHORTCUT_PROTOCOL_UPDATE_REQUIRED".into(),
+                },
+            })
+            .await;
+    }
     if matches!(&request.operation, Operation::SubscriptionNodes { .. }) && client_minor < 14 {
         return connection
             .send(&Response {
@@ -697,9 +754,33 @@ async fn handle(
     }
     // Do not cancel accepted work when the client disconnects. The handler stays
     // registered until blocking preparation/commit completes, preventing idle exit.
-    let result = tokio::task::spawn_blocking(move || shared.execute(request))
-        .await
-        .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?;
+    let shortcut_permit = if matches!(
+        &request.operation,
+        Operation::ShortcutApply { .. } | Operation::ShortcutResume { .. }
+    ) {
+        match shared.shortcut_jobs.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return connection
+                    .send(&Response {
+                        request_id,
+                        epoch,
+                        result: Reply::Error {
+                            code: "SHORTCUT_OPERATION_BUSY".into(),
+                        },
+                    })
+                    .await;
+            }
+        }
+    } else {
+        None
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = shortcut_permit;
+        shared.execute(request)
+    })
+    .await
+    .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?;
     connection
         .send(&Response {
             request_id,
@@ -780,6 +861,9 @@ async fn rpc(
     if matches!(&request.operation, Operation::RuntimeStatus { .. }) && server.protocol_minor < 15 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
+    if shortcut_operation(&request.operation) && server.protocol_minor < 16 {
+        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
+    }
     if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 10 {
         return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
     }
@@ -813,6 +897,23 @@ async fn rpc(
     }
     if let Reply::Error { code } = &response.result {
         return Err(Error::Invalid(match code.as_str() {
+            "INVALID_SHORTCUT_REQUEST" => "INVALID_SHORTCUT_REQUEST",
+            "SHORTCUT_OPERATION_BUSY" => "SHORTCUT_OPERATION_BUSY",
+            "SHORTCUT_ALREADY_REGISTERED" => "SHORTCUT_ALREADY_REGISTERED",
+            "SHORTCUT_REGISTRATION_CHANGED" => "SHORTCUT_REGISTRATION_CHANGED",
+            "SHORTCUT_OWNERSHIP_UNAVAILABLE" => "SHORTCUT_OWNERSHIP_UNAVAILABLE",
+            "SHORTCUT_OPERATION_PENDING" => "SHORTCUT_OPERATION_PENDING",
+            "SHORTCUT_REMOVAL_PENDING" => "SHORTCUT_REMOVAL_PENDING",
+            "SHORTCUT_REQUEST_NOT_FOUND" => "SHORTCUT_REQUEST_NOT_FOUND",
+            "SHORTCUT_PATH_OCCUPIED" => "SHORTCUT_PATH_OCCUPIED",
+            "SHORTCUT_CHANGED" => "SHORTCUT_CHANGED",
+            "SHORTCUT_METADATA_CONFLICT" => "SHORTCUT_METADATA_CONFLICT",
+            "SHORTCUT_LOCATIONS_CONFLICT" => "SHORTCUT_LOCATIONS_CONFLICT",
+            "SHORTCUT_JOURNAL_INVALID" => "SHORTCUT_JOURNAL_INVALID",
+            "SHORTCUT_JOURNAL_REVISION_INVALID" => "SHORTCUT_JOURNAL_REVISION_INVALID",
+            "SHORTCUT_RECORD_LIMIT" => "SHORTCUT_RECORD_LIMIT",
+            "ICON_GROUP_MISSING" => "ICON_GROUP_MISSING",
+            "ICON_CACHE_CONFLICT" => "ICON_CACHE_CONFLICT",
             "REQUEST_ID_CONFLICT" => "REQUEST_ID_CONFLICT",
             "INVALID_REQUEST_ID" => "INVALID_REQUEST_ID",
             "CONFIG_REQUEST_PENDING" => "CONFIG_REQUEST_PENDING",
@@ -858,6 +959,79 @@ pub async fn configure(root: PathBuf, request: ConfigRequest) -> Result<ConfigOu
     };
     match client_operation(root, request.request_id, operation).await? {
         Reply::Configured { outcome } => Ok(outcome),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+
+fn shortcut_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::ShortcutApply { .. }
+            | Operation::ShortcutResume { .. }
+            | Operation::ShortcutRequest { .. }
+            | Operation::ShortcutStatus { .. }
+    )
+}
+
+pub async fn shortcut_apply(
+    root: PathBuf,
+    request: app_proxy_windows::shortcuts::journal::Request,
+) -> Result<app_proxy_windows::shortcuts::journal::Status> {
+    store::describe(&root)?;
+    match client_operation(root, request.id, Operation::ShortcutApply { request }).await? {
+        Reply::ShortcutRequest {
+            status: Some(status),
+        } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn shortcut_resume(
+    root: PathBuf,
+    request_id: Uuid,
+) -> Result<app_proxy_windows::shortcuts::journal::Status> {
+    store::describe(&root)?;
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::ShortcutResume { request_id },
+    )
+    .await?
+    {
+        Reply::ShortcutRequest {
+            status: Some(status),
+        } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn shortcut_request(
+    root: PathBuf,
+    request_id: Uuid,
+) -> Result<Option<app_proxy_windows::shortcuts::journal::Status>> {
+    store::describe(&root)?;
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::ShortcutRequest { request_id },
+    )
+    .await?
+    {
+        Reply::ShortcutRequest { status } => Ok(status),
+        _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
+    }
+}
+pub async fn shortcut_status(
+    root: PathBuf,
+    instance_id: Uuid,
+) -> Result<crate::shortcuts::InstanceStatus> {
+    store::describe(&root)?;
+    match client_operation(
+        root,
+        Uuid::new_v4(),
+        Operation::ShortcutStatus { instance_id },
+    )
+    .await?
+    {
+        Reply::ShortcutStatus { status } if status.instance_id == instance_id => Ok(status),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
 }

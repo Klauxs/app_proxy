@@ -170,7 +170,12 @@ pub fn cache(store: &Store, executable: &Path) -> Result<PathBuf> {
     let bytes = extract(executable)?;
     cache_bytes(store, &bytes)
 }
-fn cache_bytes(store: &Store, bytes: &[u8]) -> Result<PathBuf> {
+/// Cache the bounded result of extract, allowing resource loading outside the
+/// coordinator's commit gate. This is not a client-supplied upload endpoint.
+pub fn cache_bytes(store: &Store, bytes: &[u8]) -> Result<PathBuf> {
+    if bytes.is_empty() || bytes.len() > ICON_LIMIT {
+        return Err(Error::Invalid("ICON_SIZE_INVALID"));
+    }
     let sid = store.load()?.owner_sid;
     // A flat namespace under existing protected state avoids a separate directory
     // creation transaction. The content hash makes package updates independent.

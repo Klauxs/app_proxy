@@ -558,6 +558,7 @@ mod tests {
             instance_id,
             expected_revision: 3,
             action: Action::Create,
+            expected_creation: None,
         };
         let path = temp.path().join("entry.lnk");
         let plan = Plan {

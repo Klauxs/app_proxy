@@ -14,6 +14,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 管理桌面快捷方式及中断操作
+    Shortcut {
+        #[command(subcommand)]
+        command: app_proxy_app::shortcut_cli::Command,
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// 打开中文交互菜单
     Menu,
     /// 启动已登记实例，或查询/取消原启动请求
@@ -119,6 +126,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     identity::assert_ordinary_user()?;
     let cli = Cli::parse();
     match cli.command.unwrap_or(Commands::Menu) {
+        Commands::Shortcut { command, json } => {
+            let root = cli
+                .home
+                .map(Ok)
+                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            runtime.block_on(app_proxy_app::shortcut_cli::run(root, command, json))?;
+            Ok(())
+        }
         Commands::Menu => {
             let root = cli
                 .home

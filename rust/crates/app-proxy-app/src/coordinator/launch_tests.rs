@@ -2,6 +2,290 @@ use super::*;
 use app_proxy_core::{launch::LaunchPhase, model::*};
 
 #[tokio::test]
+async fn shortcut_protocol_requires_minor_sixteen_in_both_directions() {
+    let fixture = Fixture::new();
+    let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();
+    let identity = fixture.shared.identity.clone();
+    let old_server = tokio::spawn(async move {
+        let mut connection = listener.accept().await.unwrap();
+        connection.receive::<Hello>().await.unwrap();
+        let mut greeting = hello(identity.store_id, identity.session_id, Some(identity.epoch));
+        greeting.protocol_minor = 15;
+        connection
+            .send(&Welcome::Ready { hello: greeting })
+            .await
+            .unwrap();
+        assert!(connection.receive::<Request>().await.is_err());
+    });
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::ShortcutStatus {
+                    instance_id: fixture.instance
+                }
+            )
+            .await,
+        Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"))
+    ));
+    old_server.await.unwrap();
+    let server = fixture.server();
+    for operation in [
+        Operation::ShortcutStatus {
+            instance_id: fixture.instance,
+        },
+        Operation::ShortcutRequest {
+            request_id: Uuid::new_v4(),
+        },
+        Operation::ShortcutResume {
+            request_id: Uuid::new_v4(),
+        },
+        Operation::ShortcutApply {
+            request: app_proxy_windows::shortcuts::journal::Request {
+                id: Uuid::new_v4(),
+                instance_id: fixture.instance,
+                expected_revision: 2,
+                action: app_proxy_windows::shortcuts::journal::Action::Create,
+                expected_creation: None,
+            },
+        },
+    ] {
+        let policy = policy();
+        let mut connection = ipc::connect(
+            fixture.shared.identity.store_id,
+            &policy,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let mut greeting = hello(fixture.shared.identity.store_id, policy.session_id, None);
+        greeting.protocol_minor = 15;
+        connection.send(&greeting).await.unwrap();
+        connection.receive::<Welcome>().await.unwrap();
+        connection
+            .send(&Request {
+                protocol_major: PROTOCOL_MAJOR,
+                request_id: Uuid::new_v4(),
+                operation,
+            })
+            .await
+            .unwrap();
+        let response: Response = connection.receive().await.unwrap();
+        assert!(
+            matches!(response.result, Reply::Error { code } if code == "SHORTCUT_PROTOCOL_UPDATE_REQUIRED")
+        );
+    }
+    server.await.unwrap().unwrap();
+    assert_eq!(fixture.shared.configuration.snapshot().unwrap().revision, 2);
+}
+
+#[tokio::test]
+async fn shortcut_busy_worker_rejects_extra_mutations_and_leaves_queries_available() {
+    let fixture = Fixture::new();
+    let held = fixture
+        .shared
+        .shortcut_jobs
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let server = fixture.server();
+    let mut clients = tokio::task::JoinSet::new();
+    for _ in 0..MAX_CLIENTS * 2 {
+        let store_id = fixture.shared.identity.store_id;
+        clients.spawn(async move {
+            rpc(
+                store_id,
+                &policy(),
+                Duration::from_secs(3),
+                Request {
+                    protocol_major: PROTOCOL_MAJOR,
+                    request_id: Uuid::new_v4(),
+                    operation: Operation::ShortcutResume {
+                        request_id: Uuid::new_v4(),
+                    },
+                },
+            )
+            .await
+        });
+    }
+    while let Some(result) = clients.join_next().await {
+        assert!(matches!(
+            result.unwrap(),
+            Err(Error::Invalid("SHORTCUT_OPERATION_BUSY"))
+        ));
+    }
+    assert!(
+        matches!(fixture.rpc(Uuid::new_v4(), Operation::ShortcutStatus { instance_id: fixture.instance }).await.unwrap(), Reply::ShortcutStatus { status } if status.integration.is_none())
+    );
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::ShortcutRequest {
+                    request_id: Uuid::new_v4()
+                }
+            )
+            .await
+            .unwrap(),
+        Reply::ShortcutRequest { status: None }
+    ));
+    assert!(matches!(
+        fixture
+            .rpc(Uuid::new_v4(), Operation::Status {})
+            .await
+            .unwrap(),
+        Reply::Status { .. }
+    ));
+    drop(held);
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn shortcut_resume_survives_reply_loss_and_removal_uses_durable_registration() {
+    use app_proxy_windows::shortcuts::{
+        Spec,
+        journal::{Action, Plan, Request as ShortcutRequest, Status as ShortcutStatus},
+    };
+    use std::os::windows::fs::OpenOptionsExt;
+    let fixture = Fixture::new();
+    let create = ShortcutRequest {
+        id: Uuid::new_v4(),
+        instance_id: fixture.instance,
+        expected_revision: 2,
+        action: Action::Create,
+        expected_creation: None,
+    };
+    let path = fixture.root.path().join("fixture.lnk");
+    let pinned = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(fixture.shared.root.join("manifest.json"))
+        .unwrap();
+    assert!(
+        fixture
+            .shared
+            .configuration
+            .lock()
+            .unwrap()
+            .apply_shortcut(
+                &create,
+                Some(Plan {
+                    path: path.clone(),
+                    spec: Spec {
+                        store_id: fixture.shared.identity.store_id,
+                        instance_id: fixture.instance,
+                        home: fixture.shared.root.clone(),
+                        host: fixture.root.path().join("app-proxy-host.exe"),
+                        icon: fixture.root.path().join("fixture.ico"),
+                    }
+                })
+            )
+            .is_err()
+    );
+    drop(pinned);
+    let server = fixture.server();
+    assert!(matches!(
+        fixture
+            .rpc(
+                Uuid::new_v4(),
+                Operation::ShortcutRequest {
+                    request_id: create.id
+                }
+            )
+            .await
+            .unwrap(),
+        Reply::ShortcutRequest {
+            status: Some(ShortcutStatus::Pending { .. })
+        }
+    ));
+    assert_eq!(fixture.shared.configuration.snapshot().unwrap().revision, 2);
+    let policy = policy();
+    let mut connection = ipc::connect(
+        fixture.shared.identity.store_id,
+        &policy,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    connection
+        .send(&hello(
+            fixture.shared.identity.store_id,
+            policy.session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    connection.receive::<Welcome>().await.unwrap();
+    connection
+        .send(&Request {
+            protocol_major: PROTOCOL_MAJOR,
+            request_id: Uuid::new_v4(),
+            operation: Operation::ShortcutResume {
+                request_id: create.id,
+            },
+        })
+        .await
+        .unwrap();
+    drop(connection);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                fixture
+                    .shared
+                    .configuration
+                    .lock()
+                    .unwrap()
+                    .shortcut_request_status(create.id)
+                    .unwrap(),
+                Some(ShortcutStatus::Created { .. })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let replay = fixture
+        .rpc(
+            create.id,
+            Operation::ShortcutApply {
+                request: create.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay,
+        Reply::ShortcutRequest {
+            status: Some(ShortcutStatus::Created { revision: 3, .. })
+        }
+    ));
+    let remove = ShortcutRequest {
+        id: Uuid::new_v4(),
+        expected_revision: 3,
+        action: Action::Remove,
+        expected_creation: Some(create.id),
+        ..create
+    };
+    assert!(matches!(
+        fixture
+            .rpc(remove.id, Operation::ShortcutApply { request: remove })
+            .await
+            .unwrap(),
+        Reply::ShortcutRequest {
+            status: Some(ShortcutStatus::Removed { revision: 4, .. })
+        }
+    ));
+    assert!(!path.exists());
+    assert!(
+        matches!(fixture.rpc(Uuid::new_v4(), Operation::ShortcutStatus { instance_id: fixture.instance }).await.unwrap(), Reply::ShortcutStatus { status } if status.integration.is_none())
+    );
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn runtime_status_requires_minor_fifteen_in_both_directions() {
     let fixture = Fixture::new();
     let mut listener = ipc::Listener::bind(fixture.shared.identity.store_id, policy()).unwrap();

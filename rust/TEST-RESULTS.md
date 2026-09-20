@@ -2,6 +2,18 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：快捷方式 coordinator、CLI 与菜单接入**
+
+新增 shortcut create/remove/status/request/resume 命令及“管理实例 → 桌面快捷方式”菜单。RPC 不接收目标/图标/桌面路径，程序从当前发行目录、KnownFolder 和实际 EXE 资源确定。安装/资源查询在配置锁外，回锁后先校验同 ID 完整请求再检查当前 revision，避免并发已完成请求被误报 stale。移除/恢复直接使用原 journal，原应用已卸载也不触发重新解析。只读实例状态优先返回待删除请求，历史 Created 不被宣称为当前文件可用性。
+
+IPC 2.16 双向门槛覆盖全部四种新操作；变更单槽许可由实际 blocking worker 保持至结束，额外变更立即返回 busy，查询连接仍可用。断线不取消已接受操作；CLI 丢失回应后只查询原 ID，不自动换号重试。Ctrl+C 两条等待路径均输出带原 ID 的 JSON/诊断，未查到记录不推断锁外准备已停止。生产 Remove 必须携带显示过的 expected_creation，同一锁内匹配原创建记录；即使先取消旧 pending 又在相同 revision 接受新 pending，也不能误删后者。完整终态容量投影包括该字段。
+
+新增 10 项默认测试：4 项服务（固定字段/图标路径、无安装重放和解除、锁外编辑/版本拒绝、同请求并发、待删除状态），3 项真实 IPC（双向版本拒绝、忙时保留查询、掉应答恢复与删除），1 项平台同 revision 创建归属 CAS，2 项跨进程 CLI（用户修改保留/原 ID 查询与恢复/历史重放、缺 store 不创建及拒绝任意路径参数）。独立审查复跑全部 10 项，通过。
+
+两项 ignored 原生验收显式通过：`native_desktop_cli_creates_exact_fixed_host_link_with_complete_icon` 用 System32/cmd.exe 只读图标资源，在实际 Desktop 创建 UUID fixture 链接；回读核验固定真实 host/参数、持久 ICO 与完整提取字节一致，CLI 解除后文件缺失且 manifest 无快捷方式。审查方独立复跑通过。`native_menu_creates_and_removes_desktop_shortcut` 真实 PTY 选择管理实例/桌面入口/确认创建，随后同菜单确认删除并退出；断言 revision 2→3→4、一个完成创建/删除记录及链接已缺失，通过。没有 Shell 点击，也没有启动 cmd 或用户应用；只终止测试自有且完整身份核验的 coordinator。提交前只读确认真实桌面没有本批 `AppProxy contract *.lnk` 残留。
+
+全量 workspace **409 项通过、0 失败、49 项顶层 ignored**，日志 `.tools/shortcut-service-final-tests.log`；clippy -D warnings、fmt/diff 通过。独立最终复审通过，提交主题 `feat(rust): connect desktop shortcuts to coordinator and menu`。真实 Shell 点击、入口升级修复及完整产品验收仍待完成。
+
 **2026-09-20：快捷方式持久归属与显式恢复平台**
 
 新增 protected `state/shortcuts.json` 保存创建意图、完整计划、临时文件身份/hash、创建和解除历史结果。非启动型临时文件准备后先记身份，再使用同一 READ|DELETE 句柄执行不覆盖改名；迟到的占位文件保留。打开 store 和查询不重放外部操作；显式同 ID 恢复核对目标、临时文件和最新配置。已完成创建重放不会在解除后重建链接；用户修改/替换或损坏记录保持原状并报告冲突。身份写入前中断遗留的未知 `.tmp` 保留，不实施按文件名清理。

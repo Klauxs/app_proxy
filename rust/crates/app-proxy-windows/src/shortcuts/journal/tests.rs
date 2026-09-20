@@ -38,6 +38,7 @@ fn fixture() -> (tempfile::TempDir, Store, Request, Plan) {
         instance_id: spec.instance_id,
         expected_revision,
         action: Action::Create,
+        expected_creation: None,
     };
     (temp, store, request, Plan { path, spec })
 }
@@ -61,6 +62,7 @@ fn removal(store: &Store, request: &Request) -> Request {
         instance_id: request.instance_id,
         expected_revision: store.load().unwrap().revision,
         action: Action::Remove,
+        expected_creation: None,
     }
 }
 
@@ -478,4 +480,32 @@ fn byte_capacity_is_reserved_before_acceptance_for_completion_and_cleanup() {
     let remove = removal(&store, &create);
     store.apply_shortcut(&remove, None).unwrap();
     assert!(!plan.path.exists());
+}
+
+#[test]
+fn removal_binds_displayed_creation_even_when_pending_operations_share_revision() {
+    let (_temp, mut store, first, plan) = fixture();
+    store.begin_shortcut(&first, Some(plan.clone())).unwrap();
+    let old_remove = Request {
+        expected_creation: Some(first.id),
+        ..removal(&store, &first)
+    };
+    let cancel = Request {
+        id: Uuid::new_v4(),
+        ..old_remove.clone()
+    };
+    store.apply_shortcut(&cancel, None).unwrap();
+    assert_eq!(store.load().unwrap().revision, 2);
+    let next = Request {
+        id: Uuid::new_v4(),
+        ..first
+    };
+    store.begin_shortcut(&next, Some(plan)).unwrap();
+    assert!(matches!(
+        store.apply_shortcut(&old_remove, None),
+        Err(Error::Invalid("SHORTCUT_REGISTRATION_CHANGED"))
+    ));
+    let (active, _) = store.instance_shortcut(next.instance_id).unwrap().unwrap();
+    assert_eq!(active.id, next.id);
+    store.resume_shortcut(next.id).unwrap();
 }

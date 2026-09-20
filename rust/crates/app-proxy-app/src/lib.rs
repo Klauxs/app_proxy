@@ -20,6 +20,8 @@ pub mod menu;
 pub mod probe;
 pub mod proxy_cli;
 pub mod proxy_health;
+pub mod shortcut_cli;
+pub mod shortcuts;
 mod subscription_cli;
 pub mod subscription_download;
 pub mod subscription_preview;

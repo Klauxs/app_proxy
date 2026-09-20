@@ -67,7 +67,9 @@ IFEO 解除注册成功并回读确认后才删除对应 host；解除失败则�
 
 客户端取消订阅事件不取消任务。配置编辑用 expected_revision；冲突响应携带当前 revision 和冲突实体 ID，不回显完整配置或秘密。程序启动参数等敏感 payload 不写 access log。
 
-当前 Rust coordinator 协议为 2.15。启动、启动请求查询及显式取消要求服务端 minor 至少为 7，带 expected_revision 的启动要求至少为 8，Guard 状态要求至少为 10。订阅协议扩展后的 Catalog 要求两端 minor 至少为 11；订阅 Refresh/Select 配置动作和 PrepareSubscription 要求两端至少为 12；下载预览及 stage 要求至少为 13；保存节点列表要求至少为 14；独立只读 RuntimeStatus 要求两端至少为 15。版本不足时不接纳对应请求。旧客户端不会收到无法解析的新协议枚举，旧服务端也不会被当作支持订阅编辑。新启动请求只包含已登记实例 ID、来源及可选版本条件，回执不含参数、环境值或凭据；接纳 ACK 不表示创建成功，客户端查询持久 attempt 阶段。订阅 CLI 和日常中文菜单已接入，菜单与 CLI 共用业务函数；独立运行状态已接入菜单列表和 instance inspect，配置、进程与保护证据分别展示；高级设置、快捷方式、维护入口仍按本章设计继续实现。
+当前 Rust coordinator 协议为 2.16。启动、启动请求查询及显式取消要求服务端 minor 至少为 7，带 expected_revision 的启动要求至少为 8，Guard 状态要求至少为 10。订阅协议扩展后的 Catalog 要求两端 minor 至少为 11；订阅 Refresh/Select 配置动作和 PrepareSubscription 要求两端至少为 12；下载预览及 stage 要求至少为 13；保存节点列表要求至少为 14；独立只读 RuntimeStatus 要求两端至少为 15；ShortcutApply/Resume/Request/Status 要求两端至少为 16。版本不足时不接纳对应请求。旧客户端不会收到无法解析的新协议枚举，旧服务端也不会被当作支持新操作。新启动请求只包含已登记实例 ID、来源及可选版本条件，回执不含参数、环境值或凭据；接纳 ACK 不表示创建成功，客户端查询持久 attempt 阶段。订阅、快捷方式 CLI 和日常中文菜单已接入，菜单与 CLI 共用业务函数；独立运行状态已接入菜单列表和 instance inspect，配置、进程与保护证据分别展示；高级设置、维护入口仍按本章设计继续实现。
+
+快捷方式 RPC 不接受可选文件位置或启动器参数。ShortcutApply 的外层请求 ID 与内层 ID 必须一致；Remove 还需 expected_creation，对显示的原创建进行原子核对。Status 返回当前登记及优先的待删除操作，Created 回执是历史证据，不证明文件现在仍在。Request 只读；Resume 使用原意图且不重做安装解析。断线/超时/Ctrl+C 不当作取消服务工作，JSON 未确认报告保留原 ID；没有记录也不推断锁外准备已经停止。实际工作单槽有界，忙时额外变更立即拒绝，状态连接仍可使用。
 
 **4. 事件及证据**
 

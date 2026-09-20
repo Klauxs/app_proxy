@@ -1,6 +1,6 @@
 **App Proxy Rust 版设计**
 
-状态：基础平台、配置/存储、认证管道、协调进程、实例配置、共享 sing-box 管理与启动 CLI 已实现。中文日常菜单已接入实例创建/管理/启动、手动代理、订阅及保护授权。启动流程支持缺失内核安装、共享代理扩容确认、查询与取消；MSIX 已接入包内 helper 和持久回执恢复。Codex/Claude 直连双分身已实测；账户与代理隔离、Guard/IFEO 完整链路、高级设置/快捷方式及完整验收仍待完成，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
+状态：基础平台、配置/存储、认证管道、协调进程、实例配置、共享 sing-box 管理与启动 CLI 已实现。中文日常菜单已接入实例创建/管理/启动、手动代理、订阅、保护授权及桌面快捷方式。启动流程支持缺失内核安装、共享代理扩容确认、查询与取消；MSIX 已接入包内 helper 和持久回执恢复。Codex/Claude 直连双分身已实测；账户与代理隔离、Guard/IFEO 完整链路、高级设置、入口维护及完整验收仍待完成，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
 
 **构建与验证**
 
@@ -20,7 +20,7 @@ cargo fmt --all -- --check
 
 本机 Rust 安装在项目 `.tools` 内，未修改系统 PATH；可使用 `./scripts/cargo.ps1 build --workspace --locked`。传递 Cargo 的 `-p` 或 `--` 等参数时用数组，避免 PowerShell 参数绑定冲突，例如 `./scripts/cargo.ps1 -CargoArgs @('clippy','--workspace','--all-targets','--locked','--','-D','warnings')`。
 
-`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑和应用启动均有持久请求记录，支持去重与查询。开发版 IPC 为 2.15，CLI 与 host 必须成套使用。
+`status` 首次运行在 `%LOCALAPPDATA%\AppProxyRust` 创建独立 Rust 数据目录，之后连接或启动同一 store 的普通权限协调进程。可用 `--home <绝对路径>` 指定开发测试目录；已有非空未知目录或坏配置不会被重置。当前返回基础状态和实体数量，`phase` 为 `bootstrap`，不代表代理或 Guard 已运行。没有资源和已开启 Guard 的配置时，协调进程在最后一个请求结束后空闲 30 秒退出。配置编辑和应用启动均有持久请求记录，支持去重与查询。开发版 IPC 为 2.16，CLI 与 host 必须成套使用。
 
 无参数运行 `app-proxy.exe` 或执行 `app-proxy.exe menu` 打开中文菜单，需要交互终端；输入被重定向时会提示使用 CLI，且不创建数据目录。实例默认原版，网络须明确选择。选择代理后先验证健康，缺 sing-box 时现场提示安装或返回，安装路径自动选择；返回保留已保存的代理。实例保存后再处理保护和启动，返回不会撤销已保存实例。更改配置使用摘要版本核验，其他客户端修改后要求重新选择。Codex/Claude 代理分身默认开启 Guard，不继承被复制实例的关闭状态；只登记分身时不接管原版。实例列表在 Guard 无进程证据时补充独立只读查询，关闭 Guard 的实例也可显示运行状态。`instance inspect <实例ID> [--json]` 展示进程身份、会话启动时的网络与当前配置关系，以及 Guard/监听/IFEO 状态。查询不接管或关闭外部进程，不创建数据；身份不明、繁忙或超时保留“未确认”。进程存活不表示代理可用或应用实际流量已验证。
 
@@ -51,7 +51,19 @@ cargo fmt --all -- --check
 
 相同请求编号查询历史结果，不重复安装或创建应用；结果不明时保留编号，使用 `launch inspect` 查询。Ctrl+C 请求取消尚未创建的应用，并阻止当前流程的后续动作；已创建的应用会保留。已接受的内核切换仍需按其原请求编号查询结果。MSIX 通过一次性包内 helper 创建并保存回执；隔离存储包的请求位于自有 LocalState 命名空间。桥接退出不代表应用已创建，消费中或回执缺失保持未知。当前已验证普通 EXE 夹具、真实 Claude 过期 helper 回执，以及 Claude/Codex 各两个直连分身并存和独立目录写入；Codex 原版共存及重复启动复用通过。登录与代理隔离仍待验收；Guard 完整提权链路及 IFEO 仍待验证或实现，启动成功不代表保护生效。
 
-快捷方式目标入口 `app-proxy-host.exe launch <实例ID> --home <数据目录> --notify` 已接入同一启动流程：正常成功保持隐藏，需要安装内核或确认共享代理变更时打开中文前台窗口；选择返回不继续启动。失败/未知结果用系统消息框保留诊断、原启动/代理操作编号和数据目录。缺失的数据目录不会自动重建；没有 `--notify` 时只返回退出码和错误，不弹窗口或自动安装。链接创建/删除的持久所有权与显式恢复平台已实现；coordinator 和菜单创建入口仍待接入，目前还不能在菜单中创建快捷方式。
+快捷方式目标入口 `app-proxy-host.exe launch <实例ID> --home <数据目录> --notify` 已接入同一启动流程：正常成功保持隐藏，需要安装内核或确认共享代理变更时打开中文前台窗口；选择返回不继续启动。失败/未知结果用系统消息框保留诊断、原启动/代理操作编号和数据目录。缺失的数据目录不会自动重建；没有 `--notify` 时只返回退出码和错误，不弹窗口或自动安装。
+
+在“管理实例 → 桌面快捷方式”中创建、删除或继续未完成操作；桌面位置、固定 host 和完整 EXE 图标自动选择。被用户修改或替换的链接保留并提示冲突，原有应用入口不覆盖。等价 CLI：
+
+```powershell
+.\target\debug\app-proxy.exe shortcut create <实例ID> --json
+.\target\debug\app-proxy.exe shortcut status <实例ID> --json
+.\target\debug\app-proxy.exe shortcut remove <实例ID> --json
+.\target\debug\app-proxy.exe shortcut request <请求ID> --json
+.\target\debug\app-proxy.exe shortcut resume <请求ID> --json
+```
+
+`status`/`request` 只查询登记和历史结果，不操作桌面文件；`resume` 显式继续原请求。创建/删除失败或响应中断保留原编号，Ctrl+C 结束等待不代表协调进程已撤销操作。菜单取消待创建入口绑定当时显示的创建编号，配置或登记改变时需重新核对。安装资源查询在配置锁外进行，单个快捷方式工作任务不会占满查询连接。真实桌面创建/核验/删除和菜单流程已验证；真实 Shell 点击启动和完整产品验收仍待续。
 
 Guard 自动扫描及纠正已接入：已授权监听组件触发事件检查和周期补扫，只针对已登记且归属明确的误启动主进程，先关闭再准备代理；失败保持关闭，已正确使用代理的应用不因网络故障被关闭。未安装或无法核验监听组件时不会自动纠正。监听组件前台授权及受保护 host 入口已接入，真实提权后的完整事件链路仍待实机验收；IFEO 与登录自启尚未完成。
 

@@ -30,6 +30,8 @@ pub struct Request {
     pub instance_id: Uuid,
     pub expected_revision: u64,
     pub action: Action,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_creation: Option<Uuid>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -153,6 +155,23 @@ impl Store {
     pub fn resume_shortcut(&mut self, id: Uuid) -> Result<Status> {
         self.resume_shortcut_with(id, |_| Ok(()))
     }
+    /// Current owned integration, including interrupted work. Creation receipts
+    /// are historical; this query does not inspect or change desktop files.
+    pub fn instance_shortcut(&self, instance_id: Uuid) -> Result<Option<(Request, Status)>> {
+        if instance_id.is_nil() {
+            return Err(Error::Invalid("INVALID_SHORTCUT_REQUEST"));
+        }
+        Ok(self
+            .read_shortcuts()?
+            .entries
+            .into_iter()
+            .find(|e| e.create.instance_id == instance_id && e.removed_revision.is_none())
+            .map(|e| {
+                let request = e.removal.as_ref().unwrap_or(&e.create).clone();
+                let status = e.status(request.id);
+                (request, status)
+            }))
+    }
     pub(crate) fn shortcut_edit_rejection(
         &self,
         action: &ConfigAction,
@@ -218,6 +237,9 @@ impl Store {
         });
         match request.action {
             Action::Create => {
+                if request.expected_creation.is_some() {
+                    return Err(Error::Invalid("INVALID_SHORTCUT_REQUEST"));
+                }
                 if existing.is_some()
                     || manifest
                         .integrations
@@ -267,6 +289,12 @@ impl Store {
             }
             Action::Remove => {
                 let index = existing.ok_or(Error::Invalid("SHORTCUT_OWNERSHIP_UNAVAILABLE"))?;
+                if request
+                    .expected_creation
+                    .is_some_and(|id| id != journal.entries[index].create.id)
+                {
+                    return Err(Error::Invalid("SHORTCUT_REGISTRATION_CHANGED"));
+                }
                 if journal.entries[index].removal.is_some() {
                     return Err(Error::Invalid("SHORTCUT_OPERATION_PENDING"));
                 }
@@ -448,6 +476,7 @@ fn validate(journal: &Journal, store: Uuid) -> Result<()> {
             || create.instance_id.is_nil()
             || create.expected_revision == 0
             || create.action != Action::Create
+            || create.expected_creation.is_some()
             || !ids.insert(create.id)
             || entry.created_revision == Some(0)
             || entry.removed_revision == Some(0)
@@ -469,6 +498,7 @@ fn validate(journal: &Journal, store: Uuid) -> Result<()> {
                 || remove.instance_id != create.instance_id
                 || remove.expected_revision == 0
                 || remove.action != Action::Remove
+                || remove.expected_creation.is_some_and(|id| id != create.id)
                 || !ids.insert(remove.id))
         {
             return Err(Error::Invalid("SHORTCUT_JOURNAL_INVALID"));
@@ -544,6 +574,7 @@ fn reserve_completion_capacity(journal: &Journal) -> Result<()> {
                 instance_id: entry.create.instance_id,
                 expected_revision: u64::MAX,
                 action: Action::Remove,
+                expected_creation: Some(entry.create.id),
             });
             entry.removed_revision = Some(u64::MAX);
             entry.removed_at = Some(u64::MAX);
