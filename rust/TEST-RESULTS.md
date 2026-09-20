@@ -2,6 +2,16 @@
 
 本记录只描述已运行的代码，设计文档不等同于已实现功能。当前完成 M0 的进程创建/身份及包内 helper 验证部分，M0 尚未全部通过。
 
+**2026-09-20：普通 coordinator 登录任务平台**
+
+新增 guard_task::login，复用已有 Task Scheduler COM 构造和核验。登录/提权事件任务分别固定 Data 协议标记、URI/任务名、principal SID、运行级别、ACL 和触发器，不能交叉采用另一角色权限。登录任务仅当前 SID 的 LogonTrigger，LUA/InteractiveToken，固定发行版 host `serve --home ... --expected-store ...`。新建需核验已有监听组件、当前发行版来源和 coordinator 映像 pin；只创建缺失或复用完全匹配项，不覆盖冲突。Registration 可供上层持久保存；核验/空闲删除不需要原程序或数据目录仍存在，不终止任务实例或用户应用。
+
+默认新增 5 项测试：3 项登录任务（名称/转义/参数替换拒绝、权限角色隔离、原生内存 COM 主体/触发器负例），1 项事件任务 URI/generation/角色负例，1 项真实 host 的 store 绑定。后者以文件共享锁留下真实 Pending 请求，错误 expected-store 被拒绝且 manifest/request 字节不变，正常打开才恢复 revision 2；不存在的数据目录不创建。独立审查发现校验最初位于 Store::open 自动恢复之后，已移到 Store::open_expected 持锁核验后、任何恢复前；复审和该回归独立复跑通过。
+
+两项 ignored 原生测试显式通过：创建当前用户 UUID 登录任务、原样重复登记、不同 home 的冲突登记和删除均拒绝、原任务保留、按原记录空闲删除；以及首次读回失败任务的精确记录恢复。真实注册发现 Windows 会把自定义 URI 改写成任务路径，导致旧事件代码和新登录代码均可能误报冲突；现两种角色均构造并要求精确的任务路径 URI，其他身份约束保持。首轮 80e17af3-efdb-4aa9-a843-3042fc71bf8f 残留已通过同一 Rust 核验/删除接口恢复清理，成功重跑 7aed6e5a-5cb6-4384-82c7-4ac36b83f45b 同样已删除，随后只读查询确认两项均缺失。本批没有运行任务、切换登录或启动用户应用；这不证明实际登录触发或完整提权 Guard 链路。Guard 启用流程的持久意图/自动登记及维护入口仍待接入。
+
+最终全量 workspace **423 项通过、0 失败、52 项顶层 ignored**，日志 `.tools/login-task-final-tests.log`；clippy -D warnings、fmt/diff 通过。独立审查定向 9 项通过，恢复顺序修复后跨进程回归再次独立通过；实际系统任务测试由主实现方显式执行，审查方未运行系统任务。
+
 **2026-09-20：实例高级设置**
 
 新增管理实例高级设置及 instance settings/edit，复用 ConfigRequest、完整请求摘要去重和 revision CAS。args/cwd 部分替换，env 设置/移除/恢复继承按 ASCII 大小写不敏感统一判重；禁止受管字段，原版拒绝分身路径变量。新环境值先全量校验再分存不可变秘密，manifest/intent/回执只含引用；参数和目录继续保存在 ACL 保护配置中。私密文件输入有界且校验 ACL/普通文件/重解析链，不改动用户输入，错误和摘要不回显值。IPC 2.17 对查询和编辑双向拒绝旧版本。

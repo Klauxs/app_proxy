@@ -37,6 +37,8 @@ enum Commands {
     Serve {
         #[arg(long)]
         home: PathBuf,
+        #[arg(long)]
+        expected_store: Option<uuid::Uuid>,
     },
     ProbeChild {
         #[arg(long)]
@@ -94,13 +96,19 @@ fn main() {
             app_proxy_windows::package_launch::run_helper(&request).map_err(Into::into)
         }
         Commands::ProbeChild { request, args } => app_proxy_app::probe::child(&request, args),
-        Commands::Serve { home } => match tokio::runtime::Builder::new_multi_thread()
+        Commands::Serve {
+            home,
+            expected_store,
+        } => match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
         {
             Ok(runtime) => runtime
-                .block_on(app_proxy_app::coordinator::serve(home))
+                .block_on(app_proxy_app::coordinator::serve_expected(
+                    home,
+                    expected_store,
+                ))
                 .map_err(Into::into),
             Err(error) => Err(error.into()),
         },

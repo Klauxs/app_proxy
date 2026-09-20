@@ -1,5 +1,5 @@
-//! Fixed, demand-start elevated event task. No arbitrary task name, executable,
-//! arguments, credentials, trigger, update or forced-stop API is exposed.
+//! Fixed elevated event and ordinary coordinator login tasks. No arbitrary task
+//! name, command, credentials, update or forced-stop API is exposed.
 //! Synchronous COM calls belong on the caller's bounded blocking worker.
 use crate::{Error, Result, guard_deployment::Deployment, identity};
 use serde::Serialize;
@@ -14,8 +14,10 @@ use windows::{
     core::{BSTR, Interface},
 };
 
+pub mod login;
 mod security;
 const MARKER: &str = "app-proxy-rust:event-task:v1";
+const LOGIN_MARKER: &str = "app-proxy-rust:login-task:v1";
 const MISSING: u32 = 0x80070002;
 
 #[derive(Serialize)]
@@ -31,6 +33,7 @@ struct Spec {
     args: String,
     cwd: String,
     uri: String,
+    login: bool,
 }
 impl Spec {
     fn deployment(deployment: &Deployment) -> Result<Self> {
@@ -55,13 +58,15 @@ impl Spec {
         if !path.is_absolute() || path_text.contains(['\0', '%', '"']) || path_text.contains("$(") {
             return Err(Error::Invalid("GUARD_TASK_PATH"));
         }
+        let name = format!("AppProxyRust-Event-{}-{store}", &scope[..16]);
         Ok(Self {
-            name: format!("AppProxyRust-Event-{}-{store}", &scope[..16]),
+            uri: format!("\\{name}"),
+            name,
             sid: sid.into(),
             path: path_text.into(),
             cwd: cwd.into(),
             args: format!("event-listen --store {store} --generation {generation}"),
-            uri: format!("{MARKER}:{sid}:{store}:{generation}"),
+            login: false,
         })
     }
 }
@@ -251,7 +256,8 @@ fn build(service: &ITaskService, spec: &Spec) -> Result<ITaskDefinition> {
     // values are fixed policy or derived from the held protected deployment.
     unsafe {
         let task = service.NewTask(0).map_err(com_error)?;
-        task.SetData(&BSTR::from(MARKER)).map_err(com_error)?;
+        task.SetData(&BSTR::from(if spec.login { LOGIN_MARKER } else { MARKER }))
+            .map_err(com_error)?;
         let info = task.RegistrationInfo().map_err(com_error)?;
         info.SetAuthor(&BSTR::from("AppProxyRust"))
             .map_err(com_error)?;
@@ -267,8 +273,15 @@ fn build(service: &ITaskService, spec: &Spec) -> Result<ITaskDefinition> {
             .SetLogonType(TASK_LOGON_INTERACTIVE_TOKEN)
             .map_err(com_error)?;
         principal
-            .SetRunLevel(TASK_RUNLEVEL_HIGHEST)
+            .SetRunLevel(if spec.login {
+                TASK_RUNLEVEL_LUA
+            } else {
+                TASK_RUNLEVEL_HIGHEST
+            })
             .map_err(com_error)?;
+        if spec.login {
+            login::add_trigger(&task, &spec.sid)?;
+        }
         let settings = task.Settings().map_err(com_error)?;
         settings
             .SetCompatibility(TASK_COMPATIBILITY_V2)
@@ -331,7 +344,11 @@ fn verify(task: &IRegisteredTask, spec: &Spec) -> Result<()> {
             return Err(Error::Invalid("GUARD_TASK_CONFLICT"));
         }
         let descriptor = text(task.GetSecurityDescriptor(5).map_err(com_error)?)?; // OWNER | DACL
-        security::verify(&descriptor, &spec.sid)?;
+        if spec.login {
+            security::verify_login(&descriptor, &spec.sid)?;
+        } else {
+            security::verify(&descriptor, &spec.sid)?;
+        }
         verify_definition(&task.Definition().map_err(com_error)?, spec)
     }
 }
@@ -341,7 +358,7 @@ fn verify_definition(task: &ITaskDefinition, spec: &Spec) -> Result<()> {
     unsafe {
         let mut value = BSTR::new();
         task.Data(&mut value).map_err(com_error)?;
-        let mut matches = text(value)? == MARKER;
+        let mut matches = text(value)? == if spec.login { LOGIN_MARKER } else { MARKER };
         let info = task.RegistrationInfo().map_err(com_error)?;
         let mut uri = BSTR::new();
         info.URI(&mut uri).map_err(com_error)?;
@@ -361,13 +378,22 @@ fn verify_definition(task: &ITaskDefinition, spec: &Spec) -> Result<()> {
             && security::user_matches(&text(user)?, &spec.sid)?
             && group.is_empty()
             && logon == TASK_LOGON_INTERACTIVE_TOKEN
-            && level == TASK_RUNLEVEL_HIGHEST;
+            && level
+                == if spec.login {
+                    TASK_RUNLEVEL_LUA
+                } else {
+                    TASK_RUNLEVEL_HIGHEST
+                };
         let mut count = 0;
         task.Triggers()
             .map_err(com_error)?
             .Count(&mut count)
             .map_err(com_error)?;
-        matches &= count == 0;
+        if spec.login {
+            login::verify_trigger(task, &spec.sid)?;
+        } else {
+            matches &= count == 0;
+        }
         let actions = task.Actions().map_err(com_error)?;
         let mut context = BSTR::new();
         actions.Context(&mut context).map_err(com_error)?;

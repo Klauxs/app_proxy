@@ -10,6 +10,9 @@ use windows_sys::Win32::{
 pub(super) fn sddl(sid: &str) -> String {
     format!("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;{sid})")
 }
+pub(super) fn login_sddl(sid: &str) -> String {
+    format!("O:{sid}G:{sid}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})")
+}
 
 // Task Scheduler's UserId getter returns an account name even when SetUserId
 // received a SID. Compare the resolved Windows SID, never the display string.
@@ -62,6 +65,12 @@ impl Drop for Descriptor {
     }
 }
 pub(super) fn verify(sddl: &str, sid: &str) -> Result<()> {
+    verify_for(sddl, sid, false)
+}
+pub(super) fn verify_login(sddl: &str, sid: &str) -> Result<()> {
+    verify_for(sddl, sid, true)
+}
+fn verify_for(sddl: &str, sid: &str, login: bool) -> Result<()> {
     if sddl.len() > 65536 {
         return Err(Error::Invalid("GUARD_TASK_ACL_SIZE"));
     }
@@ -90,7 +99,7 @@ pub(super) fn verify(sddl: &str, sid: &str) -> Result<()> {
             return Err(last_error("ReadGuardTaskSecurity"));
         }
         if owner.is_null()
-            || sid_string(owner)? != "S-1-5-32-544"
+            || sid_string(owner)? != if login { sid } else { "S-1-5-32-544" }
             || present == 0
             || acl.is_null()
             || control & SE_DACL_PROTECTED == 0
@@ -113,8 +122,12 @@ pub(super) fn verify(sddl: &str, sid: &str) -> Result<()> {
             let allowed = if trustee == "S-1-5-18" || trustee == "S-1-5-32-544" {
                 ace.Mask == FILE_ALL_ACCESS
             } else if trustee == sid {
-                ace.Mask == GENERIC_READ | GENERIC_EXECUTE
-                    || ace.Mask == FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+                if login {
+                    ace.Mask == FILE_ALL_ACCESS
+                } else {
+                    ace.Mask == GENERIC_READ | GENERIC_EXECUTE
+                        || ace.Mask == FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+                }
             } else {
                 false
             };

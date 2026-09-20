@@ -120,6 +120,10 @@ host 的 `launch --notify` 已复用 CLI/menu 启动流程，来源为 Shortcut�
 
 coordinator 登录任务在 Guard desired enabled 且授权已完成时安装，以普通权限启动 serve；事件任务按需启动提权 listener，无需第二个独立登录触发器。任务验证涵盖 owner SID、RunLevel、action 路径、参数和协议版本，不仅看名称。
 
+登录任务平台现已实现，尚未接入 Guard 启用的持久事务。Prepared 从已核验监听组件和同发行版 coordinator 映像派生固定路径；调用方须在注册前持久保存 Registration。固定 action 为 `serve --home <原数据目录> --expected-store <UUID>`，Windows 参数转义保留空格和尾反斜线，拒绝 `%`/`$(` 替换形式。host 在 store 锁内、恢复任何未完成配置前核对 UUID；目录缺失不创建，目录改绑另一 store 时不恢复其配置。注册不自动执行任务，只创建缺失项或复用完整相同项；现存冲突保留。读取和空闲解除只依赖原归属记录，不要求原 host、store 或提权监听器仍存在，不调用 Stop。
+
+登录任务限定当前用户的唯一启用 LogonTrigger、无延迟/重复/起止时间窗口，使用 LUA 和 InteractiveToken；任务 owner 为当前 SID，当前 SID/SYSTEM/Administrators 可维护。事件任务仍由 Administrators 拥有，普通用户仅读取/运行；两个角色的 ACL 和定义不能互换。注册依据 [Task Scheduler 权限上下文](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks) 和 [LogonTrigger 属性](https://learn.microsoft.com/en-us/windows/win32/taskschd/logontrigger)，并以真实 Windows 注册/回读作为兼容性证据。Task Scheduler 实际会将 URI 写为任务路径，两种任务均精确要求该 URI；协议角色由 Data 标记、SID/store/generation 由主身份、固定名称和完整 action 共同核对，不依赖自定义 URI 被保留。
+
 事件任务平台使用固定 SID 摘要/store 名称，只创建缺失任务；已有精确匹配的注册复用，任何不同配置报冲突，不自动覆盖。action 从已持有的受保护 deployment 派生，只有固定 event-listen 与 store/generation UUID；路径拒绝环境或任务参数替换语法。普通用户仅有读取和运行权限，管理员与系统可维护，注册时禁止自动添加 principal 的写权限。回读同时核对任务 ACL、归属标记、真实账户 SID、V2 兼容级别、principal/action context、唯一 action、无触发器和运行条件。UserId getter 可能返回账户名，必须解析为 SID 比较。
 
 普通 coordinator 只能以当前正数 session 请求 RunEx，不提供替换参数；返回的 scheduler instance GUID 不证明 helper 已运行，仍需认证事件管道。删除前必须先由集成事务停止本工具的普通 run 请求，再核对同一任务无运行实例；查询与删除不构成 Windows 提供的原子锁。此模块不强制终止实例、不自动删除 helper，也不将注册成功报告为保护 active。

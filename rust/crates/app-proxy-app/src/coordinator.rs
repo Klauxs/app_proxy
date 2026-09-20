@@ -434,8 +434,12 @@ fn binaries() -> Result<(PathBuf, PathBuf)> {
 }
 
 pub async fn serve(root: PathBuf) -> Result<()> {
+    serve_expected(root, None).await
+}
+
+pub async fn serve_expected(root: PathBuf, expected_store: Option<Uuid>) -> Result<()> {
     identity::assert_ordinary_user()?;
-    let owned = store::Store::open(&root)?;
+    let owned = store::Store::open_expected(&root, expected_store)?;
     let manifest = owned.load()?;
     let current = identity::current()?;
     let (cli, host) = binaries()?;

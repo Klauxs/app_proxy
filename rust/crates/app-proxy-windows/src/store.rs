@@ -145,6 +145,11 @@ impl Store {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_expected(root, None)
+    }
+
+    /// Bind a saved entry to its store before replaying any accepted edits.
+    pub fn open_expected(root: &Path, expected_store: Option<Uuid>) -> Result<Self> {
         identity::assert_ordinary_user()?;
         absolute(root)?;
         let sid = identity::current()?.user_sid;
@@ -180,6 +185,9 @@ impl Store {
         security::verify(lock.as_raw_handle(), &sid, false)?;
         lock.try_lock()
             .map_err(|_| Error::Invalid("STORE_ALREADY_OWNED"))?;
+        if expected_store.is_some_and(|expected| expected != owner.store_id) {
+            return Err(Error::Invalid("STORE_ID_MISMATCH"));
+        }
         let mut store = Self {
             root: root.to_owned(),
             owner,

@@ -26,6 +26,75 @@ fn query(root: &Path) -> Status {
 }
 
 struct OwnedFixture(Option<app_proxy_core::ProcessIdentity>);
+
+#[test]
+fn registered_host_rejects_a_replaced_store_and_never_creates_a_missing_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("login store");
+    let mut store = Store::create(&root).unwrap();
+    let expected = store.load().unwrap().store_id;
+    use app_proxy_core::{
+        model::*,
+        registry::{ConfigAction, ConfigRequest},
+    };
+    use std::os::windows::fs::OpenOptionsExt;
+    let request = ConfigRequest {
+        request_id: uuid::Uuid::new_v4(),
+        expected_revision: 1,
+        action: ConfigAction::AddApplication {
+            application: Application {
+                id: uuid::Uuid::new_v4(),
+                name: "pending fixture".into(),
+                revision: 1,
+                locator: ApplicationLocator::Exe {
+                    path: temp.path().join("fixture.exe"),
+                },
+                template_ref: Template::Environment,
+            },
+        },
+    };
+    // Deny replacement so the accepted request remains Pending on disk.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(root.join("manifest.json"))
+        .unwrap();
+    assert!(store.apply_config(&request).is_err());
+    drop(held);
+    drop(store);
+    let original = std::fs::read(root.join("manifest.json")).unwrap();
+    let request_path = root.join(format!("state/requests/{}.json", request.request_id));
+    let pending = std::fs::read(&request_path).unwrap();
+    let unrelated = uuid::Uuid::new_v4().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_app-proxy-host"))
+        .arg("serve")
+        .arg("--home")
+        .arg(&root)
+        .arg("--expected-store")
+        .arg(&unrelated)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("STORE_ID_MISMATCH"));
+    assert_eq!(std::fs::read(root.join("manifest.json")).unwrap(), original);
+    assert_eq!(std::fs::read(&request_path).unwrap(), pending);
+    let store = Store::open(&root).unwrap();
+    assert_eq!(store.load().unwrap().store_id, expected);
+    assert_eq!(store.load().unwrap().revision, 2);
+    assert!(store.launch_attempts().unwrap().is_empty());
+    drop(store);
+    let missing = temp.path().join("missing store");
+    let output = Command::new(env!("CARGO_BIN_EXE_app-proxy-host"))
+        .arg("serve")
+        .arg("--home")
+        .arg(&missing)
+        .arg("--expected-store")
+        .arg(expected.to_string())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!missing.exists());
+}
 impl OwnedFixture {
     fn capture(status: &Status) -> Self {
         let observed = identity::inspect(status.coordinator_pid).unwrap();

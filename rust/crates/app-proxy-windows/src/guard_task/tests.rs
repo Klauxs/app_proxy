@@ -77,6 +77,35 @@ fn native_unregistered_definition_roundtrips_and_rejects_changed_actions_or_prin
 }
 
 #[test]
+fn native_event_definition_rejects_wrong_uri_generation_or_role_marker() {
+    let session = Session::connect().unwrap();
+    let spec = spec();
+    assert_eq!(spec.uri, format!("\\{}", spec.name));
+    // SAFETY: only fresh unregistered in-memory definitions are modified.
+    unsafe {
+        for change in 0..3 {
+            let task = build(&session.service, &spec).unwrap();
+            match change {
+                0 => task
+                    .RegistrationInfo()
+                    .unwrap()
+                    .SetURI(&BSTR::from("\\foreign"))
+                    .unwrap(),
+                1 => {
+                    let action: IExecAction =
+                        task.Actions().unwrap().get_Item(1).unwrap().cast().unwrap();
+                    action
+                        .SetArguments(&BSTR::from(format!("{}-changed", spec.args)))
+                        .unwrap();
+                }
+                _ => task.SetData(&BSTR::from(LOGIN_MARKER)).unwrap(),
+            }
+            assert!(verify_definition(&task, &spec).is_err());
+        }
+    }
+}
+
+#[test]
 fn native_definition_rejects_auto_triggers_extra_actions_and_changed_lifecycle() {
     let session = Session::connect().unwrap();
     let spec = spec();
