@@ -43,28 +43,42 @@ coordinator 持有 store 独占进程锁和写入权限。启动采用“尝试�
 
 没有 Guard、运行实例、待确认启动、托管内核或事务时，空闲 30 秒后退出。存在上述任一资源时继续运行。退出 UI 不停止应用；coordinator 异常退出也不通过 Job Object 连带杀掉用户应用。
 
-**3. 计划中的代码目录**
+**3. 代码目录**
 
-以下为目标实现结构；当前 M0 实现范围以 [验证记录](../TEST-RESULTS.md) 为准，不提前建立所有子模块。
+2026-09-21 按实际结构更新。
 
 ```text
 rust/
   Cargo.toml / Cargo.lock / rust-toolchain.toml
   crates/
-    app-proxy-core/src/
-      model/ template/ storage/ launch/ guard/ proxy/ subscription/ protocol/
-    app-proxy-windows/src/
-      process/ package/ identity/ paths/ ipc/ etw/ tasks/ shortcuts/
+    app-proxy-core/src/        无 IO，禁用 unsafe
+      model/                   manifest 模型、校验、按 schema 版本读取与迁移
+      registry/                配置编辑动作及其规则
+      subscription/            六协议 URI、Clash YAML、文本格式解析与保存格式
+      core_control  launch  singbox  template
+      identity  environment    身份证据与环境变更的数据类型
+      error_code               稳定错误码：具名常量、不确定结果登记表、线上还原
+    app-proxy-windows/src/     唯一允许 unsafe 的 crate
+      storage/                 受保护 store、请求日志、布局、订阅暂存、实例数据目录
+      proxy_core/              共享 sing-box：程序、安装、状态、请求、重配置计划
+      launching/               为实例创建进程：资源预留、启动日志、MSIX、安装解析
+      processes/               精确进程身份、观察、停止
+      guard/                   提权监听：ETW、事件管道、部署、安装、计划任务
+      shell/                   快捷方式、控制台、安装器原语
+      system/                  IPC 传输、COM 公寓、安全描述符、时间、诊断计时
     app-proxy-app/src/
-      bin/app-proxy.rs
-      bin/app-proxy-host.rs
-      menu/ commands/ coordinator/ install/
+      bin/app-proxy.rs  bin/app-proxy-host.rs
+      coordinator/             protocol、server、client
+      launch_engine/           启动引擎、Guard 纠正、观察、检查点
+      guard_monitor/           监听生命周期、扫描调度、事件队列
+      core_manager  core_control  core_reconfigure  core_installer
+      *_cli  menu  output  exit  foreground
+    app-proxy-setup/           单文件安装器
   assets/msix-bridge.ps1
-  tests/fixtures/ tests/contract/ tests/windows/
-  docs/ examples/
+  examples/  docs/  scripts/
 ```
 
-`app-proxy-core` 定义领域模型、流程和平台接口，不依赖 Windows 类型。`app-proxy-windows` 依赖 core，实现接口并封装 FFI。app 依赖两者，负责组装、命令入口及版本信息。先采用这三个 crate，不把每个功能拆成独立 crate。
+`app-proxy-core` 定义领域模型和不依赖平台的规则。`app-proxy-windows` 依赖 core，封装 FFI，并承载受保护存储和各请求日志；其中与平台无关的状态机逻辑目前仍与磁盘读写写在同一批 `impl Store` 方法里，见 [21-refactoring-plan.md](21-refactoring-plan.md) 阶段 7。windows crate 的每个模块同时在 crate 根上重导出，`app_proxy_windows::store` 这类路径不受分组影响。app 依赖两者，负责组装、命令入口及版本信息。
 
 **4. 组件契约**
 

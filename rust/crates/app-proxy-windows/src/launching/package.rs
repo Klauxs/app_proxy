@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
-const BRIDGE: &str = include_str!("../../../assets/msix-bridge.ps1");
+const BRIDGE: &str = include_str!("../../../../assets/msix-bridge.ps1");
 mod lookup;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

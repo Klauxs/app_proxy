@@ -136,10 +136,10 @@ MSIX LocalState 可能在 store 之外。每个 location 都记录自己的归�
 | 文件 | 当前版本 | 版本判断位置 |
 |---|---|---|
 | `manifest.json` | `schema_version` 1 | `app-proxy-core/src/model/stored.rs` |
-| `.app-proxy-rust-owned.json` 归属标记 | 1，独立于 manifest | `app-proxy-windows/src/store.rs` 的 `MARKER_VERSION` |
+| `.app-proxy-rust-owned.json` 归属标记 | 1，独立于 manifest | `app-proxy-windows/src/storage/store.rs` 的 `MARKER_VERSION` |
 | `secrets/<id>.json` 中的订阅节点文档 | `version` 1 | `app-proxy-core/src/subscription/saved.rs` |
-| 实例数据目录标记 | `schema_version` 1 | `app-proxy-windows/src/instance_data.rs` |
-| `resources` 登记处标记 | `schema_version` 1 | `app-proxy-windows/src/instance_resource.rs` |
+| 实例数据目录标记 | `schema_version` 1 | `app-proxy-windows/src/storage/instance_data.rs` |
+| `resources` 登记处标记 | `schema_version` 1 | `app-proxy-windows/src/launching/instance_resource.rs` |
 | 程序目录的 `.app-proxy-install.json` | `format` 为 `app-proxy-install-v1` | `app-proxy-setup/src/lib.rs` |
 
 manifest 的读取分两段：先只读 `format` 和 `schema_version`，再按版本处理。高于当前版本返回 `STORE_SCHEMA_NEWER`。低于当前版本时依次经过 `MIGRATIONS` 中的迁移函数，迁移只发生在内存里；下一次提交前先把原始字节原样保存为 `backups/manifest.schema-<旧版本>.json`，同一旧版本只保留第一份。当前版本的文件仍直接从字节严格解析。

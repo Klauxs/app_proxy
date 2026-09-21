@@ -417,7 +417,7 @@ mod tests {
         let mut store = Store::create(root).unwrap();
         let header = store.load().unwrap();
         let mut manifest: Manifest =
-            serde_json::from_str(include_str!("../../../examples/manifest.json")).unwrap();
+            serde_json::from_str(include_str!("../../../../examples/manifest.json")).unwrap();
         manifest.store_id = header.store_id;
         manifest.owner_sid = header.owner_sid;
         let instance_id = manifest.instances[1].id;

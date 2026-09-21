@@ -25,7 +25,7 @@
 | D | 五套请求日志各自手写 | `now()` 复制 6 份，七天保留期常量 5 份，“缺文件返回空、校验、写回”流程 3 份，容量预留 2 份 |
 | E | `coordinator.rs` 一个文件三种角色 | 2300 行；协议类型、服务端分发、约 25 个客户端函数混在一起；`handle()` 约 400 行；分发做两遍；22 处小版本门控；每次客户端操作先做一次状态往返，一个请求两次管道连接 |
 | F | 展示与编排没有分开 | 菜单通过构造 clap 命令对象并传 `json=false` 复用 CLI 流程；共享函数同时发请求、打印、选退出码；`guard_cli::run_with_foreground` 单函数约 375 行；Guard 阶段到中文的映射写了三遍 |
-| G | 测试接缝靠条件编译 | `LaunchEngine` 有 8 个 `#[cfg(test)]` 钩子字段，`launch_engine.rs` 共 28 处 `cfg(test)`；`Shared::new` 按 `cfg(test)` 分叉构造；引擎测试创建真实进程；进程查询用进程级全局单槽位（`windows/src/process_query.rs:38`），测试必须 `--test-threads=1` |
+| G | 测试接缝靠条件编译 | `LaunchEngine` 有 8 个 `#[cfg(test)]` 钩子字段，`launch_engine.rs` 共 28 处 `cfg(test)`；`Shared::new` 按 `cfg(test)` 分叉构造；引擎测试创建真实进程；进程查询用进程级全局单槽位（`windows/src/processes/process_query.rs`），测试必须 `--test-threads=1` |
 | H | 异步与阻塞互相嵌套 | 5 处 `spawn_blocking` 内再 `block_on`。更正（2026-09-21）：起草时写的“持有 store 锁期间不 await 只靠约定”不准确。clippy 默认的 `await_holding_lock` 会拦截，而验证脚本和 CI 都带 `-D warnings`，实验已确认 |
 | I | 错误码仍是散落的字面量 | 第一步已完成（见第 6 节）；应用层约 300 个、平台层约 420 个不同字面量仍无常量表；调用方按字面量匹配约 15 个错误码 |
 | J | 平台层重复的 FFI 封装 | COM 公寓守卫 4 份，安全描述符封装和 `sid_string` 各 3 份，`com_error` 3 份 |
@@ -198,14 +198,20 @@ Store 方法面过宽的问题留给阶段 7：状态机移入 core 之后，Sto
 
 | 步骤 | 内容 |
 |---|---|
-| 7.1 | 定义受保护文件访问和时钟两个小接口，由 windows crate 实现 |
-| 7.2 | 已决定（2026-09-21）：落点为 core，不新建 crate。把不含 Win32 调用的状态机移到 core。候选：`core_update`、`launch_state`、`config_transaction`、`core_requests`、`subscription_stage`、两套 journal 的校验逻辑 |
-| 7.3 | windows crate 的模块按领域分组：`store`、`singbox`、`launch`、`process`、`guard`、`shell` |
-| 7.4 | 改名消除冲突：`installation.rs` 改为表达“应用安装解析”的名字；三处 `setup` 和两处 `shortcuts`、`core_control` 各自改为能区分职责的名字；安装器的消息框和进度窗口移入 setup crate |
-| 7.5 | core 里的 `ProcessIdentity`、`FileIdentity` 从 crate 根移入 `identity` 模块 |
-| 7.6 | 更新 [01-architecture.md](01-architecture.md) 第 3 节，使“计划中的代码目录”与实际一致 |
+| 7.1 | 未执行，属于 7.2 深层部分的前置，见下方评估 |
+| 7.2 | 部分完成。已完成的是不含 IO 的部分：`CoreOutcome::validate`、失败码语法和 sing-box 版本语法移入 core，与它们校验的类型放在一起。未执行的是状态机主体，见下方评估 |
+| 7.3 | 已完成：windows crate 的 37 个平铺模块分成 `storage`、`proxy_core`、`launching`、`processes`、`guard`、`shell`、`system` 七组，磁盘目录和模块树一致。每个模块仍在 crate 根上重导出，三个 crate 里没有任何引用路径需要修改 |
+| 7.4 | 未执行。改名会改动跨 crate 的大量 `use` 路径，而 7.3 的分组已经消除了主要的歧义：`installation` 现在位于 `launching::installation`，`setup` 位于 `shell::setup`。剩余的同名模块分属不同 crate，靠 crate 名区分 |
+| 7.5 | 已完成：`ProcessIdentity`、`FileIdentity` 移入 `core::identity`，`EnvPatch` 移入 `core::environment`，根上保留重导出 |
+| 7.6 | 已完成：[01-architecture.md](01-architecture.md) 第 3 节改为实际目录结构 |
 
-验收：目标 T6。
+7.2 深层部分的评估（2026-09-21）。候选的五个文件里，逻辑几乎全部写在 `impl Store` 的方法中：`core_update.rs` 约 680 行、`config_transaction.rs` 约 360 行都在一个 `impl` 块里，文件级的纯函数只有几个。纯校验与磁盘读取交织在同一个方法里，例如 `validate_core_update` 在字段检查中途打开代际目录核对内容。`CoreUpdate` 还内嵌 `CoreState`，后者带进程身份等平台侧类型；`launch_state` 则直接消费 `AuthorizedSpawn`、`ObservedGuardStop` 这些只能在 windows crate 内构造的许可类型。
+
+整体搬到 core 需要三件事：为受保护文件访问和时钟定义接口；逐个方法把判断逻辑从 IO 中拆出来；把一批记录类型连同它们依赖的状态类型一起移动。这是对回滚、重配置、启动去重这些最敏感路径的重新设计，对应的测试约 3000 行，全部围绕临时目录里的真实 Store 编写。它的收益是这些逻辑可以脱离文件系统测试，以及 Store 的方法面收窄；代价是在产品尚未完成验收时大面积改写安全关键代码。
+
+建议：不在本轮执行。等产品完成验收、这些模块的行为稳定下来之后，按模块逐个做，每个模块单独立计划，顺序建议为 `subscription_stage`（最小）、`core_requests`、`config_transaction`、`core_update`，`launch_state` 因为绑定许可类型而留在平台层。是否执行由维护者决定。
+
+验收：目标 T6 未达成，随 7.2 深层部分一并推迟。
 
 **6. 已完成**
 
@@ -247,4 +253,4 @@ flowchart LR
 | 4 收口 Store | 完成（缩减） | 盘点后确认原动机不成立，只保留显式 lint；详见阶段 4 说明 |
 | 5 展示层去重 | 完成 | 只做 5.1、5.5。新增 `output` 模块：16 处 JSON 输出和 9 处控制字符过滤各归一处；菜单复用 `guard_label`；入口文件里 9 次目录解析和 8 次运行时构造收成两个函数。CLI 列表与菜单的网络标签文字不同是有意的（一个显示代理 ID，一个显示名称），未合并 |
 | 6 测试接缝 | 完成（部分） | 检查点对象和 `Shared::with_resources` 已完成；假平台与并行测试经评估不执行，详见阶段 6 说明 |
-| 7 状态机下沉 | 未开始 | 落点为 core |
+| 7 状态机下沉 | 部分完成 | 模块分组、类型归位、`CoreOutcome` 校验下沉已完成；状态机主体的下沉经评估建议推迟，待维护者决定，见阶段 7 评估 |
