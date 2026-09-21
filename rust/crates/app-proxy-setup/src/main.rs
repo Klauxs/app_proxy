@@ -35,7 +35,7 @@ fn main() {
         if !quiet {
             let _ = setup::dialog(
                 &format!(
-                    "安装未完成：{error}\n\n已有配置与应用数据保留。关闭 AppProxy 菜单后，可重新运行同一个安装包继续。\n日志：{}",
+                    "安装未完成：{error}\n\n已有配置与应用数据保留。请查看日志，处理后重新运行同一个安装包继续。\n日志：{}",
                     log.1.display()
                 ),
                 false,
@@ -64,15 +64,22 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
         ));
     }
     let quiet = args.iter().any(|a| a == "--yes");
-    let action = if root.join(".app-proxy-install.json").exists() {
+    let updating = root.join(".app-proxy-install.json").try_exists()?
+        || root.join(".app-proxy-upgrade.json").try_exists()?;
+    let action = if updating {
         "升级或修复"
     } else {
         "安装"
     };
+    let confirmation = if updating {
+        "如已打开 AppProxy 菜单，请先退出。升级时会等待后台完成当前工作，保留配置和应用数据。\n如需更新监听组件，Windows 会请求管理员授权。\n\n是否继续？"
+    } else {
+        "是否安装？"
+    };
     if !quiet
         && !setup::dialog(
             &format!(
-                "{action} AppProxy\n版本：{}\n安装位置：{}\n\n请先退出 AppProxy 菜单。安装器会等待后台完成当前工作；已有应用和代理进程保留。\n更新监听组件时，Windows 会请求管理员授权。\n\n是否继续？",
+                "{action} AppProxy\n版本：{}\n安装位置：{}\n\n{confirmation}",
                 payload.build,
                 root.display()
             ),
@@ -89,7 +96,11 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
         Some(setup::Progress::open()?)
     };
     if let Some(p) = &progress {
-        p.stage("正在准备安装，等待后台退出；请关闭 AppProxy 菜单。")?;
+        p.stage(if updating {
+            "正在准备升级；如 AppProxy 菜单仍打开，请先退出。"
+        } else {
+            "正在安装 AppProxy…"
+        })?;
     }
     let parent = root
         .parent()
@@ -114,7 +125,11 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
     log.sync_all()?;
     let mut transaction = Installation::begin(&root, payload)?;
     if let Some(p) = &progress {
-        p.stage("程序已保存，正在配置监听组件；请留意 Windows 授权窗口。")?;
+        p.stage(if updating {
+            "正在更新启动入口和后台组件；如有 Windows 授权弹窗，请确认。"
+        } else {
+            "正在配置启动入口和后台组件…"
+        })?;
     }
     writeln!(
         log,
@@ -125,7 +140,7 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
     app_proxy_windows::shortcuts::install_menu_entry(&root.join("app-proxy.exe"))?;
     transaction.release_for_verification();
     if let Some(p) = &progress {
-        p.stage("正在核验后台与事件监听状态…")?;
+        p.stage("正在核验安装结果…")?;
     }
     writeln!(log, "verifying coordinator and listener")?;
     run_frontend(&root, "setup-verify", log)?;
