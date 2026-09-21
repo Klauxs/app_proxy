@@ -193,6 +193,7 @@ Guard 配置与诊断入口：
 | [07-implementation-and-validation.md](D:/app_proxy/rust/docs/07-implementation-and-validation.md) | 从零实现的批次、接口验收、测试和发布门槛 |
 | [08-evidence-and-decisions.md](D:/app_proxy/rust/docs/08-evidence-and-decisions.md) | 当前源码基线、上游来源、决定及待验证事项 |
 | [09-ifeo-launch-interception.md](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md) | IFEO 取消决定、Guard 边界与配置兼容占位 |
+| [21-refactoring-plan.md](docs/21-refactoring-plan.md) | 代码结构现状、重构目标、分阶段计划与进度 |
 | [manifest.json](D:/app_proxy/rust/examples/manifest.json) | 无凭据的配置示例，含原版和独立实例 |
 | [launch-events.ndjson](D:/app_proxy/rust/examples/launch-events.ndjson) | 启动事件协议示例，不是实测日志 |
 
