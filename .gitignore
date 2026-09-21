@@ -4,7 +4,8 @@ node_modules/
 .tools/
 rust/target/
 release/
-windows/runtime/
+# Leftover local data of the removed script implementation
+/windows/
 *.log
 .env
 .env.*

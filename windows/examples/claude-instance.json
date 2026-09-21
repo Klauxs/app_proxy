@@ -1,7 +1,0 @@
-{
-  "name": "Claude 分身",
-  "exe": "C:\\Path To Claude\\Claude.exe",
-  "args": [],
-  "instance": "claude",
-  "profileId": "替换为已登记的代理ID"
-}
