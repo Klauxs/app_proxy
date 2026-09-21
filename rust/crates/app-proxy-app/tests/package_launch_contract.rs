@@ -19,7 +19,7 @@ use uuid::Uuid;
 fn expired_production_helper_receipt_is_shared_from_default_store_location() {
     let package = package::discover("claude").unwrap();
     let temp = tempfile::Builder::new()
-        .prefix("AppProxyRust-PackageContract-")
+        .prefix("AppProxy-PackageContract-")
         .tempdir_in(instance_data::local_app_data().unwrap())
         .unwrap();
     let mut store = Store::create(&temp.path().join("store")).unwrap();
@@ -148,13 +148,13 @@ fn expired_production_helper_receipt_is_shared_from_default_store_location() {
     ));
     if package.isolated_storage {
         // This UUID belongs to the temporary store created above. Never remove
-        // the package's LocalState or the shared AppProxyRust container.
+        // the package's LocalState or the shared AppProxy container.
         let namespace = instance_data::local_app_data()
             .unwrap()
             .join("Packages")
             .join(&package.family_name)
             .join("LocalState")
-            .join("AppProxyRust")
+            .join("AppProxy")
             .join(owner.store_id.to_string());
         let request_namespace = ticket
             .request_path()

@@ -476,7 +476,7 @@ fn hello(store_id: Uuid, session_id: u32, epoch: Option<Uuid>) -> Hello {
 }
 
 pub fn default_home() -> Result<PathBuf> {
-    Ok(app_proxy_windows::instance_data::local_app_data()?.join("AppProxyRust"))
+    Ok(app_proxy_windows::instance_data::local_app_data()?.join("AppProxy"))
 }
 
 fn binaries() -> Result<(PathBuf, PathBuf)> {

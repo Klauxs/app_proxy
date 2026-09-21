@@ -40,7 +40,7 @@ struct Witness {
 }
 impl Witness {
     fn name(&self) -> String {
-        format!("Local\\AppProxyRust.Core.{}.{}", self.store_id, self.nonce)
+        format!("Local\\AppProxy.Core.{}.{}", self.store_id, self.nonce)
     }
 }
 

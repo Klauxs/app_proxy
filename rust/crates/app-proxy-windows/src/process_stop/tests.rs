@@ -178,7 +178,7 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, w: WPARAM, l: 
 fn window_child() {
     let root = PathBuf::from(std::env::var_os("APP_PROXY_STOP_ROOT").unwrap());
     let mode = std::env::var("APP_PROXY_STOP_MODE").unwrap();
-    let name = crate::wide(std::ffi::OsStr::new("AppProxyRustStopFixture")).unwrap();
+    let name = crate::wide(std::ffi::OsStr::new("AppProxyStopFixture")).unwrap();
     // SAFETY: class/name/instance live through the entire native window loop;
     // the window is an invisible fixture, never a user application window.
     unsafe {

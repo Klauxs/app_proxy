@@ -21,7 +21,7 @@ impl Fixture {
         let host = temp.path().join("missing/app-proxy-host.exe");
         let scope = format!("{:x}", Sha256::digest(manifest.owner_sid.as_bytes()));
         manifest.integrations.guard_login_task = Some(LoginTask {
-            name: format!("AppProxyRust-Login-{}-{}", &scope[..16], manifest.store_id),
+            name: format!("AppProxy-Login-{}-{}", &scope[..16], manifest.store_id),
             target: host.clone(),
             args: vec![
                 "serve".into(),

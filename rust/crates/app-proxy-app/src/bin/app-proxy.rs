@@ -3,9 +3,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(version, about = "App Proxy Rust — 应用实例与代理；无参数打开中文菜单")]
+#[command(version, about = "AppProxy — 应用实例与代理；无参数打开中文菜单")]
 struct Cli {
-    /// 数据目录，默认使用当前用户的 AppProxyRust 目录
+    /// 数据目录，默认使用当前用户的 AppProxy 目录
     #[arg(long, global = true)]
     home: Option<std::path::PathBuf>,
     #[command(subcommand)]
@@ -53,7 +53,7 @@ enum Commands {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// 查询协调进程状态；首次运行创建全新 Rust 数据目录
+    /// 查询协调进程状态；首次运行创建数据目录
     Status {
         #[arg(long)]
         json: bool,

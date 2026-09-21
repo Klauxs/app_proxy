@@ -282,7 +282,7 @@ impl Session {
         let caller = identity::current()?;
         let scope = format!("{:x}", Sha256::digest(caller.user_sid.as_bytes()));
         Ok(format!(
-            "AppProxyRust-Process-{}-{}-{}",
+            "AppProxy-Process-{}-{}-{}",
             &scope[..16],
             store_id,
             caller.session_id

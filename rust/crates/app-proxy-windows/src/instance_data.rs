@@ -82,7 +82,7 @@ impl Store {
                 .join(&package.family_name)
                 .join("LocalState");
             handles.push(security::directory(&local, false)?);
-            let container = local.join("AppProxyRust");
+            let container = local.join("AppProxy");
             let mut owner = DataOwner {
                 format: "app-proxy-rust-data".into(),
                 schema_version: 1,
@@ -198,7 +198,7 @@ impl Store {
                     .join("LocalState");
                 // LocalState belongs to the installed application. Never change its ACL or adopt its content.
                 handles.push(security::directory(&local_state, false)?);
-                let container = local_state.join("AppProxyRust");
+                let container = local_state.join("AppProxy");
                 let container_owner = DataOwner {
                     store_id: None,
                     instance_id: None,
@@ -247,7 +247,7 @@ pub(crate) fn verify_package_control(
         .parent()
         .ok_or(Error::Invalid("PACKAGE_CONTROL_PATH_INVALID"))?;
     if base.file_name() != Some(std::ffi::OsStr::new(&store_id.to_string()))
-        || container.file_name() != Some(std::ffi::OsStr::new("AppProxyRust"))
+        || container.file_name() != Some(std::ffi::OsStr::new("AppProxy"))
         || local.file_name() != Some(std::ffi::OsStr::new("LocalState"))
         || local.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new(family))
     {
@@ -397,7 +397,7 @@ mod tests {
         drop(again);
         drop(a);
         let foreign = local
-            .join("Packages/Fixture_publisher/LocalState/AppProxyRust")
+            .join("Packages/Fixture_publisher/LocalState/AppProxy")
             .join(header.store_id.to_string())
             .join(MARKER);
         std::fs::write(&foreign, b"{}").unwrap();
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(
             prepared.paths.root,
             local_state
-                .join("AppProxyRust")
+                .join("AppProxy")
                 .join(first_store_id.to_string())
                 .join("instances")
                 .join(id.to_string())
@@ -499,7 +499,7 @@ mod tests {
                 .access_instance_data(id, Some(&package), || Ok(local.clone()), false)
                 .is_err()
         );
-        assert!(!local_state.join("AppProxyRust").exists());
+        assert!(!local_state.join("AppProxy").exists());
         let prepared = store
             .prepare_data_with_local_folder(id, Some(&package), || Ok(local.clone()))
             .unwrap()

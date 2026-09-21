@@ -117,7 +117,7 @@ mod tests {
     use super::*;
     #[test]
     fn read_only_guard_allows_mitigation_keys_and_rejects_root_or_filtered_debuggers() {
-        let path = format!("Software\\AppProxyRustIfeoFixture-{}", uuid::Uuid::new_v4());
+        let path = format!("Software\\AppProxyIfeoFixture-{}", uuid::Uuid::new_v4());
         let wide = crate::wide(std::ffi::OsStr::new(&path)).unwrap();
         struct Fixture(Vec<u16>);
         impl Drop for Fixture {

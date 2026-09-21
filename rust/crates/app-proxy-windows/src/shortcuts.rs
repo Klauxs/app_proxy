@@ -80,7 +80,7 @@ impl Spec {
         Ok(())
     }
     fn description(&self) -> String {
-        format!("AppProxyRust:v1:{}:{}", self.store_id, self.instance_id)
+        format!("AppProxy:v1:{}:{}", self.store_id, self.instance_id)
     }
     pub fn arguments(&self) -> Result<String> {
         self.validate()?;

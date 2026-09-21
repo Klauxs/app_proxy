@@ -161,7 +161,7 @@ impl ResourceRegistry {
     }
 
     pub fn open() -> Result<Self> {
-        Self::open_at(&instance_data::local_app_data()?.join("AppProxyRustResources"))
+        Self::open_at(&instance_data::local_app_data()?.join("AppProxyResources"))
     }
 
     fn open_at(root: &Path) -> Result<Self> {

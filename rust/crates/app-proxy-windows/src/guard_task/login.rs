@@ -132,7 +132,7 @@ impl Registration {
         if args.encode_utf16().count() + path.encode_utf16().count() + 4 > 32767 {
             return Err(Error::Invalid("GUARD_LOGIN_PATH"));
         }
-        let name = format!("AppProxyRust-Login-{}-{}", &scope[..16], self.store_id);
+        let name = format!("AppProxy-Login-{}-{}", &scope[..16], self.store_id);
         Ok(Spec {
             uri: format!("\\{name}"),
             name,
@@ -237,7 +237,7 @@ pub(super) fn add_trigger(task: &ITaskDefinition, sid: &str) -> Result<()> {
             .cast()
             .map_err(com_error)?;
         trigger
-            .SetId(&BSTR::from("AppProxyRustLogon"))
+            .SetId(&BSTR::from("AppProxyLogon"))
             .map_err(com_error)?;
         trigger.SetUserId(&BSTR::from(sid)).map_err(com_error)?;
         trigger.SetEnabled(VARIANT_TRUE).map_err(com_error)?;
@@ -285,7 +285,7 @@ pub(super) fn verify_trigger(task: &ITaskDefinition, sid: &str) -> Result<()> {
         repetition.Interval(&mut interval).map_err(com_error)?;
         repetition.Duration(&mut duration).map_err(com_error)?;
         repetition.StopAtDurationEnd(&mut stop).map_err(com_error)?;
-        if text(id)? != "AppProxyRustLogon"
+        if text(id)? != "AppProxyLogon"
             || !security::user_matches(&text(user)?, sid)?
             || !delay.is_empty()
             || !start.is_empty()

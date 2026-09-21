@@ -198,7 +198,7 @@ pub fn child(request_path: &Path, args: Vec<OsString>) -> Result<()> {
 pub fn process_probe() -> Result<ProcessReport> {
     identity::assert_ordinary_user()?;
     let directory = tempfile::Builder::new()
-        .prefix("AppProxyRust-M0-中文 空格-")
+        .prefix("AppProxy-M0-中文 空格-")
         .tempdir()?;
     let root = directory.path();
     let request = make_request(root, None, 30000)?;
@@ -301,7 +301,7 @@ pub fn package_probe(app: &str) -> Result<PackageReport> {
         return Err("PACKAGE_LOCAL_STATE_MISSING".into());
     }
     let directory = tempfile::Builder::new()
-        .prefix("AppProxyRust-M0-")
+        .prefix("AppProxy-M0-")
         .tempdir_in(parent)?;
     let request = make_request(directory.path(), Some(package.family_name.clone()), 0)?;
     package::activate_probe(

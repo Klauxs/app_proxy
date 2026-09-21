@@ -289,7 +289,7 @@ async fn login_removal_survives_lost_reply_and_replays_after_source_disappears()
         let scope = format!("{:x}", Sha256::digest(model.owner_sid.as_bytes()));
         let host = fixture.root.path().join("missing/app-proxy-host.exe");
         model.integrations.guard_login_task = Some(LoginTask {
-            name: format!("AppProxyRust-Login-{}-{}", &scope[..16], model.store_id),
+            name: format!("AppProxy-Login-{}-{}", &scope[..16], model.store_id),
             target: host.clone(),
             args: vec![
                 "serve".into(),

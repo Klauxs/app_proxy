@@ -5,7 +5,7 @@ fn spec() -> Spec {
         &identity::current().unwrap().user_sid,
         Uuid::new_v4(),
         Uuid::new_v4(),
-        Path::new(r"C:\Program Files\AppProxyRust\Guard\测试\app-proxy-host.exe"),
+        Path::new(r"C:\Program Files\AppProxy\Guard\测试\app-proxy-host.exe"),
     )
     .unwrap()
 }

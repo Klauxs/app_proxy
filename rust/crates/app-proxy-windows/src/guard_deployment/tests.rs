@@ -179,7 +179,7 @@ fn sparse_or_empty_images_are_bounded_before_read_and_ordinary_stage_does_not_wr
     assert!(
         !program_files()
             .unwrap()
-            .join("AppProxyRust/Guard")
+            .join("AppProxy/Guard")
             .join(&user[..16])
             .join(store.to_string())
             .exists()

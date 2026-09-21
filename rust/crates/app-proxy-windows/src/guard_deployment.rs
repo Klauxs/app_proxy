@@ -437,7 +437,7 @@ fn location(sid: &str, store: Uuid, create: bool) -> Result<(PathBuf, Vec<OwnedH
     // Program Files itself uses Windows' existing ACL/owner; do not alter it.
     let mut directories = vec![storage_security::directory(&path, false)?];
     let user = format!("{:x}", Sha256::digest(sid.as_bytes()));
-    for name in ["AppProxyRust", "Guard", &user[..16], &store.to_string()] {
+    for name in ["AppProxy", "Guard", &user[..16], &store.to_string()] {
         path.push(name);
         directories.push(security::directory(&path, create)?);
     }

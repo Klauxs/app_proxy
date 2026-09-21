@@ -205,7 +205,7 @@ async fn download(progress: &std::sync::Mutex<InstallProgress>) -> Result<Vec<u8
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(600))
-        .user_agent(concat!("AppProxyRust/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("AppProxy/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|_| Error::Invalid("CORE_DOWNLOAD_CLIENT_FAILED"))?;
     let response = client

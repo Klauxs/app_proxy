@@ -58,7 +58,7 @@ impl Spec {
         if !path.is_absolute() || path_text.contains(['\0', '%', '"']) || path_text.contains("$(") {
             return Err(Error::Invalid("GUARD_TASK_PATH"));
         }
-        let name = format!("AppProxyRust-Event-{}-{store}", &scope[..16]);
+        let name = format!("AppProxy-Event-{}-{store}", &scope[..16]);
         Ok(Self {
             uri: format!("\\{name}"),
             name,
@@ -259,12 +259,11 @@ fn build(service: &ITaskService, spec: &Spec) -> Result<ITaskDefinition> {
         task.SetData(&BSTR::from(if spec.login { LOGIN_MARKER } else { MARKER }))
             .map_err(com_error)?;
         let info = task.RegistrationInfo().map_err(com_error)?;
-        info.SetAuthor(&BSTR::from("AppProxyRust"))
-            .map_err(com_error)?;
+        info.SetAuthor(&BSTR::from("AppProxy")).map_err(com_error)?;
         info.SetURI(&BSTR::from(&spec.uri)).map_err(com_error)?;
         let principal = task.Principal().map_err(com_error)?;
         principal
-            .SetId(&BSTR::from("AppProxyRustOwner"))
+            .SetId(&BSTR::from("AppProxyOwner"))
             .map_err(com_error)?;
         principal
             .SetUserId(&BSTR::from(&spec.sid))
@@ -319,7 +318,7 @@ fn build(service: &ITaskService, spec: &Spec) -> Result<ITaskDefinition> {
         settings.SetEnabled(VARIANT_TRUE).map_err(com_error)?;
         let actions = task.Actions().map_err(com_error)?;
         actions
-            .SetContext(&BSTR::from("AppProxyRustOwner"))
+            .SetContext(&BSTR::from("AppProxyOwner"))
             .map_err(com_error)?;
         let action: IExecAction = actions
             .Create(TASK_ACTION_EXEC)
@@ -374,7 +373,7 @@ fn verify_definition(task: &ITaskDefinition, spec: &Spec) -> Result<()> {
         principal.GroupId(&mut group).map_err(com_error)?;
         principal.LogonType(&mut logon).map_err(com_error)?;
         principal.RunLevel(&mut level).map_err(com_error)?;
-        matches &= text(principal_id)? == "AppProxyRustOwner"
+        matches &= text(principal_id)? == "AppProxyOwner"
             && security::user_matches(&text(user)?, &spec.sid)?
             && group.is_empty()
             && logon == TASK_LOGON_INTERACTIVE_TOKEN
@@ -397,7 +396,7 @@ fn verify_definition(task: &ITaskDefinition, spec: &Spec) -> Result<()> {
         let actions = task.Actions().map_err(com_error)?;
         let mut context = BSTR::new();
         actions.Context(&mut context).map_err(com_error)?;
-        matches &= text(context)? == "AppProxyRustOwner";
+        matches &= text(context)? == "AppProxyOwner";
         actions.Count(&mut count).map_err(com_error)?;
         if count != 1 {
             return Err(Error::Invalid("GUARD_TASK_CONFLICT"));

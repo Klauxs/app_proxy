@@ -44,7 +44,7 @@ fn login_scope_quotes_store_and_rejects_substitutions_or_other_users() {
     let original = registration();
     let spec = original.spec().unwrap();
     assert!(spec.login);
-    assert!(spec.name.starts_with("AppProxyRust-Login-"));
+    assert!(spec.name.starts_with("AppProxy-Login-"));
     assert_eq!(spec.uri, format!("\\{}", spec.name));
     assert!(spec.args.contains(&original.store_id.to_string()));
     assert!(spec.args.contains(r#""C:\fixture 空格\store\\""#));
