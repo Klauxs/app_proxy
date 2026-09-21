@@ -315,7 +315,7 @@ pub(crate) async fn save(
             }
             check_profile(&catalog, network.binding())?;
             let resolved = installation::resolve(&locator).map_err(dependency)?;
-            let storage = storage(&resolved);
+            let storage = storage(root, &resolved)?;
             let mut existing = None;
             for application in catalog
                 .applications
@@ -403,7 +403,7 @@ pub(crate) async fn save(
                 source_id: id,
                 instance_id: Uuid::new_v4(),
                 name,
-                storage: storage(&resolved),
+                storage: storage(root, &resolved)?,
                 network,
                 guard: None,
             }
@@ -496,11 +496,16 @@ async fn report_saved(
     }
 }
 
-fn storage(resolved: &installation::ResolvedApplication) -> NewStorage {
-    if resolved.package().is_some_and(|p| p.isolated_storage) {
-        NewStorage::PackageLocalState
+fn storage(
+    root: &Path,
+    resolved: &installation::ResolvedApplication,
+) -> Result<NewStorage, Failure> {
+    if resolved.package().is_some_and(|p| p.isolated_storage)
+        && !app_proxy_windows::layout::shared_package_files(root).map_err(dependency)?
+    {
+        Ok(NewStorage::PackageLocalState)
     } else {
-        NewStorage::Store
+        Ok(NewStorage::Store)
     }
 }
 fn check_profile(catalog: &CatalogPage, binding: NetworkBinding) -> Result<(), Failure> {

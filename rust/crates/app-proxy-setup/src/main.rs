@@ -57,10 +57,10 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
         "这是未嵌入发行文件的开发构建，请使用 scripts/package.ps1 生成安装包。",
     ))?;
     let root = setup::install_directory()?;
-    let home = app_proxy_windows::instance_data::local_app_data()?.join("AppProxy");
+    let home = app_proxy_windows::layout::data_directory()?;
     if home.try_exists()? && app_proxy_windows::store::describe(&home).is_err() {
         return Err(Error::Invalid(
-            "数据目录 %LOCALAPPDATA%\\AppProxy 已有其他版本或无法核验的数据。未覆盖任何数据；请先备份并处理目录冲突，再重新安装。",
+            "数据目录 %USERPROFILE%\\AppProxy\\data 已有无法核验的数据。未覆盖任何数据；请先处理目录冲突，再重新安装。",
         ));
     }
     let quiet = args.iter().any(|a| a == "--yes");

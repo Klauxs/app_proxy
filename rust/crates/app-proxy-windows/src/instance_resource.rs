@@ -2,9 +2,7 @@
 //! protected claim survives its owner's death and never expires by elapsed time.
 //! This coordinates this product only; external process discovery is separate.
 use crate::{
-    Error, Result, identity,
-    installation::ResolvedApplication,
-    instance_data::{self, PreparedData},
+    Error, Result, identity, installation::ResolvedApplication, instance_data::PreparedData,
     process, storage_security as security, store,
 };
 use app_proxy_core::{FileIdentity, ProcessIdentity, launch::LaunchPhase};
@@ -161,7 +159,7 @@ impl ResourceRegistry {
     }
 
     pub fn open() -> Result<Self> {
-        Self::open_at(&instance_data::local_app_data()?.join("AppProxyResources"))
+        Self::open_at(&crate::layout::ensure_root()?.join("resources"))
     }
 
     fn open_at(root: &Path) -> Result<Self> {

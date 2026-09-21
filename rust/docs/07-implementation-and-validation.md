@@ -4,7 +4,7 @@ Rust 版从空配置和新数据根开始，按照本设计交付。旧版本兼
 
 **1. 第一次运行**
 
-默认根为 `%LOCALAPPDATA%\AppProxy`，支持 `--home` 指定空目录。创建本产品的 marker、owner SID、store UUID 和 schema 1 manifest；未知非空目录拒绝初始化。不会搜索 `.app-proxy-home.json`、旧 scopeRoot、旧 manifest、旧实例目录或旧任务。
+默认根为 `%USERPROFILE%\AppProxy\data`，支持 `--home` 指定空目录。创建本产品的 marker、owner SID、store UUID 和 schema 1 manifest；未知非空目录拒绝初始化。不会搜索 `.app-proxy-home.json`、旧 scopeRoot、旧 manifest、旧实例目录或旧任务。
 
 首次交互选择应用、原版/空白实例及代理；新增实体全部生成新 UUID。原版只启动当前安装应用的默认数据，空白实例创建新的自有数据。2026-09-20 按用户决定，普通启动不再预扫描外部进程是否运行，单实例转交与目录占用由应用处理。本工具已核验会话和未决请求仍防重；不能宣称接管外部旧进程的启动环境或让新参数对它生效。
 

@@ -54,7 +54,7 @@ request 消费采用独占 claim 文件/系统锁，helper 全程持有，确保
 
 **4. 存储虚拟化**
 
-新实例先分配稳定 StorageLocation：普通目录或关闭写虚拟化的包采用 store；其他包采用 `%LOCALAPPDATA%\Packages\<family>\LocalState\AppProxy\<namespace>`。namespace 由 store_id 稳定派生，首次使用创建本产品专属归属标记。独立任务、pipe、ETW session 和 cache 同样使用 AppProxy 命名空间，不扫描/导入旧工具目录。
+新实例先分配稳定 StorageLocation：正式用户目录布局下所有实例采用 store，分身位于 `data\instances`；开发者自定义 `--home` 位于该布局外且应用启用写虚拟化时，采用 `%LOCALAPPDATA%\Packages\<family>\LocalState\AppProxy\<namespace>`。namespace 由 store_id 稳定派生，首次使用创建本产品专属归属标记。独立任务、pipe、ETW session 和 cache 同样使用 AppProxy 命名空间，不扫描/导入旧工具目录。
 
 一旦已有分身目录，不因更新后清单属性变化自动换位置。包身份不变时继续定位同一数据位置，并验证包内可访问性；不满足则停在 storage 阶段。将来显式变更数据位置必须要求实例退出。原版启动不设置独立目录。
 

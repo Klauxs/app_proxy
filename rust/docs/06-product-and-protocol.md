@@ -49,7 +49,7 @@ app-proxy guard events enable|disable|status
 app-proxy uninstall [--keep-data]
 ```
 
-统一支持 `--home <rust-store>`，默认 `%LOCALAPPDATA%\AppProxy`。首次启动只接受空目录或有效 Rust 归属标记，不读取旧工具配置。机密放受保护输入文件或交互输入，不放命令行。详细命令 flags 在实现时由 clap 定义并同步 help，但不能改变本设计中的业务语义。
+统一支持 `--home <rust-store>`，默认 `%USERPROFILE%\AppProxy\data`。首次启动只接受空目录或有效 Rust 归属标记，不读取旧工具配置。机密放受保护输入文件或交互输入，不放命令行。详细命令 flags 在实现时由 clap 定义并同步 help，但不能改变本设计中的业务语义。
 
 已实现的高级设置入口为“管理实例 → 高级设置”及 instance settings/edit。settings 只返回数量、有限变量名称、目录模式和全局 revision；edit 读取 ACL 验证后的最大 128 KiB 普通文件，省略/null 保持、args 空数组清空，env 支持 set/unset/inherit，字段详见 README。菜单的参数 JSON 与变量值隐藏输入，最终确认固定使用之前摘要的 revision。只影响下次启动，不触发应用或共享内核重启；应用已卸载仍可保存。文件解析错误不回显内容；不修改输入 ACL 或删除输入文件。
 

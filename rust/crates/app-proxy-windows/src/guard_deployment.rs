@@ -433,46 +433,20 @@ fn location(sid: &str, store: Uuid, create: bool) -> Result<(PathBuf, Vec<OwnedH
     if store.is_nil() {
         return Err(Error::Invalid("GUARD_DEPLOYMENT_ID_REQUIRED"));
     }
-    let mut path = program_files()?;
-    // Program Files itself uses Windows' existing ACL/owner; do not alter it.
+    let mut path = if create {
+        crate::layout::ensure_root()?
+    } else {
+        crate::layout::root()?
+    };
+    // The common product root is user-owned. Only guard descendants receive the
+    // listener ACL; do not change permissions of application/configuration data.
     let mut directories = vec![storage_security::directory(&path, false)?];
     let user = format!("{:x}", Sha256::digest(sid.as_bytes()));
-    for name in ["AppProxy", "Guard", &user[..16], &store.to_string()] {
+    for name in ["guard", &user[..16], &store.to_string()] {
         path.push(name);
         directories.push(security::directory(&path, create)?);
     }
     Ok((path, directories))
-}
-
-fn program_files() -> Result<PathBuf> {
-    use windows_sys::Win32::{
-        System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_ProgramFiles, SHGetKnownFolderPath},
-    };
-    // SAFETY: fixed machine known folder, not an environment override. Windows
-    // allocates its UTF-16 result; released on success and conversion failure.
-    unsafe {
-        let mut value = std::ptr::null_mut();
-        let status =
-            SHGetKnownFolderPath(&FOLDERID_ProgramFiles, 0, std::ptr::null_mut(), &mut value);
-        if status < 0 {
-            return Err(Error::Windows {
-                operation: "GetGuardProgramFiles",
-                code: status as u32,
-            });
-        }
-        let mut length = 0;
-        while *value.add(length) != 0 {
-            length += 1;
-        }
-        let result = String::from_utf16(std::slice::from_raw_parts(value, length));
-        CoTaskMemFree(value.cast());
-        let path = PathBuf::from(result.map_err(|_| Error::Invalid("GUARD_PROGRAM_FILES_PATH"))?);
-        if !path.is_absolute() {
-            return Err(Error::Invalid("GUARD_PROGRAM_FILES_PATH"));
-        }
-        Ok(path)
-    }
 }
 
 #[cfg(test)]

@@ -39,7 +39,10 @@ fn real_pair_drains_coordinator_upgrades_restarts_and_preserves_configuration() 
             sha256: &hashes[i],
         }),
     };
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix(".setup-upgrade-test-")
+        .tempdir_in(app_proxy_windows::layout::ensure_root().unwrap())
+        .unwrap();
     let root = temp.path().join("program");
     std::fs::create_dir(&root).unwrap();
     let home = temp.path().join("data");

@@ -243,8 +243,11 @@ impl Configuration {
         };
         // Validate the proposed edit before expensive OS queries. The store
         // validates it again against the latest revision when committing.
+        let shared_package_files = self.lock()?.shared_package_files()?;
         let rejection = match registry::apply(snapshot, request) {
-            Ok((target, _)) => preflight(&target, &request.action, &resolve).err(),
+            Ok((target, _)) => {
+                preflight(&target, &request.action, &resolve, shared_package_files).err()
+            }
             Err(_) => None,
         };
         self.lock()?.apply_config_checked(request, rejection)
@@ -255,6 +258,7 @@ fn preflight(
     target: &Manifest,
     action: &ConfigAction,
     resolve: &impl Fn(&model::ApplicationLocator) -> Result<ResolvedApplication>,
+    shared_package_files: bool,
 ) -> std::result::Result<(), &'static str> {
     use model::InstanceData;
     let (application_id, new_instance_id) = match action {
@@ -285,7 +289,8 @@ fn preflight(
             .ok_or("INSTANCE_NOT_FOUND")?;
         match &instance.data {
             InstanceData::Isolated { location } => {
-                let wants_package = resolved.package().is_some_and(|p| p.isolated_storage);
+                let wants_package =
+                    resolved.package().is_some_and(|p| p.isolated_storage) && !shared_package_files;
                 if wants_package
                     != matches!(location, model::StorageLocation::PackageLocalState { .. })
                 {

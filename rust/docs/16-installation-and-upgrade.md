@@ -1,6 +1,8 @@
 # 安装与升级
 
-正式目录固定为 `%LOCALAPPDATA%\Programs\AppProxy`，配置为 `%LOCALAPPDATA%\AppProxy`。受保护监听组件仍按用户/store/generation 分代安装到 `%ProgramFiles%\AppProxy\Guard`。不移动已有开发版目录或导入旧工具数据。
+所有正式文件集中在 `%USERPROFILE%\AppProxy`：`app` 存放前后台 EXE；`data` 存放配置、订阅、代理内核、状态及 `instances` 分身数据；`resources` 保存跨 store 的资源占用记录；`guard` 按用户/store/generation 保存管理员监听组件。根路径使用 Windows Profile Known Folder，不接受环境变量冒充。监听子目录保留现有 ACL，不修改用户目录或其他子目录的权限。不移动已有开发版目录或导入旧工具数据。
+
+主目录刻意放在 AppData 外，避免 MSIX 的 AppData 重定向使普通进程、包内辅助进程和 Explorer 看到不同物理文件。正式布局下 MSIX 分身与启动通信文件同样存放在 `data`，不再分散到 `Packages\...\LocalState`。显式开发 `--home` 位于正式布局之外时，启用虚拟化的包仍使用原有 LocalState 路径；这不是旧版迁移。
 
 ## 运行中升级
 
@@ -29,7 +31,7 @@ Setup 带 `asInvoker` manifest，普通用户双击运行；不会因 Setup 文�
 ## 范围
 
 - 支持固定目录首次安装及同目录升级/重试，不自动检查或下载 AppProxy 新版本；升级时运行新的 Setup。
-- 不导入旧脚本版或 `AppProxyRust` 开发版，不做跨目录迁移。旧数据占用 `%LOCALAPPDATA%\AppProxy` 时，安装前明确报告冲突并保留全部内容。
+- 不导入旧脚本版或 `AppProxyRust` 开发版，不做跨目录迁移。旧 AppData 目录不再影响新安装；只有新的 `data` 目录存在未知内容时才报告冲突并保留全部内容。
 - 安装/升级针对默认数据根；开发用 `--home` 数据根不由正式安装器批量维护。
 - 本地生成的包尚未做 Authenticode 代码签名；哈希用于包内完整性和安装归属核验，不是发行者签名。
 - 目前不提供卸载向导；不要把本文件的升级恢复机制理解为旧产品迁移或完整卸载。

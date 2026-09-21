@@ -1,3 +1,11 @@
+**2026-09-21：确认 AppData 映射，统一用户目录布局**
+
+- 通过 `CreateFileW` 打开三个旧目录，再用 `GetFinalPathNameByHandleW` 和 `GetFileInformationByHandle` 查询实际目标。`%LOCALAPPDATA%\AppProxy`、`AppProxyResources`、`AppProxyRustResources` 均指向 `%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local` 下的对应目录；别名和实际路径的卷号、文件 ID 分别相同。Explorer 在真实 Local 目录中看不到这些条目并非隐藏属性或刷新问题。工具进程的 `GetCurrentPackageFullName` 返回 15700（没有包身份），但文件句柄已经明确证明其文件访问发生重定向，不能只靠包身份 API 排除映射。
+- 正式布局统一为 `%USERPROFILE%\AppProxy\{app,data,resources,guard}`。使用 Windows Profile Known Folder；MSIX 分身和辅助通信使用正式 data，旧 AppData 目录不导入。自定义开发 store 的包隔离行为保留。
+- 实际安装的 Claude 2.2553.1.0 与 Codex 26.915.4065.0 均完成新用户目录下的包内辅助进程读写往返：包身份核验通过，包内写入可在包外读取，临时目录自动清理。未启动 Claude/Codex 应用主进程；这证明共享文件可用，不等于分身完整登录验证。
+- 新增正式布局分身/控制目录回归，5 项实例数据测试通过；5 项配置并发测试通过；6 项安装事务测试通过；Clippy 全工作区全目标警告为错误通过。Windows 库首轮 194 项通过、24 项忽略，1 项原生进程/WMI 对照遭遇 PROCESS_QUERY_BUSY，单独重跑通过。本次发现的配置预检临时锁持续占用已经修复，慢查询与并发提交回归通过。
+- 应用层完整回归 148 项通过、11 项忽略。Release 实际 EXE 在用户目录下临时安装、协调进程退出、升级重启及配置字节保留测试通过（11.06 秒），临时安装目录和测试进程已清理。没有部署正式 app/data 或启动真实应用。
+- 新 guard 路径保留监听子目录权限；本轮没有重新安装管理员监听任务，不能视为新路径 ETW 已完成现场验证。
 **2026-09-21：单文件 Setup 与同目录升级，普通权限链路通过**
 
 新增 `AppProxy-Setup.exe`，内嵌同版前后台与 SHA-256，固定安装目录、开始菜单入口、原生进度窗口、按需监听 UAC、持久升级记录及成套文件恢复。包采用 asInvoker manifest 和静态 VC 运行库构建；既有开发版没有被替换或迁移。

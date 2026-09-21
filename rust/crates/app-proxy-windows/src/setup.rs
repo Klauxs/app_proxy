@@ -14,7 +14,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 const LOCK: &str = ".app-proxy-update.lock";
 
 pub fn install_directory() -> Result<PathBuf> {
-    Ok(crate::instance_data::local_app_data()?.join("Programs/AppProxy"))
+    Ok(crate::layout::root()?.join("app"))
 }
 
 pub fn current_directory() -> Result<PathBuf> {

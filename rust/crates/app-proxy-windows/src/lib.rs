@@ -21,6 +21,7 @@ pub mod instance_process;
 pub mod instance_resource;
 pub mod ipc;
 pub mod launch_state;
+pub mod layout;
 pub mod local_time;
 pub mod native_process;
 pub mod package;

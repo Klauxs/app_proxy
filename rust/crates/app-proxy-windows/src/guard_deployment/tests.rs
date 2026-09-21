@@ -173,13 +173,13 @@ fn sparse_or_empty_images_are_bounded_before_read_and_ordinary_stage_does_not_wr
         Err(Error::Invalid("ELEVATED_USER_REQUIRED"))
     ));
     assert!(Deployment::open(store, Uuid::nil()).is_err());
-    // Querying a missing deployment must not create its machine namespace.
+    // Querying a missing deployment must not create its user-profile namespace.
     assert!(Deployment::open(store, Uuid::new_v4()).is_err());
     let user = format!("{:x}", Sha256::digest(current.user_sid.as_bytes()));
     assert!(
-        !program_files()
+        !crate::layout::root()
             .unwrap()
-            .join("AppProxy/Guard")
+            .join("guard")
             .join(&user[..16])
             .join(store.to_string())
             .exists()

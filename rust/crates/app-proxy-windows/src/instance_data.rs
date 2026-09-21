@@ -58,6 +58,10 @@ impl PreparedData {
 }
 
 impl Store {
+    pub fn shared_package_files(&self) -> Result<bool> {
+        crate::layout::shared_package_files(self.root())
+    }
+
     /// Helper requests need the same shared LocalState as isolated package data.
     /// Only our marked namespace is created; the application's directory is not adopted.
     pub(crate) fn prepare_package_control(&self, package: &Package) -> Result<PackageControlRoot> {
@@ -71,7 +75,7 @@ impl Store {
     ) -> Result<PackageControlRoot> {
         let manifest = self.load()?;
         let mut handles = vec![security::directory(self.root(), false)?];
-        let base = if package.isolated_storage {
+        let base = if package.isolated_storage && !self.shared_package_files()? {
             app_proxy_core::model::safe_relative(Path::new(&package.family_name))
                 .map_err(|e| Error::Invalid(e.0))?;
             if Path::new(&package.family_name).components().count() != 1 {
@@ -168,6 +172,7 @@ impl Store {
         }
         if matches!(location, StorageLocation::Store { .. })
             && resolved_package.is_some_and(|p| p.isolated_storage)
+            && !self.shared_package_files()?
         {
             return Err(Error::Invalid("PACKAGE_STORAGE_MODE_CHANGED"));
         }
@@ -434,6 +439,44 @@ mod tests {
             exe: r"C:\fixture\Codex.exe".into(),
             isolated_storage: true,
         }
+    }
+
+    #[test]
+    fn profile_layout_shares_package_data_and_control_without_localstate() {
+        let fixture = tempfile::Builder::new()
+            .prefix(".layout-test-")
+            .tempdir_in(crate::layout::ensure_root().unwrap())
+            .unwrap();
+        let (mut store, id) = populated(&fixture.path().join("data"));
+        let mut manifest = store.load().unwrap();
+        manifest.instances[1].data = InstanceData::Isolated {
+            location: StorageLocation::Store {
+                relative_path: PathBuf::from("instances").join(id.to_string()),
+            },
+        };
+        store.commit(2, manifest).unwrap();
+        let prepared = store
+            .prepare_data_with_local_folder(id, Some(&package()), || {
+                panic!("profile layout must not access package LocalState")
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.paths.root,
+            store.root().join("instances").join(id.to_string())
+        );
+        let control = store
+            .prepare_package_control_with(&package(), || {
+                panic!("profile control must remain inside the store")
+            })
+            .unwrap();
+        assert_eq!(control.root, store.root().join("state"));
+        assert_eq!(
+            store::describe(control.root.parent().unwrap())
+                .unwrap()
+                .store_id,
+            store.load().unwrap().store_id
+        );
     }
 
     #[test]

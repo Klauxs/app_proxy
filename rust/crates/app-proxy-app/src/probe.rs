@@ -58,6 +58,7 @@ pub struct PackageReport {
     pub package_family_confirmed: bool,
     pub package_write_visible_outside: bool,
     pub target_application_started: bool,
+    pub storage_root: PathBuf,
 }
 
 fn now() -> Result<u64> {
@@ -291,15 +292,8 @@ pub fn process_probe() -> Result<ProcessReport> {
 pub fn package_probe(app: &str) -> Result<PackageReport> {
     identity::assert_ordinary_user()?;
     let package = package::discover(app)?;
-    // A package LocalState root remains visible both inside and outside virtualization.
-    let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA_MISSING")?;
-    let parent = PathBuf::from(local)
-        .join("Packages")
-        .join(&package.family_name)
-        .join("LocalState");
-    if !parent.is_dir() {
-        return Err("PACKAGE_LOCAL_STATE_MISSING".into());
-    }
+    // Exercise the production profile layout, outside AppData virtualization.
+    let parent = app_proxy_windows::layout::ensure_root()?;
     let directory = tempfile::Builder::new()
         .prefix("AppProxy-M0-")
         .tempdir_in(parent)?;
@@ -319,5 +313,6 @@ pub fn package_probe(app: &str) -> Result<PackageReport> {
         package_family_confirmed: true,
         package_write_visible_outside: true,
         target_application_started: false,
+        storage_root: directory.path().to_owned(),
     })
 }
