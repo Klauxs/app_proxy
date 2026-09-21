@@ -1,0 +1,212 @@
+{
+  "format": "app-proxy-rust",
+  "schema_version": 1,
+  "store_id": "06d45872-993a-499f-aebd-abff3d06bcc1",
+  "revision": 7,
+  "owner_sid": "S-1-5-21-1000-1000-1000-1001",
+  "applications": [
+    {
+      "id": "5488abfd-5498-443b-8b22-c3a3c1b43721",
+      "name": "Codex",
+      "revision": 1,
+      "locator": { "kind": "msix", "family_name": "OpenAI.Codex_2p2nqsd0c76g0", "app_id": "App" },
+      "template_ref": "builtin.codex@1"
+    },
+    {
+      "id": "7f0c1f0e-5d7a-4d3b-9a44-0c2f4f1b6a10",
+      "name": "Claude",
+      "revision": 2,
+      "locator": { "kind": "msix", "family_name": "Claude_pzs8sxrjxfjjc", "app_id": "Claude" },
+      "template_ref": "builtin.claude@1"
+    },
+    {
+      "id": "0b9e4c55-2c4e-4b0f-8a57-6f6f0a0f3c21",
+      "name": "Browser",
+      "revision": 1,
+      "locator": { "kind": "exe", "path": "C:\\Program Files\\Example\\browser.exe" },
+      "template_ref": "builtin.chromium@1"
+    },
+    {
+      "id": "c2d1a9a4-1f56-4d0e-9d0b-3a5d1e7b8f32",
+      "name": "Tool",
+      "revision": 1,
+      "locator": { "kind": "exe", "path": "C:\\Tools\\tool.exe" },
+      "template_ref": "builtin.environment@1"
+    }
+  ],
+  "instances": [
+    {
+      "id": "49177e28-b8bd-4a16-a5bc-62178c68f073",
+      "application_id": "5488abfd-5498-443b-8b22-c3a3c1b43721",
+      "name": "Codex 原版",
+      "revision": 1,
+      "data": { "kind": "original" },
+      "args": [],
+      "env": { "set": {}, "unset": [] },
+      "cwd": { "kind": "application" },
+      "network": { "kind": "profile", "profile_id": "e3144c4f-8173-4392-8f77-6a26738995bb" },
+      "guard": { "desired": "enabled", "policy": "stop_unproxied" }
+    },
+    {
+      "id": "f3f39044-a91f-4d45-9dac-dc2e0d63e37f",
+      "application_id": "5488abfd-5498-443b-8b22-c3a3c1b43721",
+      "name": "Codex 分身 1",
+      "revision": 3,
+      "data": {
+        "kind": "isolated",
+        "location": { "kind": "store", "relative_path": "instances/f3f39044-a91f-4d45-9dac-dc2e0d63e37f" }
+      },
+      "args": [],
+      "env": { "set": {}, "unset": [] },
+      "cwd": { "kind": "application" },
+      "network": { "kind": "profile", "profile_id": "2a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d" },
+      "guard": { "desired": "enabled", "policy": "stop_unproxied" }
+    },
+    {
+      "id": "b7a6c5d4-e3f2-4a1b-9c8d-7e6f5a4b3c2d",
+      "application_id": "7f0c1f0e-5d7a-4d3b-9a44-0c2f4f1b6a10",
+      "name": "Claude 分身 1",
+      "revision": 1,
+      "data": {
+        "kind": "isolated",
+        "location": {
+          "kind": "package_local_state",
+          "family_name": "Claude_pzs8sxrjxfjjc",
+          "namespace": "06d45872-993a-499f-aebd-abff3d06bcc1",
+          "relative_path": "instances/b7a6c5d4-e3f2-4a1b-9c8d-7e6f5a4b3c2d"
+        }
+      },
+      "args": [],
+      "env": { "set": {}, "unset": [] },
+      "cwd": { "kind": "application" },
+      "network": { "kind": "direct" },
+      "guard": { "desired": "disabled", "policy": "stop_unproxied" }
+    },
+    {
+      "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+      "application_id": "c2d1a9a4-1f56-4d0e-9d0b-3a5d1e7b8f32",
+      "name": "Tool 原版",
+      "revision": 2,
+      "data": { "kind": "original" },
+      "args": ["--flag", "two words", ""],
+      "env": {
+        "set": {
+          "EXAMPLE_LITERAL": { "kind": "literal", "value": "" },
+          "EXAMPLE_TOKEN": { "kind": "secret_ref", "id": "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a" }
+        },
+        "unset": ["OLD_TOKEN"]
+      },
+      "cwd": { "kind": "explicit", "path": "${app_dir}\\work" },
+      "network": { "kind": "direct" },
+      "guard": { "desired": "disabled", "policy": "stop_unproxied" }
+    }
+  ],
+  "profiles": [
+    {
+      "id": "e3144c4f-8173-4392-8f77-6a26738995bb",
+      "name": "手动代理",
+      "revision": 2,
+      "kind": "managed",
+      "endpoint": { "host": "127.0.0.1", "port": 18099 },
+      "selected_node_id": "e99c02dc-f386-46f0-8db2-836b566fa3d5",
+      "source": {
+        "kind": "manual",
+        "nodes": [
+          {
+            "id": "e99c02dc-f386-46f0-8db2-836b566fa3d5",
+            "name": "HTTP 上游",
+            "protocol": "http",
+            "host": "proxy.example",
+            "port": 8080,
+            "credentials": { "username": "user", "password_secret_id": "3c2b1a09-8f7e-4d6c-9b5a-4f3e2d1c0b9a" }
+          }
+        ]
+      }
+    },
+    {
+      "id": "6d5c4b3a-2f1e-4d0c-8b9a-7f6e5d4c3b2a",
+      "name": "SOCKS5 无认证",
+      "revision": 1,
+      "kind": "managed",
+      "endpoint": { "host": "::1", "port": 18100 },
+      "selected_node_id": "1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9",
+      "source": {
+        "kind": "manual",
+        "nodes": [
+          {
+            "id": "1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9",
+            "name": "SOCKS5 上游",
+            "protocol": "socks5",
+            "host": "10.0.0.2",
+            "port": 1080
+          }
+        ]
+      }
+    },
+    {
+      "id": "2a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d",
+      "name": "订阅多节点",
+      "revision": 4,
+      "kind": "managed",
+      "endpoint": { "host": "127.0.0.1", "port": 18101 },
+      "selected_node_id": "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9",
+      "source": {
+        "kind": "subscription",
+        "url_secret_id": "5e4d3c2b-1a09-4f8e-9d7c-6b5a4f3e2d1c",
+        "revision": 3,
+        "nodes": [
+          {
+            "id": "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9",
+            "name": "香港 01",
+            "protocol": "vless",
+            "server": "hk.example",
+            "port": 443,
+            "secret_id": "11111111-2222-4333-8444-555555555551"
+          },
+          {
+            "id": "1b2c3d4e-5f60-4172-8384-95a6b7c8d9e0",
+            "name": "日本 01",
+            "protocol": "hysteria2",
+            "server": "jp.example",
+            "port": 8443,
+            "secret_id": "11111111-2222-4333-8444-555555555552"
+          },
+          {
+            "id": "2c3d4e5f-6071-4283-8495-a6b7c8d9e0f1",
+            "name": "未选节点",
+            "protocol": "shadowsocks",
+            "server": "203.0.113.7",
+            "port": 8388,
+            "secret_id": "11111111-2222-4333-8444-555555555553"
+          }
+        ],
+        "auto_test_node_ids": [
+          "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9",
+          "1b2c3d4e-5f60-4172-8384-95a6b7c8d9e0"
+        ]
+      }
+    }
+  ],
+  "settings": {
+    "test_url": "https://www.gstatic.com/generate_204",
+    "exit_url": "https://api.ipify.org",
+    "health_policy": { "expected_statuses": [200, 204], "follow_redirects": false },
+    "download_network": { "kind": "profile", "profile_id": "6d5c4b3a-2f1e-4d0c-8b9a-7f6e5d4c3b2a" }
+  },
+  "integrations": {
+    "shortcuts": [
+      {
+        "instance_id": "f3f39044-a91f-4d45-9dac-dc2e0d63e37f",
+        "path": "C:\\Users\\Example\\Desktop\\Codex 分身 1.lnk",
+        "target": "C:\\Users\\Example\\AppProxy\\app\\app-proxy-host.exe",
+        "args": ["launch", "f3f39044-a91f-4d45-9dac-dc2e0d63e37f", "--notify"]
+      }
+    ],
+    "guard_login_task": {
+      "name": "AppProxy-Guard-Login",
+      "target": "C:\\Users\\Example\\AppProxy\\app\\app-proxy-host.exe",
+      "args": ["serve"]
+    },
+    "ifeo": []
+  }
+}

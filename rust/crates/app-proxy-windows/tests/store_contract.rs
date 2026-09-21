@@ -39,6 +39,39 @@ fn corrupt_and_unknown_config_are_never_reset() {
 }
 
 #[test]
+fn newer_schema_is_refused_with_its_own_code_and_left_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    drop(Store::create(&root).unwrap());
+    let path = root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["schema_version"] = (app_proxy_core::model::SCHEMA_VERSION + 1).into();
+    manifest["added_by_a_newer_program"] = true.into();
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        Store::open(&root),
+        Err(app_proxy_windows::Error::Invalid("STORE_SCHEMA_NEWER"))
+    ));
+    assert_eq!(fs::read(path).unwrap(), bytes);
+    assert!(fs::read_dir(root.join("backups")).unwrap().next().is_none());
+}
+
+#[test]
+fn ownership_marker_version_is_independent_of_the_manifest_schema() {
+    // The marker is written once and never rewritten. Tying it to the manifest
+    // schema would lock every existing store out after the first schema bump.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    drop(Store::create(&root).unwrap());
+    let marker: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join(".app-proxy-rust-owned.json")).unwrap())
+            .unwrap();
+    assert_eq!(marker["schema_version"], 1);
+}
+
+#[test]
 fn retired_ifeo_registration_is_rejected_without_resetting_the_store() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("store");

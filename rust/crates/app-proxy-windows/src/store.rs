@@ -14,6 +14,9 @@ use uuid::Uuid;
 use windows_sys::Win32::Storage::FileSystem::*;
 
 const MARKER: &str = ".app-proxy-rust-owned.json";
+/// The ownership marker is written once at initialization and never rewritten,
+/// so its version is independent of the manifest schema.
+const MARKER_VERSION: u32 = 1;
 const SECRET_LIMIT: usize = 256 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -42,7 +45,7 @@ pub fn describe(root: &Path) -> Result<StoreDescriptor> {
     }
     let owner: Owner = decode(&read_protected(&root.join(MARKER), &sid, 4096)?)?;
     if owner.format != FORMAT
-        || owner.schema_version != SCHEMA_VERSION
+        || owner.schema_version != MARKER_VERSION
         || owner.store_id.is_nil()
         || owner.owner_sid != sid
     {
@@ -136,7 +139,7 @@ impl Store {
         let manifest = Manifest::empty(sid.clone());
         let owner = Owner {
             format: FORMAT.into(),
-            schema_version: SCHEMA_VERSION,
+            schema_version: MARKER_VERSION,
             store_id: manifest.store_id,
             owner_sid: sid,
         };
@@ -175,7 +178,7 @@ impl Store {
         }
         let owner: Owner = decode(&read_protected(&root.join(MARKER), &sid, 4096)?)?;
         if owner.format != FORMAT
-            || owner.schema_version != SCHEMA_VERSION
+            || owner.schema_version != MARKER_VERSION
             || owner.store_id.is_nil()
             || owner.owner_sid != sid
         {
@@ -212,14 +215,33 @@ impl Store {
     }
 
     pub fn load(&self) -> Result<Manifest> {
+        Ok(self.load_stored()?.0.manifest)
+    }
+
+    /// Older schema versions are migrated in memory only. The file keeps its
+    /// stored form until the next commit, which preserves the original first.
+    fn load_stored(&self) -> Result<(app_proxy_core::model::Loaded, Vec<u8>)> {
         let _timing = crate::diagnostic_timing::Span::new("store.load", String::new);
-        let manifest: Manifest = decode(&read_protected(
+        let bytes = read_protected(
             &self.root.join("manifest.json"),
             &self.owner.owner_sid,
             MANIFEST_LIMIT,
-        )?)?;
-        self.validate(&manifest)?;
-        Ok(manifest)
+        )?;
+        let loaded = app_proxy_core::model::load(&bytes).map_err(|e| Error::Invalid(e.0))?;
+        self.validate(&loaded.manifest)?;
+        Ok((loaded, bytes))
+    }
+
+    /// Keeps the exact bytes of a manifest written by an older schema so that a
+    /// migration can be inspected or undone by hand. The first copy wins.
+    fn preserve_original(&self, stored_version: u32, bytes: &[u8]) -> Result<()> {
+        let path = self
+            .root
+            .join(format!("backups/manifest.schema-{stored_version}.json"));
+        match write_new(&path, bytes, &self.owner.owner_sid) {
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            result => result,
+        }
     }
 
     /// Consumes caller's snapshot. The saved revision is always assigned here.
@@ -234,7 +256,8 @@ impl Store {
         expected_revision: u64,
         mut manifest: Manifest,
     ) -> Result<u64> {
-        let previous = self.load()?;
+        let (stored, original) = self.load_stored()?;
+        let previous = stored.manifest;
         if previous.revision != expected_revision || manifest.revision != expected_revision {
             return Err(Error::Invalid("STALE_MANIFEST_REVISION"));
         }
@@ -244,6 +267,9 @@ impl Store {
         self.validate(&manifest)?;
         self.ensure_shortcut_instances(&manifest)?;
         let bytes = encode(&manifest, MANIFEST_LIMIT)?;
+        if stored.stored_version < SCHEMA_VERSION {
+            self.preserve_original(stored.stored_version, &original)?;
+        }
         // Backup replacement completes before touching the authoritative snapshot.
         self.replace(
             "backups/manifest.previous.json",
@@ -502,4 +528,28 @@ pub fn read_private_input(path: &Path, limit: usize) -> Result<Vec<u8>> {
     identity::assert_ordinary_user()?;
     absolute(path)?;
     read_protected(path, &identity::current()?.user_sid, limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_bytes_of_an_older_schema_are_kept_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::create(&temp.path().join("store")).unwrap();
+        store.preserve_original(1, b"first").unwrap();
+        // A later migration from the same version must not replace the evidence.
+        store.preserve_original(1, b"second").unwrap();
+        store.preserve_original(2, b"other version").unwrap();
+        let backups = store.root().join("backups");
+        assert_eq!(
+            fs::read(backups.join("manifest.schema-1.json")).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            fs::read(backups.join("manifest.schema-2.json")).unwrap(),
+            b"other version"
+        );
+    }
 }

@@ -10,6 +10,9 @@ pub const FORMAT: &str = "app-proxy-rust";
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MANIFEST_LIMIT: usize = 8 * 1024 * 1024;
 
+mod stored;
+pub use stored::{Loaded, load};
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("{0}")]
 pub struct ValidationError(pub &'static str);
