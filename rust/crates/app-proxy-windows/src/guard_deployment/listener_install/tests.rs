@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn first_upgrade_has_no_pending_record() {
+    let root = tempfile::tempdir().unwrap();
+    let pending = root.path().join("listener-upgrade.json");
+    assert!(read_upgrade(&pending).unwrap().is_none());
+    assert!(!pending.exists());
+}
+
+#[test]
 fn listener_intent_binds_scope_and_generation_and_rejects_partial_records() {
     let store = Uuid::new_v4();
     let sid = identity::current().unwrap().user_sid;
@@ -38,6 +46,16 @@ fn listener_intent_binds_scope_and_generation_and_rejects_partial_records() {
 
 #[test]
 fn only_missing_installation_objects_are_classified_as_absent() {
+    for code in [2, 3] {
+        assert!(matches!(
+            missing(Error::Io(std::io::Error::from_raw_os_error(code))),
+            Error::Invalid("GUARD_LISTENER_MISSING")
+        ));
+    }
+    assert!(matches!(
+        missing(Error::Io(std::io::Error::from_raw_os_error(5))),
+        Error::Io(_)
+    ));
     assert!(matches!(
         missing(Error::Windows {
             operation: "fixture",

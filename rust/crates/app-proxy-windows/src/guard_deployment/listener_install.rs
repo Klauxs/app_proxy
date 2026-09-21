@@ -155,6 +155,23 @@ struct Upgrade {
     to: Uuid,
 }
 
+fn read_upgrade(path: &Path) -> Result<Option<Upgrade>> {
+    // The reparse-point preflight uses std::fs and returns Error::Io, whereas
+    // CreateFile returns Error::Windows. Both missing-file forms mean a new
+    // upgrade, rather than a failed attempt to resume an existing one.
+    let file = match security::read_file(path).map_err(missing) {
+        Ok(file) => file,
+        Err(Error::Invalid("GUARD_LISTENER_MISSING")) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(RECORD_LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > RECORD_LIMIT {
+        return Err(Error::Invalid("GUARD_UPGRADE_RECORD_SIZE"));
+    }
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
 fn upgrade_listener(
     store: Uuid,
     source: Source,
@@ -164,18 +181,9 @@ fn upgrade_listener(
     issuer: &OwnedHandle,
 ) -> Result<Deployment> {
     let pending = root.join("listener-upgrade.json");
-    let next = match security::read_file(&pending) {
-        Ok(mut file) => {
-            let mut bytes = Vec::new();
-            Read::by_ref(&mut file)
-                .take(RECORD_LIMIT + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > RECORD_LIMIT {
-                return Err(Error::Invalid("GUARD_UPGRADE_RECORD_SIZE"));
-            }
-            let plan: Upgrade = serde_json::from_slice(&bytes)?;
+    let next = match read_upgrade(&pending)? {
+        Some(plan) => {
             if plan.version == 1 && plan.to == previous.generation() && plan.from != plan.to {
-                drop(file);
                 std::fs::remove_file(&pending)?;
                 return upgrade_listener(store, source, previous, root, sid, issuer);
             }
@@ -192,7 +200,7 @@ fn upgrade_listener(
             }
             next
         }
-        Err(Error::Windows { code: 2 | 3, .. }) => {
+        None => {
             let (base, directories) = location(sid, store, false)?;
             let next = stage_source(store, source, sid, base, directories)?;
             let plan = Upgrade {
@@ -205,7 +213,6 @@ fn upgrade_listener(
             file.sync_all()?;
             next
         }
-        Err(error) => return Err(error),
     };
     issuer_alive(issuer)?;
     guard_task::retire_for_upgrade(&previous)?;
