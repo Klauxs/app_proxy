@@ -28,15 +28,6 @@ pub fn is_lock_file(name: &std::ffi::OsStr) -> bool {
     name == UPDATE_LOCK || name == SETUP_LOCK
 }
 
-/// The only journal field the launch gate depends on. Unknown fields are
-/// accepted on purpose: an already installed program must keep recognising the
-/// journal of a newer installer that is replacing it.
-#[derive(serde::Deserialize)]
-struct JournalState {
-    #[serde(default)]
-    published: bool,
-}
-
 pub fn install_directory() -> Result<PathBuf> {
     Ok(crate::layout::root()?.join("app"))
 }
@@ -75,10 +66,15 @@ fn incomplete_pair(root: &Path) -> Result<bool> {
     if bytes.len() > 32768 {
         return Err(Error::Invalid("SETUP_RECORD_SIZE"));
     }
-    let state: JournalState = serde_json::from_slice(&bytes)?;
+    // Read as a generic value on purpose. An installed program must keep
+    // recognising the journal of a newer installer that is replacing it, so any
+    // journal that does not say `"published": true` in exactly that form keeps
+    // the gate closed instead of becoming an error: the coordinator then drains
+    // accepted work rather than failing its serve loop.
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
     // A persisted, fully published pair may start for integration verification.
     // An interrupted half-pair remains gated even after the installer dies.
-    Ok(!state.published)
+    Ok(value.get("published").and_then(serde_json::Value::as_bool) != Some(true))
 }
 
 pub fn ensure_available() -> Result<()> {
@@ -291,5 +287,28 @@ mod tests {
         assert!(!requested_at(root.path()).unwrap());
         std::fs::write(&journal, br#"{}"#).unwrap();
         assert!(requested_at(root.path()).unwrap());
+    }
+
+    #[test]
+    fn a_journal_in_any_other_shape_keeps_the_gate_closed_instead_of_failing() {
+        // The coordinator polls this while it serves. An error would end its loop
+        // at once; a closed gate lets it drain accepted work first.
+        let root = tempfile::tempdir().unwrap();
+        let journal = root.path().join(UPGRADE_JOURNAL);
+        for contents in [
+            br#"{"published":null}"#.as_slice(),
+            br#"{"published":"true"}"#,
+            br#"{"published":1}"#,
+            br#"[true]"#,
+            br#"{"published":true,"written_by_a_newer_installer":{"x":1}}"#,
+        ] {
+            std::fs::write(&journal, contents).unwrap();
+            let expected = contents.ends_with(b"{\"x\":1}}");
+            assert_eq!(
+                !requested_at(root.path()).unwrap(),
+                expected,
+                "{contents:?}"
+            );
+        }
     }
 }

@@ -142,11 +142,13 @@ MSIX LocalState 可能在 store 之外。每个 location 都记录自己的归�
 | `resources` 登记处标记 | `schema_version` 1 | `app-proxy-windows/src/launching/instance_resource.rs` |
 | 程序目录的 `.app-proxy-install.json` | `format` 为 `app-proxy-install-v1` | `app-proxy-setup/src/lib.rs` |
 
-manifest 的读取分两段：先只读 `format` 和 `schema_version`，再按版本处理。高于当前版本返回 `STORE_SCHEMA_NEWER`。低于当前版本时依次经过 `MIGRATIONS` 中的迁移函数，迁移只发生在内存里；下一次提交前先把原始字节原样保存为 `backups/manifest.schema-<旧版本>.json`，同一旧版本只保留第一份。当前版本的文件仍直接从字节严格解析。
+manifest 的读取分两段：先只读 `format` 和 `schema_version`，再按版本处理。高于当前版本返回 `STORE_SCHEMA_NEWER`。低于当前版本时依次经过 `MIGRATIONS` 中的迁移函数，迁移只发生在内存里；下一次提交前先把原始字节原样保存为 `backups/manifest.schema-<旧版本>.json`，同一旧版本只保留第一份；该文件与 manifest 使用同一种原子替换发布，中断的写入不会留下被误认为已保存的残缺文件。版本号由只含 `format` 和 `schema_version` 的头部读取，重复的头部字段按损坏处理；旧版本正文在迁移时按通用 JSON 值读取，正文里的重复键取最后一个。当前版本的文件仍直接从字节严格解析。
 
 改变 manifest 存储形状的步骤固定为四步：提高 `SCHEMA_VERSION`；在 `model/stored.rs` 的 `MIGRATIONS` 末尾追加一个迁移函数；新增 `tests/fixtures/manifests/v<N>.json`，内容覆盖该版本的全部变体和可选字段；不修改任何已有的历史夹具。只新增可选字段也要走这四步，这样旧版程序给出的是 `STORE_SCHEMA_NEWER` 而不是解析失败。`stored_manifest_contract` 测试要求每个历史夹具都能加载并通过校验，并要求当前夹具写回后与原文完全一致，以此发现没有升版本的形状变化。编译期断言保证迁移函数的数量与版本号一致。
 
 归属标记在初始化时写入一次，之后不再改写，所以它的版本号与 manifest 无关。
+
+迁移函数之外，升 manifest 版本的那一次发布还要处理内嵌 manifest 的短期记录。未决的配置请求记录保存了目标 manifest 以及按编码结果计算的前后摘要，内核更新计划保存了 `before` 和 `after` 两份 manifest。升级后读到的是迁移过的 manifest，它的摘要不再等于旧程序记录的 `before`，打开 store 时的恢复会以 `CONFIG_TRANSACTION_CONFLICT` 失败；记录里的旧形状 manifest 也可能无法通过严格解析。此时不会覆盖任何数据，但 store 打不开。因此首次升版本的发布必须二选一：让安装器在存在未决配置请求或内核更新计划时拒绝升级，或者让这两种记录的读取先按旧版本解释再比较。独立评审在 2026-09-22 指出了这一点，当前 `SCHEMA_VERSION` 为 1，尚未触发。
 
 短期记录的清单：`state/requests/<id>.json`、`state/core-requests/<id>.json`、`state/launch.json`、`state/shortcuts.json`、`state/login-task.json`、`state/core/runtime.json`、`state/core/update.json`、`state/core/start.json`、`state/core/generations/<generation>/generation.json`、监听安装计划、MSIX 请求目录中的 `state.json`。升级时安装器先等待协调进程排空，但未决记录可能跨升级保留。因此改变某种短期记录的格式时，新程序必须保留读取上一版本的分支，做法参照 `core_update.rs` 对 v1 计划的处理；不能假设升级时该记录已经清空。
 

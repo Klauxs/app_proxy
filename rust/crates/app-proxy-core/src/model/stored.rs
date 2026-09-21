@@ -24,15 +24,38 @@ pub struct Loaded {
     pub stored_version: u32,
 }
 
+/// The two fields read before anything else. Other fields are skipped without
+/// being built, and a repeated `format` or `schema_version` is an error rather
+/// than "last one wins", so the version that selects the reader is unambiguous.
+#[derive(serde::Deserialize)]
+struct Header {
+    format: String,
+    schema_version: u64,
+}
+
+fn stored_version(bytes: &[u8], current: u32) -> Result<u32> {
+    // Missing, mistyped or repeated header fields are damage, as they were for
+    // the strict reader; only a well-formed header can name another format.
+    let header: Header =
+        serde_json::from_slice(bytes).map_err(|_| ValidationError("INVALID_STORE_JSON"))?;
+    if header.format != FORMAT || header.schema_version == 0 {
+        return Err(ValidationError("UNSUPPORTED_FORMAT"));
+    }
+    if header.schema_version > u64::from(current) {
+        return Err(ValidationError("STORE_SCHEMA_NEWER"));
+    }
+    Ok(header.schema_version as u32)
+}
+
 /// Decodes without validating references; callers run [`Manifest::validate`].
 pub fn load(bytes: &[u8]) -> Result<Loaded> {
-    let (value, stored_version) = upgrade(bytes, MIGRATIONS)?;
-    // A current file is parsed from its bytes so that the strict reader still
-    // rejects duplicate keys; only an older file continues from the migrated value.
+    let stored_version = stored_version(bytes, SCHEMA_VERSION)?;
+    // A current file goes straight to the strict reader, which also rejects
+    // duplicate keys at every depth. Only an older file is migrated as a value.
     let manifest = if stored_version == SCHEMA_VERSION {
         serde_json::from_slice(bytes)
     } else {
-        serde_json::from_value(value)
+        serde_json::from_value(upgrade(bytes, stored_version, MIGRATIONS)?)
     }
     .map_err(|error| {
         // serde errors can contain the offending value, so only expose stable codes.
@@ -51,27 +74,12 @@ pub fn load(bytes: &[u8]) -> Result<Loaded> {
     })
 }
 
-fn upgrade(bytes: &[u8], migrations: &[Migration]) -> Result<(Value, u32)> {
-    let current = migrations.len() as u32 + 1;
+/// Applies every migration from `stored` up to the current version. Below the
+/// header a generic value keeps the last of any repeated key; a migration that
+/// cares must check for itself.
+fn upgrade(bytes: &[u8], stored: u32, migrations: &[Migration]) -> Result<Value> {
     let mut value: Value =
         serde_json::from_slice(bytes).map_err(|_| ValidationError("INVALID_STORE_JSON"))?;
-    let header = value
-        .as_object()
-        .ok_or(ValidationError("INVALID_STORE_JSON"))?;
-    if header.get("format").and_then(Value::as_str) != Some(FORMAT) {
-        return Err(ValidationError("UNSUPPORTED_FORMAT"));
-    }
-    let stored = header
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .and_then(|version| u32::try_from(version).ok())
-        .ok_or(ValidationError("UNSUPPORTED_FORMAT"))?;
-    if stored == 0 {
-        return Err(ValidationError("UNSUPPORTED_FORMAT"));
-    }
-    if stored > current {
-        return Err(ValidationError("STORE_SCHEMA_NEWER"));
-    }
     for (index, migrate) in migrations.iter().enumerate().skip(stored as usize - 1) {
         value = migrate(value)?;
         value
@@ -79,7 +87,7 @@ fn upgrade(bytes: &[u8], migrations: &[Migration]) -> Result<(Value, u32)> {
             .ok_or(ValidationError("INVALID_STORE_JSON"))?
             .insert("schema_version".into(), (index as u32 + 2).into());
     }
-    Ok((value, stored))
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -110,27 +118,45 @@ mod tests {
     #[test]
     fn older_versions_pass_through_every_later_migration_in_order() {
         let chain: &[Migration] = &[rename_a_to_b, add_c];
-        let (value, from) = upgrade(&stored(1, r#","a":7"#), chain).unwrap();
+        let run = |bytes: &[u8]| {
+            let from = stored_version(bytes, 3).unwrap();
+            (upgrade(bytes, from, chain).unwrap(), from)
+        };
+        let (value, from) = run(&stored(1, r#","a":7"#));
         assert_eq!(from, 1);
         assert_eq!(
             value,
             serde_json::json!({"format": FORMAT, "schema_version": 3, "b": 7, "c": true})
         );
         // Version 2 already has `b`; only the second migration applies.
-        let (value, from) = upgrade(&stored(2, r#","b":7"#), chain).unwrap();
+        let (value, from) = run(&stored(2, r#","b":7"#));
         assert_eq!(from, 2);
         assert_eq!(
             value,
             serde_json::json!({"format": FORMAT, "schema_version": 3, "b": 7, "c": true})
         );
-        let (value, from) = upgrade(&stored(3, r#","b":7,"c":false"#), chain).unwrap();
+        let (value, from) = run(&stored(3, r#","b":7,"c":false"#));
         assert_eq!((from, value["c"].as_bool()), (3, Some(false)));
     }
 
     #[test]
     fn newer_foreign_and_damaged_headers_have_distinct_stable_codes() {
-        let code = |bytes: &[u8]| upgrade(bytes, &[]).map(|_| ()).unwrap_err().0;
+        let code = |bytes: &[u8]| stored_version(bytes, 1).unwrap_err().0;
         assert_eq!(code(&stored(2, "")), "STORE_SCHEMA_NEWER");
+        assert_eq!(
+            code(br#"{"format":"app-proxy-rust","schema_version":99999999999}"#),
+            "STORE_SCHEMA_NEWER"
+        );
+        // A repeated version must not let the later value pick the reader.
+        assert_eq!(
+            stored_version(
+                br#"{"format":"app-proxy-rust","schema_version":2,"schema_version":1}"#,
+                2
+            )
+            .unwrap_err()
+            .0,
+            "INVALID_STORE_JSON"
+        );
         assert_eq!(code(&stored(0, "")), "UNSUPPORTED_FORMAT");
         assert_eq!(
             code(br#"{"format":"other","schema_version":1}"#),
@@ -138,7 +164,7 @@ mod tests {
         );
         assert_eq!(
             code(br#"{"format":"app-proxy-rust","schema_version":"1"}"#),
-            "UNSUPPORTED_FORMAT"
+            "INVALID_STORE_JSON"
         );
         assert_eq!(code(br#"{"format":"app-proxy-rust""#), "INVALID_STORE_JSON");
         assert_eq!(code(b"[]"), "INVALID_STORE_JSON");
@@ -147,7 +173,7 @@ mod tests {
     #[test]
     fn a_failed_migration_stops_the_chain() {
         let chain: &[Migration] = &[rename_a_to_b, add_c];
-        let error = upgrade(&stored(1, ""), chain).map(|_| ()).unwrap_err();
+        let error = upgrade(&stored(1, ""), 1, chain).map(|_| ()).unwrap_err();
         assert_eq!(error.0, "INVALID_STORE_JSON");
     }
 

@@ -235,13 +235,14 @@ impl Store {
     /// Keeps the exact bytes of a manifest written by an older schema so that a
     /// migration can be inspected or undone by hand. The first copy wins.
     fn preserve_original(&self, stored_version: u32, bytes: &[u8]) -> Result<()> {
-        let path = self
-            .root
-            .join(format!("backups/manifest.schema-{stored_version}.json"));
-        match write_new(&path, bytes, &self.owner.owner_sid) {
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            result => result,
+        let relative = format!("backups/manifest.schema-{stored_version}.json");
+        // Published by the same atomic replace as the manifest, so an interrupted
+        // write can never leave a truncated file that later counts as preserved.
+        // The store lock makes the existence check and the write one step.
+        if self.root.join(&relative).try_exists()? {
+            return Ok(());
         }
+        self.replace(&relative, bytes)
     }
 
     /// Consumes caller's snapshot. The saved revision is always assigned here.

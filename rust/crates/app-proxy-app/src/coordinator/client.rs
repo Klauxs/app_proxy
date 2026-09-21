@@ -25,18 +25,40 @@ pub(super) async fn rpc(
     wait: Duration,
     request: Request,
 ) -> Result<Reply> {
-    send(store_id, policy, wait, &request).await
+    match deliver(store_id, policy, wait, &request).await {
+        None => Err(Error::Invalid(
+            app_proxy_core::error_code::IPC_CONNECT_TIMEOUT,
+        )),
+        Some(result) => result,
+    }
 }
 
-/// `IPC_CONNECT_TIMEOUT` is the only failure that proves the request was never
-/// sent; every other error leaves the outcome to be queried by request ID.
-async fn send(
+/// `None` means the pipe could not be opened, which is the only outcome that
+/// proves the request never left this process. `Some` means delivery was
+/// attempted; on error the outcome is queried by request ID. The distinction is
+/// made locally and not from an error code, because a code received from the
+/// peer can spell any well-formed name.
+type Delivery = Option<Result<Reply>>;
+
+async fn deliver(
     store_id: Uuid,
     policy: &ipc::PeerPolicy,
     wait: Duration,
     request: &Request,
+) -> Delivery {
+    match ipc::connect(store_id, policy, wait).await {
+        Ok(connection) => Some(exchange(connection, store_id, policy, request).await),
+        Err(Error::Invalid(app_proxy_core::error_code::IPC_CONNECT_TIMEOUT)) => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
+async fn exchange(
+    mut connection: ipc::Connection<tokio::net::windows::named_pipe::NamedPipeClient>,
+    store_id: Uuid,
+    policy: &ipc::PeerPolicy,
+    request: &Request,
 ) -> Result<Reply> {
-    let mut connection = ipc::connect(store_id, policy, wait).await?;
     connection
         .send(&hello(store_id, policy.session_id, None))
         .await?;
@@ -508,7 +530,7 @@ pub(super) async fn client_operation(
     // A running coordinator answers on the first connection. Only when nobody
     // is listening does the client go through discovery and startup, after
     // which the same, still unsent request is delivered.
-    match send(
+    if let Some(result) = deliver(
         descriptor.store_id,
         &policy,
         Duration::from_millis(40),
@@ -516,11 +538,15 @@ pub(super) async fn client_operation(
     )
     .await
     {
-        Err(Error::Invalid(app_proxy_core::error_code::IPC_CONNECT_TIMEOUT)) => {}
-        result => return result,
+        return result;
     }
     let owner = status(root).await?;
-    send(owner.store_id, &policy, Duration::from_secs(1), &request).await
+    match deliver(owner.store_id, &policy, Duration::from_secs(1), &request).await {
+        None => Err(Error::Invalid(
+            app_proxy_core::error_code::IPC_CONNECT_TIMEOUT,
+        )),
+        Some(result) => result,
+    }
 }
 
 /// Launch-on-demand status flow; no arbitrary commands or target processes are accepted.

@@ -140,6 +140,10 @@ pub fn intern(code: &str) -> Option<&'static str> {
     if let Ok(index) = INDETERMINATE.binary_search(&code) {
         return Some(INDETERMINATE[index]);
     }
+    // The codes callers branch on must survive even when the table below is full.
+    if let Some(named) = NAMED.iter().find(|named| **named == code) {
+        return Some(named);
+    }
     static SEEN: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let mut seen = SEEN
         .get_or_init(Default::default)
@@ -201,6 +205,17 @@ mod tests {
             assert_eq!(intern(text), None, "{text}");
         }
         assert_eq!(intern(&"A".repeat(MAX_LEN + 1)), None);
+        // Named and registered codes never depend on the bounded table.
+        for index in 0..MAX_INTERNED + 8 {
+            let _ = intern(&format!("FILLER_CODE_{index}"));
+        }
+        assert_eq!(intern("NOT_SEEN_BEFORE_THE_TABLE_FILLED"), None);
+        assert_eq!(intern("REQUEST_ID_CONFLICT_X"), None);
+        assert_eq!(intern("IPC_CONNECT_TIMEOUT"), Some(IPC_CONNECT_TIMEOUT));
+        assert_eq!(
+            intern("CORE_STOP_UNCONFIRMED"),
+            Some("CORE_STOP_UNCONFIRMED")
+        );
     }
 
     fn literals(dir: &Path, found: &mut BTreeSet<String>) {
