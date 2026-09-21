@@ -64,8 +64,8 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
         ));
     }
     let quiet = args.iter().any(|a| a == "--yes");
-    let updating = root.join(".app-proxy-install.json").try_exists()?
-        || root.join(".app-proxy-upgrade.json").try_exists()?;
+    let updating = root.join(setup::INSTALL_RECORD).try_exists()?
+        || root.join(setup::UPGRADE_JOURNAL).try_exists()?;
     let action = if updating {
         "升级或修复"
     } else {
@@ -110,12 +110,12 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
     }
     // Never adopt a preexisting arbitrary installation directory.
     if root.try_exists()?
-        && !root.join(".app-proxy-install.json").try_exists()?
-        && !root.join(".app-proxy-upgrade.json").try_exists()?
+        && !root.join(setup::INSTALL_RECORD).try_exists()?
+        && !root.join(setup::UPGRADE_JOURNAL).try_exists()?
     {
         for entry in std::fs::read_dir(&root)? {
             let name = entry?.file_name();
-            if name != ".app-proxy-update.lock" && name != ".app-proxy-setup.lock" {
+            if !setup::is_lock_file(&name) {
                 return Err(Error::Invalid("固定安装目录已有其他文件，未覆盖。"));
             }
         }

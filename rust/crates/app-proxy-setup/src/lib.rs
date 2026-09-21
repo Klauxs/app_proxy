@@ -15,9 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const NAMES: [&str; 2] = ["app-proxy.exe", "app-proxy-host.exe"];
-const MARKER: &str = ".app-proxy-install.json";
-const JOURNAL: &str = ".app-proxy-upgrade.json";
+pub const NAMES: [&str; 2] = setup::PROGRAMS;
+const MARKER: &str = setup::INSTALL_RECORD;
+const JOURNAL: &str = setup::UPGRADE_JOURNAL;
 const LIMIT: u64 = 256 * 1024 * 1024;
 
 pub struct FilePayload<'a> {
@@ -100,7 +100,7 @@ impl Installation {
         let new = payload.manifest()?;
         new.validate()?;
         let _root_pin = setup::pin_directory(root)?;
-        let owner_path = root.join(".app-proxy-setup.lock");
+        let owner_path = root.join(setup::SETUP_LOCK);
         if owner_path.try_exists()? {
             setup::verify_plain_file(&owner_path)?;
         }
@@ -144,7 +144,7 @@ impl Installation {
             // A first install owns no arbitrary existing directory contents.
             for item in fs::read_dir(root)? {
                 let name = item?.file_name();
-                if name != ".app-proxy-update.lock" && name != ".app-proxy-setup.lock" {
+                if !setup::is_lock_file(&name) {
                     return Err(Error::Invalid(
                         "安装目录已有未登记文件，请保留原文件并处理目录冲突后重试。",
                     ));

@@ -9,6 +9,10 @@ $commit = (& git -C $rustRoot rev-parse --short=12 HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Cannot determine build revision.' }
 $dirty = @(& git -C $rustRoot status --porcelain --untracked-files=normal)
 $suffix = if ($dirty.Count -gt 0) { '-dirty' } else { '' }
+# The build ID carries the workspace version; Cargo.toml is its only source.
+$manifest = Get-Content -LiteralPath (Join-Path $rustRoot 'Cargo.toml') -Raw
+if ($manifest -notmatch '(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"') { throw 'Cannot determine workspace version.' }
+$version = $Matches[1]
 $oldPayload = $env:APP_PROXY_PAYLOAD_DIR
 $oldBuild = $env:APP_PROXY_BUILD_ID
 $oldFlags = $env:RUSTFLAGS
@@ -18,7 +22,7 @@ try {
     & $cargo -CargoArgs @('build', '--release', '--locked', '-p', 'app-proxy-app', '--bins', '--target-dir', $buildRoot)
     if ($LASTEXITCODE -ne 0) { throw 'Frontend/backend build failed.' }
     $env:APP_PROXY_PAYLOAD_DIR = $payloadRoot
-    $env:APP_PROXY_BUILD_ID = "0.1.0+$commit$suffix"
+    $env:APP_PROXY_BUILD_ID = "$version+$commit$suffix"
     & $cargo -CargoArgs @('build', '--release', '--locked', '-p', 'app-proxy-setup', '--features', 'bundle', '--target-dir', $buildRoot)
     if ($LASTEXITCODE -ne 0) { throw 'Setup build failed.' }
     $releaseRoot = Join-Path $rustRoot 'target\release'

@@ -11,7 +11,31 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
-const LOCK: &str = ".app-proxy-update.lock";
+/// Files the installer keeps in the program directory. The installer crate and
+/// the launch gate below must agree on these names.
+pub const PROGRAMS: [&str; 2] = ["app-proxy.exe", "app-proxy-host.exe"];
+/// Record of the installed pair; its presence marks a directory we own.
+pub const INSTALL_RECORD: &str = ".app-proxy-install.json";
+/// Present only while an executable pair is being replaced.
+pub const UPGRADE_JOURNAL: &str = ".app-proxy-upgrade.json";
+/// Exclusive lease that asks a running coordinator to drain.
+pub const UPDATE_LOCK: &str = ".app-proxy-update.lock";
+/// Serializes installers working on the same directory.
+pub const SETUP_LOCK: &str = ".app-proxy-setup.lock";
+
+/// Lock files may exist in a directory that has never held an installation.
+pub fn is_lock_file(name: &std::ffi::OsStr) -> bool {
+    name == UPDATE_LOCK || name == SETUP_LOCK
+}
+
+/// The only journal field the launch gate depends on. Unknown fields are
+/// accepted on purpose: an already installed program must keep recognising the
+/// journal of a newer installer that is replacing it.
+#[derive(serde::Deserialize)]
+struct JournalState {
+    #[serde(default)]
+    published: bool,
+}
 
 pub fn install_directory() -> Result<PathBuf> {
     Ok(crate::layout::root()?.join("app"))
@@ -25,7 +49,7 @@ pub fn current_directory() -> Result<PathBuf> {
 }
 
 pub fn requested_at(root: &Path) -> Result<bool> {
-    let path = root.join(LOCK);
+    let path = root.join(UPDATE_LOCK);
     match OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
@@ -40,7 +64,7 @@ pub fn requested_at(root: &Path) -> Result<bool> {
 }
 
 fn incomplete_pair(root: &Path) -> Result<bool> {
-    let path = root.join(".app-proxy-upgrade.json");
+    let path = root.join(UPGRADE_JOURNAL);
     let file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -51,10 +75,10 @@ fn incomplete_pair(root: &Path) -> Result<bool> {
     if bytes.len() > 32768 {
         return Err(Error::Invalid("SETUP_RECORD_SIZE"));
     }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let state: JournalState = serde_json::from_slice(&bytes)?;
     // A persisted, fully published pair may start for integration verification.
     // An interrupted half-pair remains gated even after the installer dies.
-    Ok(value.get("published").and_then(serde_json::Value::as_bool) != Some(true))
+    Ok(!state.published)
 }
 
 pub fn ensure_available() -> Result<()> {
@@ -76,7 +100,7 @@ impl Maintenance {
         for path in root.ancestors() {
             directories.push(security::directory(path, false)?);
         }
-        let path = root.join(LOCK);
+        let path = root.join(UPDATE_LOCK);
         if path.try_exists()? {
             security::no_reparse(&path)?;
         }
