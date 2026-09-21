@@ -3,6 +3,7 @@
 use crate::{Error, Result, identity, storage_security as security};
 use std::{
     fs::{File, OpenOptions},
+    io::Read,
     os::windows::{fs::OpenOptionsExt, io::OwnedHandle},
     path::{Path, PathBuf},
 };
@@ -31,11 +32,29 @@ pub fn requested_at(root: &Path) -> Result<bool> {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
     {
-        Ok(_) => Ok(false),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(_) => incomplete_pair(root),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => incomplete_pair(root),
         Err(e) if e.raw_os_error() == Some(32) => Ok(true),
         Err(e) => Err(e.into()),
     }
+}
+
+fn incomplete_pair(root: &Path) -> Result<bool> {
+    let path = root.join(".app-proxy-upgrade.json");
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(32769).read_to_end(&mut bytes)?;
+    if bytes.len() > 32768 {
+        return Err(Error::Invalid("SETUP_RECORD_SIZE"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    // A persisted, fully published pair may start for integration verification.
+    // An interrupted half-pair remains gated even after the installer dies.
+    Ok(value.get("published").and_then(serde_json::Value::as_bool) != Some(true))
 }
 
 pub fn ensure_available() -> Result<()> {
@@ -159,6 +178,70 @@ pub fn open_frontend(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub struct Progress {
+    dialog: Option<windows::Win32::UI::Shell::IProgressDialog>,
+}
+impl Progress {
+    pub fn open() -> Result<Self> {
+        use windows::Win32::{System::Com::*, UI::Shell::*};
+        let map = |e: windows::core::Error| Error::Windows {
+            operation: "SetupProgress",
+            code: e.code().0 as u32,
+        };
+        // SAFETY: ordinary foreground thread; COM is balanced by Drop on this
+        // same thread. No interface is sent to a worker.
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .map_err(map)?;
+            let mut progress = Self { dialog: None };
+            progress.dialog = Some(
+                CoCreateInstance(&CLSID_ProgressDialog, None, CLSCTX_INPROC_SERVER).map_err(map)?,
+            );
+            let dialog = progress.dialog.as_ref().unwrap();
+            dialog
+                .SetTitle(windows::core::w!("AppProxy 安装程序"))
+                .map_err(map)?;
+            dialog
+                .StartProgressDialog(
+                    None,
+                    None,
+                    PROGDLG_NOCANCEL | PROGDLG_MARQUEEPROGRESS | PROGDLG_NOTIME,
+                    None,
+                )
+                .map_err(map)?;
+            Ok(progress)
+        }
+    }
+    pub fn stage(&self, message: &str) -> Result<()> {
+        let value = crate::wide(std::ffi::OsStr::new(message))?;
+        // SAFETY: the retained same-thread dialog and string live through call.
+        unsafe {
+            self.dialog.as_ref().unwrap().SetLine(
+                1,
+                windows::core::PCWSTR(value.as_ptr()),
+                false,
+                None,
+            )
+        }
+        .map_err(|e| Error::Windows {
+            operation: "SetupProgress",
+            code: e.code().0 as u32,
+        })
+    }
+}
+impl Drop for Progress {
+    fn drop(&mut self) {
+        // SAFETY: release interface before balancing the initialization above.
+        unsafe {
+            if let Some(dialog) = self.dialog.take() {
+                let _ = dialog.StopProgressDialog();
+            }
+            windows::Win32::System::Com::CoUninitialize();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +255,17 @@ mod tests {
         drop(lease);
         assert!(!requested_at(root.path()).unwrap());
         Maintenance::acquire(root.path()).unwrap();
+    }
+
+    #[test]
+    fn interrupted_pair_stays_blocked_but_published_pair_can_be_verified() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = root.path().join(".app-proxy-upgrade.json");
+        std::fs::write(&journal, br#"{"published":false}"#).unwrap();
+        assert!(requested_at(root.path()).unwrap());
+        std::fs::write(&journal, br#"{"published":true}"#).unwrap();
+        assert!(!requested_at(root.path()).unwrap());
+        std::fs::write(&journal, br#"{}"#).unwrap();
+        assert!(requested_at(root.path()).unwrap());
     }
 }

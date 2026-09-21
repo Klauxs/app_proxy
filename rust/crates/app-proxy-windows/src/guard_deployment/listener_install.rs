@@ -79,6 +79,9 @@ impl Deployment {
                 if upgrade_from != Some(deployment.generation()) {
                     return Err(Error::Invalid("GUARD_LISTENER_RELEASE_CONFLICT"));
                 }
+                if deployment.record.coordinator_path != source.path {
+                    return Err(Error::Invalid("GUARD_UPDATE_DIRECTORY_CHANGED"));
+                }
                 return upgrade_listener(
                     store,
                     source,

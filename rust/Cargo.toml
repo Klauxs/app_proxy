@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app-proxy-core", "crates/app-proxy-windows", "crates/app-proxy-app"]
+members = ["crates/app-proxy-core", "crates/app-proxy-windows", "crates/app-proxy-app", "crates/app-proxy-setup"]
 resolver = "3"
 
 [workspace.package]

@@ -111,6 +111,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-proxy-setup"
+version = "0.1.0"
+dependencies = [
+ "app-proxy-windows",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "app-proxy-windows"
 version = "0.1.0"
 dependencies = [

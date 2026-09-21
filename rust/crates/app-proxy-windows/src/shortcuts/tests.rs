@@ -1,6 +1,23 @@
 use super::*;
 use std::os::windows::process::CommandExt;
 
+#[test]
+fn installer_menu_link_reuses_exact_entry_and_preserves_foreign_contents() {
+    let root = tempfile::tempdir().unwrap();
+    let frontend = std::env::current_exe().unwrap();
+    let path = root.path().join("AppProxy.lnk");
+    menu_entry_at(&frontend, &path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    menu_entry_at(&frontend, &path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(menu_entry_at(&root.path().join("other.exe"), &path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let foreign = root.path().join("foreign.lnk");
+    std::fs::write(&foreign, b"foreign link").unwrap();
+    assert!(menu_entry_at(&frontend, &foreign).is_err());
+    assert_eq!(std::fs::read(foreign).unwrap(), b"foreign link");
+}
+
 // Fixture edits deliberately race Shell notifications. Retry only Windows
 // sharing violations; never hide content/identity assertions or other errors.
 pub(super) fn edit_fixture(mut edit: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {

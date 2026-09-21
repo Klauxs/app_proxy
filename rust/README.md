@@ -198,7 +198,7 @@ Guard 配置与诊断入口：
 
 **关键决定**
 
-2026-09-21 发行命名：产品统一称为 AppProxy，目录、计划任务、ETW 会话及快捷方式标记不再使用 AppProxyRust。默认数据目录为 `%LOCALAPPDATA%\AppProxy`，受保护监听组件位于 `%ProgramFiles%\AppProxy\Guard`，包内专属容器为 `LocalState\AppProxy`。规划中的单文件 `AppProxy-Setup.exe` 内嵌同版本前后台 EXE，释放到固定的 `%LOCALAPPDATA%\Programs\AppProxy`；安装器及自动升级流程尚未实现。持久化文件格式和归属校验标识不因展示名称调整而更改。现有开发版数据、系统任务和运行程序未就地迁移；首次切换正式安装时需停止旧组件、处理已有登记并核验新入口，不能把新二进制直接覆盖后视为完成升级。
+2026-09-21 发行命名：产品统一称为 AppProxy，目录、计划任务、ETW 会话及快捷方式标记不再使用 AppProxyRust。默认数据目录为 `%LOCALAPPDATA%\AppProxy`，受保护监听组件位于 `%ProgramFiles%\AppProxy\Guard`，包内专属容器为 `LocalState\AppProxy`。单文件 `AppProxy-Setup.exe` 内嵌同版本前后台 EXE，安装到固定的 `%LOCALAPPDATA%\Programs\AppProxy`，后续运行新版 Setup 在原目录升级；详见 [安装与升级](docs/16-installation-and-upgrade.md)。持久化文件格式和归属校验标识不因展示名称调整而更改。现有开发版数据、系统任务和运行程序未就地迁移；首次切换正式安装时需处理已有登记并核验新入口，不能把新二进制直接覆盖后视为完成升级。
 
 2026-09-20 范围收敛：不做跨目录升级或移动后入口重定向，也不做 Windows 登录任务被外部删除后的专用检测、自愈或修复流程。这两项不再列为待办或发布门槛。保留固定目录使用、正常登录自启的创建/查询/移除，以及已接受但未完成操作的显式恢复。已有只读查询仍如实报告入口不可用，不能把历史创建回执当作当前就绪。
 

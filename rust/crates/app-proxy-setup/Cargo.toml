@@ -1,0 +1,26 @@
+[package]
+name = "app-proxy-setup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+bundle = []
+
+[dependencies]
+app-proxy-windows.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tempfile.workspace = true
+
+[build-dependencies]
+sha2 = "0.10"
+
+[[bin]]
+name = "AppProxy-Setup"
+path = "src/main.rs"
+
+[lints]
+workspace = true

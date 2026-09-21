@@ -160,6 +160,135 @@ pub fn desktop() -> Result<PathBuf> {
     }
 }
 
+/// Fixed per-user Start menu entry for the installed interactive frontend.
+/// Existing links must match our exact target and description; never overwrite
+/// another application's entry. The install transaction owns retry behavior.
+pub fn install_menu_entry(frontend: &Path) -> Result<()> {
+    // SAFETY: fixed current-user known folder; copy then free Shell allocation.
+    let path = unsafe {
+        let folder =
+            SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_DEFAULT, None).map_err(com_error)?;
+        let path = folder
+            .to_string()
+            .map(PathBuf::from)
+            .map_err(|_| Error::Invalid("SHORTCUT_PATH_INVALID"));
+        CoTaskMemFree(Some(folder.0.cast()));
+        path?.join("AppProxy.lnk")
+    };
+    menu_entry_at(frontend, &path)
+}
+
+fn menu_entry_at(frontend: &Path, path: &Path) -> Result<()> {
+    identity::assert_ordinary_user()?;
+    let frontend = shell_path(frontend)?;
+    let target = wide(frontend.as_os_str())?;
+    let cwd = wide(
+        frontend
+            .parent()
+            .ok_or(Error::Invalid("SHORTCUT_PATH_INVALID"))?
+            .as_os_str(),
+    )?;
+    let description = wide(std::ffi::OsStr::new("AppProxy - 应用实例与代理"))?;
+    let session = Session::new()?;
+    // SAFETY: fixed known folder for current user, owned COM objects and wide
+    // buffers on this thread. Links are read without Resolve or execution.
+    unsafe {
+        let _directory = parent(path)?;
+        if path.try_exists()? {
+            security::no_reparse(path)?;
+            let mut bytes = Vec::new();
+            File::open(path)?
+                .take(LIMIT as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > LIMIT {
+                return Err(Error::Invalid("SHORTCUT_SIZE_INVALID"));
+            }
+            let stream =
+                SHCreateMemStream(Some(&bytes)).ok_or(Error::Invalid("SHORTCUT_STREAM_FAILED"))?;
+            let persist: IPersistStream = session.link.cast().map_err(com_error)?;
+            persist.Load(&stream).map_err(com_error)?;
+            let mut observed = vec![0u16; 32768];
+            session
+                .link
+                .GetPath(&mut observed, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32)
+                .map_err(com_error)?;
+            let observed = String::from_utf16_lossy(
+                &observed[..observed
+                    .iter()
+                    .position(|c| *c == 0)
+                    .unwrap_or(observed.len())],
+            );
+            let mut title = vec![0u16; 1024];
+            session.link.GetDescription(&mut title).map_err(com_error)?;
+            let title = String::from_utf16_lossy(
+                &title[..title.iter().position(|c| *c == 0).unwrap_or(title.len())],
+            );
+            let mut args = vec![0u16; 32768];
+            session.link.GetArguments(&mut args).map_err(com_error)?;
+            let data: IShellLinkDataList = session.link.cast().map_err(com_error)?;
+            let flags = data.GetFlags().map_err(com_error)?;
+            if !observed.eq_ignore_ascii_case(&frontend.to_string_lossy())
+                || title != "AppProxy - 应用实例与代理"
+                || args[0] != 0
+                || flags & !ALLOWED_FLAGS != 0
+                || flags & TRACKING_DISABLED != TRACKING_DISABLED
+            {
+                return Err(Error::Invalid("SETUP_START_MENU_CONFLICT"));
+            }
+            return Ok(());
+        }
+        session
+            .link
+            .SetPath(PCWSTR(target.as_ptr()))
+            .map_err(com_error)?;
+        session
+            .link
+            .SetWorkingDirectory(PCWSTR(cwd.as_ptr()))
+            .map_err(com_error)?;
+        session
+            .link
+            .SetDescription(PCWSTR(description.as_ptr()))
+            .map_err(com_error)?;
+        session
+            .link
+            .SetIconLocation(PCWSTR(target.as_ptr()), 0)
+            .map_err(com_error)?;
+        session.link.SetShowCmd(SW_SHOWNORMAL).map_err(com_error)?;
+        let data: IShellLinkDataList = session.link.cast().map_err(com_error)?;
+        data.SetFlags((data.GetFlags().map_err(com_error)? & ALLOWED_FLAGS) | TRACKING_DISABLED)
+            .map_err(com_error)?;
+        let persist: IPersistStream = session.link.cast().map_err(com_error)?;
+        let stream = SHCreateMemStream(None).ok_or(Error::Invalid("SHORTCUT_STREAM_FAILED"))?;
+        persist.Save(&stream, true).map_err(com_error)?;
+        let mut stat = STATSTG::default();
+        stream.Stat(&mut stat, STATFLAG_NONAME).map_err(com_error)?;
+        if stat.cbSize == 0 || stat.cbSize > LIMIT as u64 {
+            return Err(Error::Invalid("SHORTCUT_SIZE_INVALID"));
+        }
+        stream.Seek(0, STREAM_SEEK_SET, None).map_err(com_error)?;
+        let mut bytes = vec![0; stat.cbSize as usize];
+        let mut read = 0;
+        stream
+            .Read(
+                bytes.as_mut_ptr().cast(),
+                bytes.len() as u32,
+                Some(&mut read),
+            )
+            .ok()
+            .map_err(com_error)?;
+        if read as usize != bytes.len() {
+            return Err(Error::Invalid("SHORTCUT_STREAM_TRUNCATED"));
+        }
+        let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist_noclobber(path)
+            .map_err(|_| Error::Invalid("SETUP_START_MENU_CONFLICT"))?;
+    }
+    Ok(())
+}
+
 fn absolute(path: &Path) -> Result<()> {
     if !path.is_absolute() || !matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
         || path.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir))

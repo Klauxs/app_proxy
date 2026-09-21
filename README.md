@@ -1,16 +1,29 @@
-# App Proxy
+# AppProxy
 
-Windows 实现位于 `windows/`；`AppProxyInstaller-scripts/` 是 macOS 原版只读参考。
+Windows x64 应用实例与代理管理工具。当前实现位于 `rust/`，产品名称统一为 **AppProxy**。
 
-- 使用说明：[windows/README.md](windows/README.md)
-- 当前设计：[Windows-App-Proxy-设计与实现.md](Windows-App-Proxy-设计与实现.md)
-- 实测记录：[windows/TEST-RESULTS.md](windows/TEST-RESULTS.md)
-- 决策与改动：[CHANGELOG.md](CHANGELOG.md)
+双击 `AppProxy-Setup.exe` 安装。前台与后台程序已嵌入这个单文件安装包，不需要另外下载。安装结束后从开始菜单打开 **AppProxy**，选择应用、配置代理并创建实例；需要监听保护时按提示完成 Windows 授权。
 
-实现计划及最初交接文档保留历史背景；与当前实现冲突时，以当前设计、使用说明和验证记录为准。
+| 内容 | 固定位置 |
+|---|---|
+| 程序 | `%LOCALAPPDATA%\Programs\AppProxy` |
+| 配置、订阅、实例数据及托管内核 | `%LOCALAPPDATA%\AppProxy` |
+| 受保护监听组件 | `%ProgramFiles%\AppProxy\Guard` |
 
-## 本地版本管理
+升级时退出 AppProxy 菜单，运行新版 Setup。安装器等待协调进程结束当前工作后成套替换程序，再更新监听及核验启动入口；已有应用和 sing-box 保留。授权取消或流程中断时保留配置，按安装提示重新运行同一个安装包继续。
 
-2026-09-18 建立 Git 基线，保存当前源码、macOS 参考、文档和测试。建立仓库之前的逐次改动无法还原为真实提交历史。Git 不会自动保存聊天，关键决策须写入上述文档再提交。
+已有旧脚本版数据占用默认数据目录时会提示冲突，不自动覆盖或导入。开发版 `AppProxyRust` 数据不自动迁移。安装包当前未签名，不含卸载向导。
 
-依赖、运行时二进制、发行包、测试临时数据及认证截图不入库；依赖通过 `npm ci` 恢复，运行时及发行包通过 `npm run package` 生成。本地仓库没有远端备份。
+开发构建安装包：
+
+```powershell
+.\rust\scripts\package.ps1
+```
+
+产物：`rust\target\release\AppProxy-Setup.exe`。只需分发这一个文件。`target/package` 是构建缓存，不是需要另行安装的程序目录。
+
+- [安装与升级设计](rust/docs/16-installation-and-upgrade.md)
+- [使用与开发说明](rust/README.md)
+- [验证记录](rust/TEST-RESULTS.md)
+
+`windows/` 和 `AppProxyInstaller-scripts/` 保留历史参考，不作为当前发行入口。
