@@ -641,25 +641,16 @@ fn get_text(read: impl FnOnce(&mut [u16]) -> windows::core::Result<()>) -> Resul
     String::from_utf16(&buffer[..end]).map_err(|_| Error::Invalid("SHORTCUT_TEXT_INVALID"))
 }
 
-struct Apartment;
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        /* SAFETY: paired on this synchronous thread. */
-        unsafe { CoUninitialize() }
-    }
-}
+use crate::com::Apartment;
 struct Session {
     link: IShellLinkW,
     _apartment: Apartment,
 }
 impl Session {
     fn new() -> Result<Self> {
+        let apartment = Apartment::enter(COINIT_APARTMENTTHREADED, "ShortcutCom")?;
         // SAFETY: synchronous caller, no interfaces cross threads or await points.
         unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-                .ok()
-                .map_err(com_error)?;
-            let apartment = Apartment;
             let link =
                 CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(com_error)?;
             Ok(Self {

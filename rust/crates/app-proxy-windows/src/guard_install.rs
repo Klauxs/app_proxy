@@ -11,13 +11,12 @@ use std::{
     ffi::OsStr,
     mem::size_of,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    ptr,
     time::Duration,
 };
 use uuid::Uuid;
 use windows_sys::Win32::{
     Foundation::*,
-    System::{Com::*, Threading::*},
+    System::Threading::*,
     UI::{Shell::*, WindowsAndMessaging::SW_HIDE},
 };
 
@@ -186,13 +185,6 @@ fn decode(encoded: &str) -> Result<Ticket> {
     Ok(ticket)
 }
 
-struct Apartment;
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        // SAFETY: balanced successful initialization on this same thread.
-        unsafe { CoUninitialize() };
-    }
-}
 fn launch(source: &InstallerSource, encoded: &str) -> Result<OwnedHandle> {
     // All parameter characters are fixed ASCII or strict lowercase hex; no
     // shell, escaping of user strings, env substitution or request path.
@@ -207,16 +199,12 @@ fn launch(source: &InstallerSource, encoded: &str) -> Result<OwnedHandle> {
             .as_os_str(),
     )?;
     let parameters = wide(OsStr::new(&format!("guard-install --ticket {encoded}")))?;
-    // SAFETY: no existing COM objects escape this worker; ShellExecuteEx needs
-    // initialization and NOASYNC because this thread has no shell message loop.
-    let code = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED as u32) };
-    if code < 0 {
-        return Err(Error::Windows {
-            operation: "InitializeGuardElevation",
-            code: code as u32,
-        });
-    }
-    let _apartment = Apartment;
+    // ShellExecuteEx needs an initialized apartment, and NOASYNC because this
+    // thread has no shell message loop. No COM object escapes this worker.
+    let _apartment = crate::com::Apartment::enter(
+        windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+        "InitializeGuardElevation",
+    )?;
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,

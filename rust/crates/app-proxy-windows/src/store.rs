@@ -210,7 +210,7 @@ impl Store {
             validated_secrets: RefCell::new(None),
         };
         store.load()?;
-        store.recover_config_requests()?;
+        store.recover_journals_on_open()?;
         Ok(store)
     }
 
@@ -246,8 +246,7 @@ impl Store {
 
     /// Consumes caller's snapshot. The saved revision is always assigned here.
     pub fn commit(&mut self, expected_revision: u64, manifest: Manifest) -> Result<u64> {
-        self.ensure_core_update_idle()?;
-        self.recover_config_requests()?;
+        self.ensure_commit_allowed()?;
         self.commit_snapshot(expected_revision, manifest)
     }
 
@@ -265,7 +264,7 @@ impl Store {
             .checked_add(1)
             .ok_or(Error::Invalid("REVISION_EXHAUSTED"))?;
         self.validate(&manifest)?;
-        self.ensure_shortcut_instances(&manifest)?;
+        self.ensure_snapshot_keeps_journal_references(&manifest)?;
         let bytes = encode(&manifest, MANIFEST_LIMIT)?;
         if stored.stored_version < SCHEMA_VERSION {
             self.preserve_original(stored.stored_version, &original)?;

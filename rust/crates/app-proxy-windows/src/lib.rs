@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+mod com;
 pub mod config_transaction;
 pub mod console;
 pub mod core_process;

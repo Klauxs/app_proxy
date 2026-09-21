@@ -73,6 +73,33 @@ impl Store {
     }
 }
 
+/// The points where the plain configuration store depends on its journals.
+/// `store.rs` calls only these, so this module is the one place that knows
+/// which journals exist. The journals call each other's gates directly, in the
+/// order each operation needs.
+impl Store {
+    /// An accepted pure configuration edit is finished before the owner serves
+    /// anything else.
+    pub(crate) fn recover_journals_on_open(&mut self) -> Result<()> {
+        self.recover_config_requests()
+    }
+
+    /// A direct commit must not interleave with a core reconfiguration plan or
+    /// overtake an accepted configuration edit.
+    pub(crate) fn ensure_commit_allowed(&mut self) -> Result<()> {
+        self.ensure_core_update_idle()?;
+        self.recover_config_requests()
+    }
+
+    /// No snapshot may drop an instance that a shortcut record still refers to.
+    pub(crate) fn ensure_snapshot_keeps_journal_references(
+        &self,
+        manifest: &app_proxy_core::model::Manifest,
+    ) -> Result<()> {
+        self.ensure_shortcut_instances(manifest)
+    }
+}
+
 /// Every journal that accepts caller-chosen request IDs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestJournal {

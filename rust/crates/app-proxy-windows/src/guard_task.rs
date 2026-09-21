@@ -228,13 +228,7 @@ pub(crate) fn retire_for_upgrade(deployment: &Deployment) -> Result<()> {
     }
 }
 
-struct Apartment;
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        // SAFETY: balances successful CoInitializeEx on the same calling thread.
-        unsafe { CoUninitialize() }
-    }
-}
+use crate::com::Apartment;
 struct Session {
     service: ITaskService,
     root: ITaskFolder,
@@ -242,13 +236,10 @@ struct Session {
 }
 impl Session {
     fn connect() -> Result<Self> {
+        let apartment = Apartment::enter(COINIT_MULTITHREADED, "GuardTaskScheduler")?;
         // SAFETY: all COM objects stay in the current synchronous operation and
         // drop before the apartment. No server/user/password strings are accepted.
         unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED)
-                .ok()
-                .map_err(com_error)?;
-            let apartment = Apartment;
             let service: ITaskService =
                 CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER).map_err(com_error)?;
             let empty = VARIANT::default();

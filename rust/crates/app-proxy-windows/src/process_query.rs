@@ -367,21 +367,11 @@ fn wmi_rows(pids: &[u32], deadline: Instant) -> Result<HashMap<u32, Row>> {
     if pids.is_empty() {
         return Ok(rows);
     }
+    let _apartment = crate::com::Apartment::enter(COINIT_MULTITHREADED, "ProcessWmiQuery")?;
     // All COM objects stay on this dedicated thread and drop before apartment teardown.
-    struct Apartment;
-    impl Drop for Apartment {
-        fn drop(&mut self) {
-            // SAFETY: balances the successful initialization on this same thread.
-            unsafe { CoUninitialize() }
-        }
-    }
     // SAFETY: fresh dedicated thread; COM objects never leave it. Strings and output
     // storage remain live for each synchronous ABI call and wrappers own all outputs.
     unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED)
-            .ok()
-            .map_err(com_error)?;
-        let _apartment = Apartment;
         let locator: IWbemLocator =
             CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).map_err(com_error)?;
         let empty = BSTR::new();
