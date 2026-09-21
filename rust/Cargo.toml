@@ -24,3 +24,6 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+# The store and the engine state sit behind std mutexes. Holding one of those
+# guards across an await could deadlock the two-worker runtime.
+await_holding_lock = "deny"

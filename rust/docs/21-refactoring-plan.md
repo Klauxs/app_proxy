@@ -26,7 +26,7 @@
 | E | `coordinator.rs` 一个文件三种角色 | 2300 行；协议类型、服务端分发、约 25 个客户端函数混在一起；`handle()` 约 400 行；分发做两遍；22 处小版本门控；每次客户端操作先做一次状态往返，一个请求两次管道连接 |
 | F | 展示与编排没有分开 | 菜单通过构造 clap 命令对象并传 `json=false` 复用 CLI 流程；共享函数同时发请求、打印、选退出码；`guard_cli::run_with_foreground` 单函数约 375 行；Guard 阶段到中文的映射写了三遍 |
 | G | 测试接缝靠条件编译 | `LaunchEngine` 有 8 个 `#[cfg(test)]` 钩子字段，`launch_engine.rs` 共 28 处 `cfg(test)`；`Shared::new` 按 `cfg(test)` 分叉构造；引擎测试创建真实进程；进程查询用进程级全局单槽位（`windows/src/process_query.rs:38`），测试必须 `--test-threads=1` |
-| H | 异步与阻塞互相嵌套 | 5 处 `spawn_blocking` 内再 `block_on`；“持有 store 锁期间不 await”只靠约定，编译器不检查 |
+| H | 异步与阻塞互相嵌套 | 5 处 `spawn_blocking` 内再 `block_on`。更正（2026-09-21）：起草时写的“持有 store 锁期间不 await 只靠约定”不准确。clippy 默认的 `await_holding_lock` 会拦截，而验证脚本和 CI 都带 `-D warnings`，实验已确认 |
 | I | 错误码仍是散落的字面量 | 第一步已完成（见第 6 节）；应用层约 300 个、平台层约 420 个不同字面量仍无常量表；调用方按字面量匹配约 15 个错误码 |
 | J | 平台层重复的 FFI 封装 | COM 公寓守卫 4 份，安全描述符封装和 `sid_string` 各 3 份，`com_error` 3 份 |
 | K | 命名冲突与模块平铺 | `setup` 三处、`shortcuts` 两处、`core_control` 两处；`installation.rs` 实际是“被管理应用的安装解析”；windows crate 37 个模块没有分组 |
@@ -57,7 +57,7 @@
 | T4 | CLI 与菜单共用一层返回类型化结果的用例函数；该层不打印、不决定退出码 | 检索：用例层没有 `println!`、`eprintln!` 和 `exit::` |
 | T5 | 启动引擎的生产结构体里没有 `#[cfg(test)]` 字段；引擎单元测试不创建真实进程 | 检索 `cfg(test)`；测试可并行运行 |
 | T6 | 与平台无关的状态机可以在不触碰文件系统的情况下测试 | 这些模块的测试不使用 `tempfile` |
-| T7 | 应用层拿不到裸的 `MutexGuard<Store>` | `Configuration::lock` 不再是 `pub(crate)` |
+| T7 | 已撤销（见阶段 4）。替代目标：持有 store 锁跨 await 由工作区 lint 直接拒绝 | `Cargo.toml` 中 `await_holding_lock = "deny"` |
 | T8 | 全量默认测试可以并行运行并在干净环境下全部通过 | `cargo test --workspace --locked` 不带 `--test-threads=1` |
 
 **4. 工作方式**
@@ -151,17 +151,21 @@
 
 验收：目标 T2。
 
-**阶段 4：收口 Store 的访问面（M）**
+**阶段 4：收口 Store 的访问面（重新评估后缩减）**
+
+盘点结果（2026-09-21）：应用层共 84 处取 store 锁，其中 36 处绑定守卫后在同一把锁下连续做多步操作，其余是单个表达式。用脚本沿每个守卫的存活范围扫描，没有任何一处在持锁期间 `.await`；唯一的命中是 `tokio::spawn` 出去的独立任务，属于误报。
+
+原计划有两个动机，盘点后都不成立。第一，“持锁不跨 await 只靠约定”是起草时的误判，clippy 已经强制。第二，为每个领域在 `Configuration` 上提供窄方法，实际效果是把 Store 的约 60 个方法再转发一遍；那 36 处多步操作需要的是“同一把锁下的原子序列”，窄方法反而表达不了。改成闭包式的 `with_store` 能去掉裸守卫，但要改写 84 处、其中 36 处涉及提前返回和锁顺序，换来的保证与现有 lint 相同。
 
 | 步骤 | 内容 |
 |---|---|
-| 4.1 | 盘点应用层约百处 `configuration.lock()` 的用途，按领域归类：配置、内核、启动、快捷方式、登录任务、订阅 |
-| 4.2 | 为每个领域在 `Configuration` 上提供一组窄方法，闭包内完成读改写，不把锁守卫交给调用方 |
-| 4.3 | 逐个模块迁移，顺序为调用点从少到多：`launch_engine/event.rs`、`shortcuts.rs`、`coordinator`、`core_control.rs`、`login_tasks.rs`、`subscription_preview.rs`、`core_manager.rs`、`launch_engine.rs`、`core_reconfigure.rs` |
-| 4.4 | `Configuration::lock` 降为私有 |
-| 4.5 | 异步边界：把“在阻塞线程里执行同步 store 操作”收拢成一个辅助函数，5 处 `spawn_blocking` 加 `block_on` 的嵌套逐个替换。替换前先确认每处为什么需要嵌套 |
+| 4.1 | 已完成：盘点，结论见上 |
+| 4.2 至 4.4 | 不执行，理由见上 |
+| 4.5 | 已完成的部分：工作区 lint 显式声明 `await_holding_lock = "deny"`，不再依赖命令行的 `-D warnings`。5 处 `spawn_blocking` 加 `block_on` 的嵌套是有意的：引擎的异步函数在 await 之间做同步的 store 和 Win32 操作，放在阻塞线程上运行才不会占住只有两个工作线程的运行时。每一处还各自持有许可或完成标记，形状不同，不抽取公共函数 |
 
-验收：目标 T7；锁顺序保持“内核闸门在前、store 锁在后”。
+Store 方法面过宽的问题留给阶段 7：状态机移入 core 之后，Store 上只剩受保护 IO，访问面自然收窄。
+
+验收：`cargo clippy` 在有守卫跨 await 时报错，已用临时代码验证。
 
 **阶段 5：展示层去重（S）**
 
@@ -241,7 +245,7 @@ flowchart LR
 | 1 格式升级策略 | 完成 | `e4250ce`、`784516f`。规则见 [02-model-and-storage.md](02-model-and-storage.md) 第 8 节 |
 | 2 拆分协调进程 | 完成 | `1e7a832` 至本阶段末。协议 major 为 4；`coordinator.rs` 拆为 `protocol`、`server`、`client` 三个模块；调用方会匹配的 17 个错误码改为 `error_code` 中的具名常量 |
 | 3 统一请求日志 | 完成 | `2338968` 至本阶段末。3.2、3.3、3.5 的范围按实际重复情况收窄，见各步骤说明 |
-| 4 收口 Store | 未开始 | |
+| 4 收口 Store | 完成（缩减） | 盘点后确认原动机不成立，只保留显式 lint；详见阶段 4 说明 |
 | 5 展示层去重 | 未开始 | 只做 5.1、5.5 |
 | 6 测试接缝 | 未开始 | |
 | 7 状态机下沉 | 未开始 | 落点为 core |
