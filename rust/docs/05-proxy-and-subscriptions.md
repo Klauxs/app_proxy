@@ -112,4 +112,4 @@ CLI 提供 `proxy import/nodes/select/refresh`，地址通过无回显交互输�
 
 **7. 可复用的测试经验**
 
-参考 [core.ts](D:/app_proxy/windows/src/core.ts)、[singbox.ts](D:/app_proxy/windows/src/singbox.ts)、[proxy.ts](D:/app_proxy/windows/src/proxy.ts)、[subscription.ts](D:/app_proxy/windows/src/subscription.ts) 和 [现有订阅测试](D:/app_proxy/windows/tests/subscription.test.ts) 中的已知失败案例，为 Rust 建立独立 fixtures。验收以本文定义的格式和 sing-box 实际行为为准，不要求逐字段或逐 bug 复制 TS 解析结果。Rust 发行和运行不调用 Node。
+参考旧脚本实现（已于 2026-09-21 移除，见 git 历史）的 `windows/src/core.ts`、`windows/src/singbox.ts`、`windows/src/proxy.ts`、`windows/src/subscription.ts` 和 `windows/tests/subscription.test.ts` 中的已知失败案例，为 Rust 建立独立 fixtures。验收以本文定义的格式和 sing-box 实际行为为准，不要求逐字段或逐 bug 复制 TS 解析结果。Rust 发行和运行不调用 Node。

@@ -1,26 +1,28 @@
 **证据、决定与待验证事项**
 
-本设计最初依据 Windows 源码、上一次开源调研中的固定上游提交，以及 Rust/微软官方资料编写。2026-09-19 已开始 M0 Rust 实现；实际构建与包内 helper 证据见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md)，其余流程仍是计划。现有 Windows/TypeScript 实现未修改。
+本设计最初依据 Windows 源码、上一次开源调研中的固定上游提交，以及 Rust/微软官方资料编写。2026-09-19 已开始 M0 Rust 实现；实际构建与包内 helper 证据见 [验证记录](../TEST-RESULTS.md)，其余流程仍是计划。现有 Windows/TypeScript 实现未修改。
 
-2026-09-20 用户明确取消 IFEO，取代 2026-09-19 的加入需求及此前保留方向。实现移除注册/恢复、入口解析及调试脱离候选；Guard 保留 ETW 启动后检查。撤销决定见 [第九章](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md)。历史验证记录保留历史含义。
+2026-09-20 用户明确取消 IFEO，取代 2026-09-19 的加入需求及此前保留方向。实现移除注册/恢复、入口解析及调试脱离候选；Guard 保留 ETW 启动后检查。撤销决定见 [第九章](09-ifeo-launch-interception.md)。历史验证记录保留历史含义。
 
 **1. 当前基线**
 
 开始读取时 HEAD 为 `a38a29865578035ba8ad0d85d0e319bbb63880e2`，分支 main。此前已有 ETW 监听和 Codex/Claude 桌面预设两项更新，因此不沿用早期“只有轮询/必须手填 EXE”的描述。
 
+下表中 `windows/` 开头的路径指旧脚本实现，已于 2026-09-21 从仓库移除，可在提交 `988812c` 之前的 git 历史中查看。
+
 | 证据 | 用途 |
 |---|---|
-| [types.ts](D:/app_proxy/windows/src/types.ts) | 识别现有职责耦合，作为新对象拆分的参考 |
-| [applications.ts](D:/app_proxy/windows/src/applications.ts) | 自动桌面识别、默认 Guard、参数/环境、实例进程匹配、launch |
-| [cli.ts](D:/app_proxy/windows/src/cli.ts) / [service.ts](D:/app_proxy/windows/src/service.ts) | 最新添加流程、代理验证、默认保护与诊断范围 |
-| [guard.ts](D:/app_proxy/windows/src/guard.ts) | 先关闭后 launch、旧绑定宽容、限流及失败降级 |
-| [elevated-events.ts](D:/app_proxy/windows/src/elevated-events.ts) | 授权监听握手、管道重试和事件边界 |
-| [msix.ts](D:/app_proxy/windows/src/msix.ts) / [msix-child.ts](D:/app_proxy/windows/src/msix-child.ts) | request/receipt/TTL、固定变量传递及包内 spawn |
-| [msix-storage.ts](D:/app_proxy/windows/src/msix-storage.ts) / [store.ts](D:/app_proxy/windows/src/store.ts) | LocalState、scope、实际路径、归属与配置锁 |
-| [bridge.ps1](D:/app_proxy/windows/native/bridge.ps1) | 包解析/激活、原生身份、快捷方式及进程停止 |
-| [install-events.ps1](D:/app_proxy/windows/native/install-events.ps1) / [events-task.ps1](D:/app_proxy/windows/native/events-task.ps1) | 提权 helper 安装、任务 ACL 和所有权核验 |
-| [core.ts](D:/app_proxy/windows/src/core.ts) / [builtin.ts](D:/app_proxy/windows/src/builtin.ts) | binary 选择、网卡探测、配置恢复和随包校验 |
-| [subscription.ts](D:/app_proxy/windows/src/subscription.ts) / [proxy.ts](D:/app_proxy/windows/src/proxy.ts) | 订阅获取/对齐和实际代理证据 |
+| `windows/src/types.ts` | 识别现有职责耦合，作为新对象拆分的参考 |
+| `windows/src/applications.ts` | 自动桌面识别、默认 Guard、参数/环境、实例进程匹配、launch |
+| `windows/src/cli.ts` / `windows/src/service.ts` | 最新添加流程、代理验证、默认保护与诊断范围 |
+| `windows/src/guard.ts` | 先关闭后 launch、旧绑定宽容、限流及失败降级 |
+| `windows/src/elevated-events.ts` | 授权监听握手、管道重试和事件边界 |
+| `windows/src/msix.ts` / `windows/src/msix-child.ts` | request/receipt/TTL、固定变量传递及包内 spawn |
+| `windows/src/msix-storage.ts` / `windows/src/store.ts` | LocalState、scope、实际路径、归属与配置锁 |
+| `windows/native/bridge.ps1` | 包解析/激活、原生身份、快捷方式及进程停止 |
+| `windows/native/install-events.ps1` / `windows/native/events-task.ps1` | 提权 helper 安装、任务 ACL 和所有权核验 |
+| `windows/src/core.ts` / `windows/src/builtin.ts` | binary 选择、网卡探测、配置恢复和随包校验 |
+| `windows/src/subscription.ts` / `windows/src/proxy.ts` | 订阅获取/对齐和实际代理证据 |
 
 新实现以本设计为验收依据。需要引用现有平台经验时重新读取相关文件，尤其是仍在迭代的 Guard 和自动识别；它们不形成历史数据/命令兼容承诺。行号不是固定接口，文件内容和提交才是证据。
 

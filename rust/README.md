@@ -1,6 +1,6 @@
 **App Proxy Rust 版设计**
 
-状态：基础平台、配置/存储、认证管道、协调进程、实例配置、共享 sing-box 管理与启动 CLI 已实现。中文日常菜单已接入实例创建/管理/启动、手动代理、订阅、保护授权、桌面快捷方式及实例高级设置。启动流程支持缺失内核安装、共享代理扩容确认、查询与取消；MSIX 已接入包内 helper 和持久回执恢复。Codex/Claude 直连双分身已实测；账户与代理隔离、Guard 完整链路、入口维护及完整验收仍待完成，不能作为正式启动器使用。详见 [验证记录](D:/app_proxy/rust/TEST-RESULTS.md) 和 [功能进度](D:/app_proxy/rust/IMPLEMENTATION.md)。
+状态：基础平台、配置/存储、认证管道、协调进程、实例配置、共享 sing-box 管理与启动 CLI 已实现。中文日常菜单已接入实例创建/管理/启动、手动代理、订阅、保护授权、桌面快捷方式及实例高级设置。启动流程支持缺失内核安装、共享代理扩容确认、查询与取消；MSIX 已接入包内 helper 和持久回执恢复。Codex/Claude 直连双分身已实测；账户与代理隔离、Guard 完整链路、入口维护及完整验收仍待完成，不能作为正式启动器使用。详见 [验证记录](TEST-RESULTS.md) 和 [功能进度](IMPLEMENTATION.md)。
 
 **构建与验证**
 
@@ -184,18 +184,20 @@ Guard 配置与诊断入口：
 
 | 文档 | 内容 |
 |---|---|
-| [01-architecture.md](D:/app_proxy/rust/docs/01-architecture.md) | 范围、进程与 crate 划分、依赖、接口、关键决策 |
-| [02-model-and-storage.md](D:/app_proxy/rust/docs/02-model-and-storage.md) | 应用/模板/实例模型、新配置格式、存储、环境变量、事务 |
-| [03-launch-and-guard.md](D:/app_proxy/rust/docs/03-launch-and-guard.md) | 启动状态机、并发、取消与恢复、Guard 策略和资源所有权 |
-| [04-windows-platform.md](D:/app_proxy/rust/docs/04-windows-platform.md) | 原生进程、MSIX、ETW、权限、管道、快捷方式、升级 |
-| [05-proxy-and-subscriptions.md](D:/app_proxy/rust/docs/05-proxy-and-subscriptions.md) | sing-box 发现/复用、托管内核、订阅、联网探测与回滚 |
-| [06-product-and-protocol.md](D:/app_proxy/rust/docs/06-product-and-protocol.md) | 用户流程、CLI、IPC、事件、错误及诊断 |
-| [07-implementation-and-validation.md](D:/app_proxy/rust/docs/07-implementation-and-validation.md) | 从零实现的批次、接口验收、测试和发布门槛 |
-| [08-evidence-and-decisions.md](D:/app_proxy/rust/docs/08-evidence-and-decisions.md) | 当前源码基线、上游来源、决定及待验证事项 |
-| [09-ifeo-launch-interception.md](D:/app_proxy/rust/docs/09-ifeo-launch-interception.md) | IFEO 取消决定、Guard 边界与配置兼容占位 |
+| [01-architecture.md](docs/01-architecture.md) | 范围、进程与 crate 划分、依赖、接口、关键决策 |
+| [02-model-and-storage.md](docs/02-model-and-storage.md) | 应用/模板/实例模型、新配置格式、存储、环境变量、事务 |
+| [03-launch-and-guard.md](docs/03-launch-and-guard.md) | 启动状态机、并发、取消与恢复、Guard 策略和资源所有权 |
+| [04-windows-platform.md](docs/04-windows-platform.md) | 原生进程、MSIX、ETW、权限、管道、快捷方式、升级 |
+| [05-proxy-and-subscriptions.md](docs/05-proxy-and-subscriptions.md) | sing-box 发现/复用、托管内核、订阅、联网探测与回滚 |
+| [06-product-and-protocol.md](docs/06-product-and-protocol.md) | 用户流程、CLI、IPC、事件、错误及诊断 |
+| [07-implementation-and-validation.md](docs/07-implementation-and-validation.md) | 从零实现的批次、接口验收、测试和发布门槛 |
+| [08-evidence-and-decisions.md](docs/08-evidence-and-decisions.md) | 当前源码基线、上游来源、决定及待验证事项 |
+| [09-ifeo-launch-interception.md](docs/09-ifeo-launch-interception.md) | IFEO 取消决定、Guard 边界与配置兼容占位 |
+| [16-installation-and-upgrade.md](docs/16-installation-and-upgrade.md) | 安装位置、单文件安装器、成套升级与中断恢复 |
+| [docs/decisions/](docs/decisions/) | 按日期记录的单项决定与实测：Guard 时延与唤醒、订阅多节点、快捷方式路径、监听升级修复等 |
 | [21-refactoring-plan.md](docs/21-refactoring-plan.md) | 代码结构现状、重构目标、分阶段计划与进度 |
-| [manifest.json](D:/app_proxy/rust/examples/manifest.json) | 无凭据的配置示例，含原版和独立实例 |
-| [launch-events.ndjson](D:/app_proxy/rust/examples/launch-events.ndjson) | 启动事件协议示例，不是实测日志 |
+| [manifest.json](examples/manifest.json) | 无凭据的配置示例，含原版和独立实例 |
+| [launch-events.ndjson](examples/launch-events.ndjson) | 启动事件协议示例，不是实测日志 |
 
 **关键决定**
 
