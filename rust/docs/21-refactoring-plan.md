@@ -140,12 +140,12 @@
 
 | 步骤 | 内容 |
 |---|---|
-| 3.1 | windows crate 内新增 `journal` 模块，提供时钟函数和保留期常量，替换 6 份 `now()` 和 5 份常量 |
-| 3.2 | 抽出 `RecordDir<T>`：一请求一文件的目录。覆盖 `config_transaction` 和 `core_requests` 共有的目录固定、UUID 文件名解析、跳过 `.tmp`、过期清理 |
-| 3.3 | 抽出 `JournalFile<T>`：单文件日志。覆盖 `shortcuts/journal`、`guard_task/login/journal`、`launch_state` 共有的“缺文件返回空、校验、有界替换写回、容量预留” |
-| 3.4 | 新增请求 ID 登记处：每套日志登记一个“此 ID 是否已用”的查询，五处四路判断改为一次调用 |
-| 3.5 | 在 3.4 的基础上消除 `store.rs` 对上层模块的反向调用：`Store::open` 和 `commit` 需要的恢复与空闲检查改为通过登记的钩子执行 |
-| 3.6 | 平台层 FFI 去重：COM 公寓守卫、安全描述符、`sid_string`、`com_error` 收进内部 `ffi` 模块 |
+| 3.1 | 已完成：`journal` 模块提供 `now()` 和 `RETENTION`，替换 6 份时钟函数和 5 份保留期常量。时钟早于 1970 年的错误码统一为 `SYSTEM_CLOCK_INVALID` |
+| 3.2 | 已完成，范围收窄：两个一请求一文件目录真正相同的只有记录文件名的列举规则，抽成 `journal::record_ids`。目录创建、记录校验和清理条件各不相同，没有做成泛型 `RecordDir<T>` |
+| 3.3 | 已完成，范围收窄：三套单文件日志共用 `Store::read_journal` 和 `write_journal`，统一“文件不存在即为空”。各自的校验保留在原处。两处容量预留只是思路相同，操作的记录类型完全不同，没有抽取 |
+| 3.4 | 已完成：`Store::ensure_request_id_unused_elsewhere` 取代五处四路判断；`RequestJournal` 枚举配合穷尽匹配，新增日志时编译器强制其参与 |
+| 3.5 | 已完成，做法调整：没有采用登记钩子，因为那会把顺序敏感的恢复逻辑藏到间接调用后面。`store.rs` 改为只调用 `journal.rs` 里三个具名闸门，`journal.rs` 成为唯一知道有哪些日志的模块。各日志之间仍按各自操作需要的顺序显式互相调用 |
+| 3.6 | 已完成：`com::Apartment` 取代 4 份 COM 公寓守卫，并且不可跨线程；`security_ffi` 提供 `Descriptor` 和 `sid_string`，取代 3 份描述符封装和 5 份 SID 转字符串。三份 `com_error` 各带不同的操作标签，属于有意区分，保留 |
 
 风险：这些日志是不变量 1 和 2 的实现。每套日志单独迁移、单独提交，迁移前后其原有测试必须原样通过。任何一套迁移后若测试需要修改，停下来评审。
 
@@ -240,7 +240,7 @@ flowchart LR
 | 0 基线与护栏 | 完成 | `8c063c3` 至 `5781cff`。3 个基线失败确认是测试进程继承了宿主的 MSIX 包身份，现改为检测到包身份时跳过。CI 配置尚未在真实 runner 上运行过 |
 | 1 格式升级策略 | 完成 | `e4250ce`、`784516f`。规则见 [02-model-and-storage.md](02-model-and-storage.md) 第 8 节 |
 | 2 拆分协调进程 | 完成 | `1e7a832` 至本阶段末。协议 major 为 4；`coordinator.rs` 拆为 `protocol`、`server`、`client` 三个模块；调用方会匹配的 17 个错误码改为 `error_code` 中的具名常量 |
-| 3 统一请求日志 | 未开始 | |
+| 3 统一请求日志 | 完成 | `2338968` 至本阶段末。3.2、3.3、3.5 的范围按实际重复情况收窄，见各步骤说明 |
 | 4 收口 Store | 未开始 | |
 | 5 展示层去重 | 未开始 | 只做 5.1、5.5 |
 | 6 测试接缝 | 未开始 | |

@@ -55,15 +55,7 @@ pub(super) fn user_matches(account: &str, expected: &str) -> Result<bool> {
         Ok(kind == SidTypeUser && sid_string(sid.as_mut_ptr().cast())? == expected)
     }
 }
-struct Descriptor(PSECURITY_DESCRIPTOR);
-impl Drop for Descriptor {
-    fn drop(&mut self) {
-        // SAFETY: conversion API allocates with LocalAlloc.
-        unsafe {
-            LocalFree(self.0);
-        }
-    }
-}
+use crate::security_ffi::Descriptor;
 pub(super) fn verify(sddl: &str, sid: &str) -> Result<()> {
     verify_for(sddl, sid, false)
 }
@@ -139,20 +131,8 @@ fn verify_for(sddl: &str, sid: &str, login: bool) -> Result<()> {
     Ok(())
 }
 unsafe fn sid_string(sid: PSID) -> Result<String> {
-    // SAFETY: caller supplies SID from a retained Windows security descriptor.
-    unsafe {
-        let mut value = ptr::null_mut();
-        if ConvertSidToStringSidW(sid, &mut value) == 0 {
-            return Err(last_error("ConvertGuardTaskSid"));
-        }
-        let mut length = 0;
-        while *value.add(length) != 0 {
-            length += 1;
-        }
-        let result = String::from_utf16(std::slice::from_raw_parts(value, length));
-        LocalFree(value.cast());
-        result.map_err(|_| Error::Invalid("GUARD_TASK_SID"))
-    }
+    // SAFETY: the caller supplies a SID from a live Windows security descriptor.
+    unsafe { crate::security_ffi::sid_string(sid, "ConvertGuardTaskSid", "GUARD_TASK_SID") }
 }
 
 #[cfg(test)]

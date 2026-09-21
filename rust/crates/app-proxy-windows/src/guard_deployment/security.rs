@@ -18,15 +18,7 @@ const USERS: &str = "S-1-5-32-545";
 const READ_EXECUTE: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 const SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
 
-struct Descriptor(PSECURITY_DESCRIPTOR);
-impl Drop for Descriptor {
-    fn drop(&mut self) {
-        // SAFETY: descriptor is allocated by Windows conversion/query APIs.
-        unsafe {
-            LocalFree(self.0);
-        }
-    }
-}
+use crate::security_ffi::Descriptor;
 impl Descriptor {
     fn new(sddl: &str) -> Result<Self> {
         let text = wide(std::ffi::OsStr::new(sddl))?;
@@ -244,20 +236,8 @@ unsafe fn validate_descriptor(descriptor: PSECURITY_DESCRIPTOR, directory: bool)
     }
 }
 unsafe fn sid_string(sid: PSID) -> Result<String> {
-    // SAFETY: SID belongs to the retained Windows security descriptor.
-    unsafe {
-        let mut text = ptr::null_mut();
-        if ConvertSidToStringSidW(sid, &mut text) == 0 {
-            return Err(last_error("ConvertGuardSid"));
-        }
-        let mut length = 0;
-        while *text.add(length) != 0 {
-            length += 1;
-        }
-        let result = String::from_utf16(std::slice::from_raw_parts(text, length));
-        LocalFree(text.cast());
-        result.map_err(|_| Error::Invalid("INVALID_GUARD_SID"))
-    }
+    // SAFETY: the caller supplies a SID from a live Windows security descriptor.
+    unsafe { crate::security_ffi::sid_string(sid, "ConvertGuardSid", "INVALID_GUARD_SID") }
 }
 
 #[cfg(test)]

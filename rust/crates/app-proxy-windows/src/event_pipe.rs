@@ -387,17 +387,11 @@ unsafe fn token_context(process: HANDLE, elevated: bool) -> Result<String> {
         if groups.GroupCount != 1 || groups.Groups[0].Attributes & LOGON_GROUP != LOGON_GROUP {
             return Err(Error::Invalid("INVALID_LOGON_SID"));
         }
-        let mut sid = ptr::null_mut();
-        if ConvertSidToStringSidW(groups.Groups[0].Sid, &mut sid) == 0 {
-            return Err(last_error("ConvertEventLogonSid"));
-        }
-        let mut count = 0;
-        while *sid.add(count) != 0 {
-            count += 1;
-        }
-        let result = String::from_utf16(std::slice::from_raw_parts(sid, count));
-        LocalFree(sid.cast());
-        result.map_err(|_| Error::Invalid("INVALID_LOGON_SID"))
+        crate::security_ffi::sid_string(
+            groups.Groups[0].Sid,
+            "ConvertEventLogonSid",
+            "INVALID_LOGON_SID",
+        )
     }
 }
 

@@ -9,15 +9,7 @@ use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 
-struct Descriptor(PSECURITY_DESCRIPTOR);
-impl Drop for Descriptor {
-    fn drop(&mut self) {
-        // SAFETY: both conversion and security query allocate with LocalAlloc.
-        unsafe {
-            LocalFree(self.0);
-        }
-    }
-}
+use crate::security_ffi::Descriptor;
 
 pub(crate) fn no_reparse(path: &Path) -> Result<()> {
     for part in path.ancestors() {
@@ -202,18 +194,6 @@ pub(crate) fn verify(handle: HANDLE, sid: &str, protected: bool) -> Result<()> {
 }
 
 unsafe fn sid_string(sid: PSID) -> Result<String> {
-    // SAFETY: caller supplies SID from a live Windows security descriptor.
-    unsafe {
-        let mut value = null_mut();
-        if ConvertSidToStringSidW(sid, &mut value) == 0 {
-            return Err(last_error("ConvertStoreSid"));
-        }
-        let mut length = 0;
-        while *value.add(length) != 0 {
-            length += 1;
-        }
-        let result = String::from_utf16(std::slice::from_raw_parts(value, length));
-        LocalFree(value.cast());
-        result.map_err(|_| Error::Invalid("INVALID_STORE_SID"))
-    }
+    // SAFETY: the caller supplies a SID from a live Windows security descriptor.
+    unsafe { crate::security_ffi::sid_string(sid, "ConvertStoreSid", "INVALID_STORE_SID") }
 }

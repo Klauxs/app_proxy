@@ -7,7 +7,6 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFamilyName;
@@ -228,17 +227,11 @@ pub(crate) unsafe fn inspect_handle(process: RawHandle) -> Result<ProcessIdentit
             return Err(last_error("GetTokenInformation(user)"));
         }
         let user = &*(buffer.as_ptr().cast::<TOKEN_USER>());
-        let mut sid = null_mut();
-        if ConvertSidToStringSidW(user.User.Sid, &mut sid) == 0 {
-            return Err(last_error("ConvertSidToStringSidW"));
-        }
-        let mut length = 0;
-        while *sid.add(length) != 0 {
-            length += 1;
-        }
-        let user_sid = String::from_utf16(std::slice::from_raw_parts(sid, length));
-        LocalFree(sid.cast());
-        let user_sid = user_sid.map_err(|_| Error::Invalid("INVALID_SID"))?;
+        let user_sid = crate::security_ffi::sid_string(
+            user.User.Sid,
+            "ConvertSidToStringSidW",
+            "INVALID_SID",
+        )?;
         Ok(ProcessIdentity {
             pid,
             creation_time: ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64,
