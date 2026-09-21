@@ -23,6 +23,8 @@ use uuid::Uuid;
 mod event;
 mod guard;
 pub use guard::{GuardObservation, GuardScan};
+mod checkpoint;
+pub(crate) use checkpoint::{Checkpoints, Point};
 mod observation;
 pub use observation::{InstanceObservation, RuntimeStatus};
 
@@ -34,22 +36,7 @@ pub struct LaunchEngine {
     active: Mutex<HashSet<Uuid>>,
     completed: tokio::sync::Notify,
     guard_resolution: Arc<tokio::sync::Semaphore>,
-    #[cfg(test)]
-    before_guard_resolution: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    after_guard_scan: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    after_guard_target_read: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    before_dispatch: Mutex<Option<Arc<tokio::sync::Notify>>>,
-    #[cfg(test)]
-    after_spawn: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    before_guard_stop: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    before_guard_receipt: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    after_guard_stop: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    pub(crate) checkpoints: Checkpoints,
 }
 impl LaunchEngine {
     pub(crate) fn drained(&self) -> Result<bool> {
@@ -85,22 +72,7 @@ impl LaunchEngine {
             active: Mutex::new(HashSet::new()),
             completed: tokio::sync::Notify::new(),
             guard_resolution: Arc::new(tokio::sync::Semaphore::new(1)),
-            #[cfg(test)]
-            before_guard_resolution: Mutex::new(None),
-            #[cfg(test)]
-            after_guard_scan: Mutex::new(None),
-            #[cfg(test)]
-            after_guard_target_read: Mutex::new(None),
-            #[cfg(test)]
-            before_dispatch: Mutex::new(None),
-            #[cfg(test)]
-            after_spawn: Mutex::new(None),
-            #[cfg(test)]
-            before_guard_stop: Mutex::new(None),
-            #[cfg(test)]
-            before_guard_receipt: Mutex::new(None),
-            #[cfg(test)]
-            after_guard_stop: Mutex::new(None),
+            checkpoints: Checkpoints::default(),
         }))
     }
 
@@ -139,11 +111,8 @@ impl LaunchEngine {
         guard_target: Option<GuardTarget>,
         mut pinned: Option<event::ObservedTarget>,
     ) -> Result<LaunchAttempt> {
-        #[cfg(test)]
-        if pinned.is_some()
-            && let Some(hook) = self.before_guard_stop.lock().unwrap().clone()
-        {
-            hook();
+        if pinned.is_some() {
+            self.checkpoints.reach(Point::BeforeGuardStop);
         }
         let gate_timing =
             app_proxy_windows::diagnostic_timing::Span::new("launch.admission_gate", || {
@@ -336,7 +305,7 @@ impl LaunchEngine {
 
     #[cfg(test)]
     pub(crate) fn hold_dispatch(&self, gate: Arc<tokio::sync::Notify>) {
-        *self.before_dispatch.lock().unwrap() = Some(gate);
+        self.checkpoints.hold(Point::BeforeDispatch, gate);
     }
 
     /// Reconcile idle attempts and observe exact exits; never create or stop an
@@ -700,13 +669,7 @@ impl LaunchEngine {
                 },
             )
             .await?;
-        #[cfg(test)]
-        {
-            let gate = self.before_dispatch.lock().unwrap().clone();
-            if let Some(gate) = gate {
-                gate.notified().await;
-            }
-        }
+        self.checkpoints.pause(Point::BeforeDispatch).await;
         if guard_launch {
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
@@ -741,8 +704,7 @@ impl LaunchEngine {
         };
         let mut reservation = reservation.take().unwrap();
         let configuration = self.configuration.clone();
-        #[cfg(test)]
-        let after_spawn = self.after_spawn.lock().unwrap().clone();
+        let checkpoints = self.checkpoints.clone();
         let spec = SpawnSpec {
             exe: application.executable().to_owned(),
             args: output.args,
@@ -760,10 +722,7 @@ impl LaunchEngine {
                 }
                 Err(error) => Err(error),
             };
-            #[cfg(test)]
-            if let Some(hook) = after_spawn {
-                hook();
-            }
+            checkpoints.reach(Point::AfterSpawn);
             match spawned {
                 Ok(identity) => {
                     reservation.confirm(owner, identity.clone())?;
@@ -818,10 +777,7 @@ impl LaunchEngine {
                 pinned
             }
         };
-        #[cfg(test)]
-        if let Some(hook) = self.after_guard_target_read.lock().unwrap().clone() {
-            hook();
-        }
+        self.checkpoints.reach(Point::AfterGuardTargetRead);
         let observed = instance.inspect_pinned(&pinned, endpoint)?;
         if observed.identity != target.process
             || observed.role != ProcessRole::Main
@@ -830,17 +786,11 @@ impl LaunchEngine {
         {
             return Err(Error::Invalid("GUARD_TARGET_NOT_UNPROXIED"));
         }
-        #[cfg(test)]
-        if let Some(hook) = self.before_guard_stop.lock().unwrap().clone() {
-            hook();
-        }
+        self.checkpoints.reach(Point::BeforeGuardStop);
         let mut held = reservation.take().unwrap();
         let configuration = self.configuration.clone();
         let epoch = self.epoch;
-        #[cfg(test)]
-        let after_guard_stop = self.after_guard_stop.lock().unwrap().clone();
-        #[cfg(test)]
-        let before_guard_receipt = self.before_guard_receipt.lock().unwrap().clone();
+        let checkpoints = self.checkpoints.clone();
         let stop_queued =
             app_proxy_windows::diagnostic_timing::Span::new("guard.stop_dispatch_queue", || {
                 id.to_string()
@@ -864,15 +814,9 @@ impl LaunchEngine {
                 ) {
                     return Err(Error::Invalid("GUARD_TARGET_EXITED_BEFORE_STOP"));
                 }
-                #[cfg(test)]
-                if let Some(hook) = &before_guard_receipt {
-                    hook();
-                }
+                checkpoints.reach(Point::BeforeGuardReceipt);
                 configuration.lock()?.confirm_guard_stop(&receipt)?;
-                #[cfg(test)]
-                if let Some(hook) = &after_guard_stop {
-                    hook();
-                }
+                checkpoints.reach(Point::AfterGuardStop);
                 Ok(())
             })();
             (application, data, held, result)

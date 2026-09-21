@@ -24,19 +24,20 @@ pub(super) struct Shared {
 
 impl Shared {
     pub(super) fn new(root: PathBuf, store: store::Store, identity: Status) -> Result<Self> {
+        let resources = app_proxy_windows::instance_resource::ResourceRegistry::open()?;
+        Self::with_resources(root, store, identity, resources)
+    }
+
+    /// The per-user resource registry is the one dependency that lives outside
+    /// the store directory, so tests supply an isolated one.
+    pub(super) fn with_resources(
+        root: PathBuf,
+        store: store::Store,
+        identity: Status,
+        resources: app_proxy_windows::instance_resource::ResourceRegistry,
+    ) -> Result<Self> {
         let configuration = Arc::new(Configuration::new(store));
-        #[cfg(test)]
-        let resources = app_proxy_windows::instance_resource::ResourceRegistry::for_test_at(
-            &root.join("test-resources"),
-        )?;
         let core = CoreControl::new(root.clone(), configuration.clone(), identity.epoch);
-        #[cfg(not(test))]
-        let launch = crate::launch_engine::LaunchEngine::new(
-            configuration.clone(),
-            core.manager(),
-            identity.epoch,
-        )?;
-        #[cfg(test)]
         let launch = crate::launch_engine::LaunchEngine::with_resources(
             configuration.clone(),
             core.manager(),

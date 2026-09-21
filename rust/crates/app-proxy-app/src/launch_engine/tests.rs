@@ -90,7 +90,7 @@ async fn advanced_edit_preserves_running_session_and_blocks_stale_dispatch() {
     );
     assert!(failed.dispatch_id.is_none());
     fixture.events(1).await;
-    *fixture.engine.before_dispatch.lock().unwrap() = None;
+    fixture.engine.checkpoints.clear(Point::BeforeDispatch);
     let fresh = fixture.request();
     fixture.engine.submit(fresh.clone()).await.unwrap();
     let updated = confirmed(fixture.result(fresh.request_id).await);
@@ -377,9 +377,9 @@ async fn unacknowledged_confirmation_survives_exit_and_another_store_until_owner
     .unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let path = first._root.path().join("store/state/launch.json");
-    *first.engine.after_spawn.lock().unwrap() = Some(Arc::new(move || {
+    first.engine.checkpoints.on(Point::AfterSpawn, move || {
         sender.send(hold_replacement(&path)).unwrap();
-    }));
+    });
     let request = first.request();
     first.engine.submit(request.clone()).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -439,7 +439,10 @@ async fn failed_preparation_release_preserves_evidence_and_replays_during_unrela
     use app_proxy_core::registry::{ConfigAction, ConfigRequest};
     let fixture = Fixture::new(true);
     let gate = Arc::new(tokio::sync::Notify::new());
-    *fixture.engine.before_dispatch.lock().unwrap() = Some(gate.clone());
+    fixture
+        .engine
+        .checkpoints
+        .hold(Point::BeforeDispatch, gate.clone());
     let request = fixture.request();
     fixture.engine.submit(request.clone()).await.unwrap();
     fixture.ready(request.request_id).await;
@@ -513,7 +516,7 @@ async fn failed_preparation_release_preserves_evidence_and_replays_during_unrela
             .unwrap()
             .resource_pending
     );
-    *fixture.engine.before_dispatch.lock().unwrap() = None;
+    fixture.engine.checkpoints.clear(Point::BeforeDispatch);
     let next = fixture.request();
     fixture.engine.submit(next.clone()).await.unwrap();
     confirmed(fixture.result(next.request_id).await);
@@ -526,7 +529,10 @@ async fn accepted_pending_configuration_is_recovered_before_dispatch_or_blocks_c
     for release_before_dispatch in [true, false] {
         let fixture = Fixture::new(true);
         let gate = Arc::new(tokio::sync::Notify::new());
-        *fixture.engine.before_dispatch.lock().unwrap() = Some(gate.clone());
+        fixture
+            .engine
+            .checkpoints
+            .hold(Point::BeforeDispatch, gate.clone());
         let request = fixture.request();
         fixture.engine.submit(request.clone()).await.unwrap();
         fixture.ready(request.request_id).await;
@@ -575,7 +581,7 @@ async fn interrupted_completion_recovers_both_journals_without_replaying_creatio
         let (sender, receiver) = std::sync::mpsc::channel();
         let configuration = fixture.engine.configuration.clone();
         let root = fixture._root.path().to_owned();
-        *fixture.engine.after_spawn.lock().unwrap() = Some(Arc::new(move || {
+        fixture.engine.checkpoints.on(Point::AfterSpawn, move || {
             let path = if created {
                 root.join("store/state/launch.json")
             } else {
@@ -596,7 +602,7 @@ async fn interrupted_completion_recovers_both_journals_without_replaying_creatio
                 root.join("resources").join(format!("{name}.json"))
             };
             sender.send(hold_replacement(&path)).unwrap();
-        }));
+        });
         let request = fixture.request();
         fixture.engine.submit(request.clone()).await.unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -642,7 +648,7 @@ async fn interrupted_completion_recovers_both_journals_without_replaying_creatio
             fixture.events(1).await;
             process::terminate_exact(&running).unwrap();
         } else {
-            *fixture.engine.after_spawn.lock().unwrap() = None;
+            fixture.engine.checkpoints.clear(Point::AfterSpawn);
             let next = fixture.request();
             fixture.engine.submit(next.clone()).await.unwrap();
             assert!(
@@ -1019,16 +1025,19 @@ async fn guard_event_stops_before_journal_and_preserves_config_stop_barrier() {
         let id = request.request_id;
         let configuration = fixture.engine.configuration.clone();
         let process_identity = child.0.identity.clone();
-        *fixture.engine.before_guard_stop.lock().unwrap() = Some(Arc::new(move || {
-            let mut store = configuration.lock().unwrap();
-            assert!(store.launch_request(id).unwrap().is_none());
-            assert!(process::is_running_exact(&process_identity).unwrap());
-            if disable {
-                let mut manifest = store.load().unwrap();
-                manifest.instances[0].guard.desired = Desired::Disabled;
-                store.commit(manifest.revision, manifest).unwrap();
-            }
-        }));
+        fixture
+            .engine
+            .checkpoints
+            .on(Point::BeforeGuardStop, move || {
+                let mut store = configuration.lock().unwrap();
+                assert!(store.launch_request(id).unwrap().is_none());
+                assert!(process::is_running_exact(&process_identity).unwrap());
+                if disable {
+                    let mut manifest = store.load().unwrap();
+                    manifest.instances[0].guard.desired = Desired::Disabled;
+                    store.commit(manifest.revision, manifest).unwrap();
+                }
+            });
         let admitted = fixture
             .engine
             .submit_guard_event(request, scan.revision, target, pinned)
@@ -1490,16 +1499,19 @@ async fn runtime_observation_rechecks_edits_and_new_pending_work() {
         let configuration = fixture.engine.configuration.clone();
         let request = fixture.request();
         let epoch = fixture.engine.epoch;
-        *fixture.engine.after_guard_scan.lock().unwrap() = Some(Arc::new(move || {
-            let mut store = configuration.lock().unwrap();
-            if edit {
-                let mut manifest = store.load().unwrap();
-                manifest.instances[0].name = "changed".into();
-                store.commit(manifest.revision, manifest).unwrap();
-            } else {
-                store.begin_launch(&request, epoch).unwrap();
-            }
-        }));
+        fixture
+            .engine
+            .checkpoints
+            .on(Point::AfterGuardScan, move || {
+                let mut store = configuration.lock().unwrap();
+                if edit {
+                    let mut manifest = store.load().unwrap();
+                    manifest.instances[0].name = "changed".into();
+                    store.commit(manifest.revision, manifest).unwrap();
+                } else {
+                    store.begin_launch(&request, epoch).unwrap();
+                }
+            });
         let observation = fixture
             .engine
             .observe_instance(fixture.instance, true)
@@ -1521,19 +1533,25 @@ async fn runtime_observation_timeout_retains_native_resolution_permit() {
     let fixture = Fixture::new(true);
     let (release, wait) = std::sync::mpsc::channel();
     let wait = Mutex::new(wait);
-    *fixture.engine.before_guard_resolution.lock().unwrap() = Some(Arc::new(move || {
-        wait.lock()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap();
-    }));
+    fixture
+        .engine
+        .checkpoints
+        .on(Point::BeforeGuardResolution, move || {
+            wait.lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        });
     assert!(
         matches!(fixture.engine.observe_instance(fixture.instance, true).await.unwrap().observation, InstanceObservation::Unknown { code } if code == "INSTANCE_OBSERVATION_TIMEOUT")
     );
     assert!(
         matches!(fixture.engine.observe_instance(fixture.instance, true).await.unwrap().observation, InstanceObservation::Unknown { code } if code == "GUARD_RESOLUTION_BUSY")
     );
-    *fixture.engine.before_guard_resolution.lock().unwrap() = None;
+    fixture
+        .engine
+        .checkpoints
+        .clear(Point::BeforeGuardResolution);
     release.send(()).unwrap();
     let _permit = tokio::time::timeout(
         Duration::from_secs(3),
@@ -1644,16 +1662,19 @@ async fn guard_scan_rechecks_edits_and_new_pending_work_before_returning_a_corre
         let configuration = fixture.engine.configuration.clone();
         let request = fixture.request();
         let epoch = fixture.engine.epoch;
-        *fixture.engine.after_guard_scan.lock().unwrap() = Some(Arc::new(move || {
-            let mut store = configuration.lock().unwrap();
-            if edit {
-                let mut manifest = store.load().unwrap();
-                manifest.instances[0].guard.desired = Desired::Disabled;
-                store.commit(manifest.revision, manifest).unwrap();
-            } else {
-                store.begin_launch(&request, epoch).unwrap();
-            }
-        }));
+        fixture
+            .engine
+            .checkpoints
+            .on(Point::AfterGuardScan, move || {
+                let mut store = configuration.lock().unwrap();
+                if edit {
+                    let mut manifest = store.load().unwrap();
+                    manifest.instances[0].guard.desired = Desired::Disabled;
+                    store.commit(manifest.revision, manifest).unwrap();
+                } else {
+                    store.begin_launch(&request, epoch).unwrap();
+                }
+            });
         let scan = fixture
             .engine
             .observe_guard(fixture.instance)
@@ -1678,14 +1699,17 @@ async fn guard_scan_timeout_cannot_accumulate_detached_resolvers() {
     let entered_tx = Mutex::new(Some(entered_tx));
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Mutex::new(release_rx);
-    *fixture.engine.before_guard_resolution.lock().unwrap() = Some(Arc::new(move || {
-        entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
-        release_rx
-            .lock()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(12))
-            .unwrap();
-    }));
+    fixture
+        .engine
+        .checkpoints
+        .on(Point::BeforeGuardResolution, move || {
+            entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(12))
+                .unwrap();
+        });
     let engine = fixture.engine.clone();
     let id = fixture.instance;
     let scan = tokio::spawn(async move { engine.observe_guard(id).await.unwrap() });
@@ -1705,7 +1729,10 @@ async fn guard_scan_timeout_cannot_accumulate_detached_resolvers() {
         fixture.engine.observe_guard(id).await.unwrap().observation,
         GuardObservation::Blocked { code } if code == "GUARD_RESOLUTION_BUSY"
     ));
-    *fixture.engine.before_guard_resolution.lock().unwrap() = None;
+    fixture
+        .engine
+        .checkpoints
+        .clear(Point::BeforeGuardResolution);
     release_tx.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     while fixture.engine.guard_resolution.available_permits() == 0 {
@@ -1745,11 +1772,14 @@ async fn guard_ignores_unrelated_candidate_exit_and_preserves_original() {
     let identity = transient.0.identity.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = calls.clone();
-    *fixture.engine.after_guard_target_read.lock().unwrap() = Some(Arc::new(move || {
-        if counted.fetch_add(1, Ordering::SeqCst) == 0 {
-            app_proxy_windows::process_stop::stop_exact(&identity, true).unwrap();
-        }
-    }));
+    fixture
+        .engine
+        .checkpoints
+        .on(Point::AfterGuardTargetRead, move || {
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                app_proxy_windows::process_stop::stop_exact(&identity, true).unwrap();
+            }
+        });
     let result = fixture.correct(&child).await;
     assert!(
         matches!(result.phase, LaunchPhase::Failed { ref code } if code == "GUARD_STOPPED_PROXY_UNAVAILABLE")
@@ -1767,9 +1797,12 @@ async fn guard_target_exit_during_snapshot_never_dispatches_stop_or_relaunch() {
     let child = fixture.external_guard_target(true, false);
     fixture.events(2).await;
     let identity = child.0.identity.clone();
-    *fixture.engine.after_guard_target_read.lock().unwrap() = Some(Arc::new(move || {
-        app_proxy_windows::process_stop::stop_exact(&identity, true).unwrap();
-    }));
+    fixture
+        .engine
+        .checkpoints
+        .on(Point::AfterGuardTargetRead, move || {
+            app_proxy_windows::process_stop::stop_exact(&identity, true).unwrap();
+        });
     let result = fixture.correct(&child).await;
     assert!(
         matches!(result.phase, LaunchPhase::Failed { ref code } if code == "GUARD_TARGET_EXITED_BEFORE_STOP")
@@ -1792,16 +1825,19 @@ async fn guard_does_not_repeat_target_observation_for_unrelated_churn() {
     let identities: Vec<_> = transient.iter().map(|p| p.0.identity.clone()).collect();
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = calls.clone();
-    *fixture.engine.after_guard_target_read.lock().unwrap() = Some(Arc::new(move || {
-        let identity = &identities[counted.fetch_add(1, Ordering::SeqCst)];
-        let watch = process::watch_exit(identity).unwrap();
-        process::terminate_exact(identity).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while watch.is_running().unwrap() {
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }));
+    fixture
+        .engine
+        .checkpoints
+        .on(Point::AfterGuardTargetRead, move || {
+            let identity = &identities[counted.fetch_add(1, Ordering::SeqCst)];
+            let watch = process::watch_exit(identity).unwrap();
+            process::terminate_exact(identity).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while watch.is_running().unwrap() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
     let result = fixture.correct(&child).await;
     assert!(
         matches!(result.phase, LaunchPhase::Failed { ref code } if code == "GUARD_STOPPED_PROXY_UNAVAILABLE")
@@ -1841,9 +1877,15 @@ async fn guard_rechecks_configuration_and_cancellation_around_the_stop() {
                 }
             });
             if after_stop {
-                *fixture.engine.after_guard_stop.lock().unwrap() = Some(hook);
+                fixture
+                    .engine
+                    .checkpoints
+                    .on_shared(Point::AfterGuardStop, hook);
             } else {
-                *fixture.engine.before_guard_stop.lock().unwrap() = Some(hook);
+                fixture
+                    .engine
+                    .checkpoints
+                    .on_shared(Point::BeforeGuardStop, hook);
             }
             let result = fixture.correct(&child).await;
             let correction = result.guard_correction.unwrap();
@@ -1909,14 +1951,17 @@ async fn guard_late_stop_worker_retains_resource_after_timeout_and_cannot_relaun
     let entered_tx = Mutex::new(Some(entered_tx));
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Mutex::new(release_rx);
-    *fixture.engine.after_guard_stop.lock().unwrap() = Some(Arc::new(move || {
-        entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
-        release_rx
-            .lock()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap();
-    }));
+    fixture
+        .engine
+        .checkpoints
+        .on(Point::AfterGuardStop, move || {
+            entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        });
     let mut request = fixture.request();
     request.origin = LaunchOrigin::Guard;
     let revision = fixture.engine.configuration.snapshot().unwrap().revision;
@@ -1977,9 +2022,12 @@ async fn guard_failed_stop_receipt_stays_unconfirmed_and_recovery_never_replays(
     fixture.events(1).await;
     let path = fixture._root.path().join("store/state/launch.json");
     let (sender, receiver) = std::sync::mpsc::channel();
-    *fixture.engine.before_guard_receipt.lock().unwrap() = Some(Arc::new(move || {
-        sender.send(hold_replacement(&path)).unwrap();
-    }));
+    fixture
+        .engine
+        .checkpoints
+        .on(Point::BeforeGuardReceipt, move || {
+            sender.send(hold_replacement(&path)).unwrap();
+        });
     let mut request = fixture.request();
     request.origin = LaunchOrigin::Guard;
     fixture
@@ -2105,7 +2153,10 @@ async fn separate_stores_share_one_reservation_before_and_after_confirmation() {
     )
     .unwrap();
     let gate = Arc::new(tokio::sync::Notify::new());
-    *first.engine.before_dispatch.lock().unwrap() = Some(gate.clone());
+    first
+        .engine
+        .checkpoints
+        .hold(Point::BeforeDispatch, gate.clone());
     let request = first.request();
     first.engine.submit(request.clone()).await.unwrap();
     first.ready(request.request_id).await;
@@ -2234,7 +2285,10 @@ async fn cancellation_and_dependency_changes_prevent_creation_but_rename_does_no
     let fixture = Fixture::new(true);
     for mode in [0, 1, 2] {
         let gate = Arc::new(tokio::sync::Notify::new());
-        *fixture.engine.before_dispatch.lock().unwrap() = Some(gate.clone());
+        fixture
+            .engine
+            .checkpoints
+            .hold(Point::BeforeDispatch, gate.clone());
         let request = fixture.request();
         fixture.engine.submit(request.clone()).await.unwrap();
         fixture.ready(request.request_id).await;

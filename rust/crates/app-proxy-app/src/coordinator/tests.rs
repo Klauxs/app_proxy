@@ -1,5 +1,15 @@
 use super::*;
 
+/// Keeps a test from touching the per-user resource registry.
+pub(super) fn test_resources(
+    root: &Path,
+) -> app_proxy_windows::instance_resource::ResourceRegistry {
+    app_proxy_windows::instance_resource::ResourceRegistry::for_test_at(
+        &root.join("test-resources"),
+    )
+    .unwrap()
+}
+
 fn snapshot() -> (tempfile::TempDir, Arc<Shared>) {
     let temp = tempfile::tempdir().unwrap();
     let store = store::Store::create(&temp.path().join("store")).unwrap();
@@ -16,7 +26,10 @@ fn snapshot() -> (tempfile::TempDir, Arc<Shared>) {
         profiles: 0,
         phase: "bootstrap".into(),
     };
-    let shared = Arc::new(Shared::new(temp.path().join("store"), store, status).unwrap());
+    let root = temp.path().join("store");
+    let shared = Arc::new(
+        Shared::with_resources(root.clone(), store, status, test_resources(&root)).unwrap(),
+    );
     (temp, shared)
 }
 fn policy() -> ipc::PeerPolicy {

@@ -62,10 +62,7 @@ impl LaunchEngine {
                 },
             }
         };
-        #[cfg(test)]
-        if let Some(hook) = self.after_guard_scan.lock().unwrap().clone() {
-            hook();
-        }
+        self.checkpoints.reach(Point::AfterGuardScan);
         // The scan can overlap an edit or a newly accepted launch. Old evidence
         // must never be presented as a correction for the replacement state.
         let store = self.configuration.lock()?;

@@ -1,3 +1,4 @@
+use super::tests::test_resources;
 use super::*;
 use app_proxy_core::{launch::LaunchPhase, model::*};
 
@@ -728,7 +729,9 @@ impl Fixture {
             phase: "bootstrap".into(),
         };
         Self {
-            shared: Arc::new(Shared::new(home, store, status).unwrap()),
+            shared: Arc::new(
+                Shared::with_resources(home.clone(), store, status, test_resources(&home)).unwrap(),
+            ),
             instance,
             events,
             root,

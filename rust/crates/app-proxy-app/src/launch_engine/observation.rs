@@ -61,10 +61,7 @@ impl LaunchEngine {
                 code: "INSTANCE_OBSERVATION_BUSY".into(),
             }
         };
-        #[cfg(test)]
-        if let Some(hook) = self.after_guard_scan.lock().unwrap().clone() {
-            hook();
-        }
+        self.checkpoints.reach(Point::AfterGuardScan);
         let store = self.configuration.lock()?;
         if store.load()?.revision != snapshot.revision {
             observation = InstanceObservation::Unknown {
@@ -192,14 +189,10 @@ impl LaunchEngine {
             .clone()
             .try_acquire_owned()
             .map_err(|_| Error::Invalid("GUARD_RESOLUTION_BUSY"))?;
-        #[cfg(test)]
-        let hook = self.before_guard_resolution.lock().unwrap().clone();
+        let checkpoints = self.checkpoints.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            #[cfg(test)]
-            if let Some(hook) = hook {
-                hook();
-            }
+            checkpoints.reach(Point::BeforeGuardResolution);
             installation::resolve(&locator)
         })
         .await
