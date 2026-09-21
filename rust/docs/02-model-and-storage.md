@@ -120,3 +120,37 @@ MSIX LocalState 可能在 store 之外。每个 location 都记录自己的归�
 所有 ID 唯一、引用有效；同一 normalized endpoint 不能被重复声明为两个独立所有者；Guard enabled 必须绑定代理且模板可识别其代理参数；original 同一物理实例只有一个有效登记。自由显示名称可重复，快捷方式名称用 name + 短 ID 去重。
 
 单个 manifest 上限 8 MiB；超出时拒绝写入并给出容量错误，不截断。revision 为单调 u64，溢出视为不可写。数据路径使用 PathBuf/OsString，Windows 边界不做 lossy 转换；首版磁盘 JSON 仅接受可无损表示为 Unicode 的用户输入路径，遇到其他路径明确拒绝。比较使用 Windows 路径语义和必要的文件身份，不能直接全局 lowercase 代替规范化。
+
+**8. 格式版本与升级策略**
+
+2026-09-21 确定。持久化内容分三类，规则不同。
+
+| 类别 | 规则 |
+|---|---|
+| 长期配置 | 必须可迁移。新版程序读旧版文件；旧版程序遇到新版文件返回固定错误并保持原文件不变 |
+| 短期记录 | 终态保留七天，未决记录保留到处理。版本不符时返回该记录自己的错误码并保留原文件，不删除、不重置、不猜测 |
+| 线上格式 | 前后台成套发行，不做跨版本兼容；版本不符在握手或读取时明确拒绝 |
+
+长期配置的清单：
+
+| 文件 | 当前版本 | 版本判断位置 |
+|---|---|---|
+| `manifest.json` | `schema_version` 1 | `app-proxy-core/src/model/stored.rs` |
+| `.app-proxy-rust-owned.json` 归属标记 | 1，独立于 manifest | `app-proxy-windows/src/store.rs` 的 `MARKER_VERSION` |
+| `secrets/<id>.json` 中的订阅节点文档 | `version` 1 | `app-proxy-core/src/subscription/saved.rs` |
+| 实例数据目录标记 | `schema_version` 1 | `app-proxy-windows/src/instance_data.rs` |
+| `resources` 登记处标记 | `schema_version` 1 | `app-proxy-windows/src/instance_resource.rs` |
+| 程序目录的 `.app-proxy-install.json` | `format` 为 `app-proxy-install-v1` | `app-proxy-setup/src/lib.rs` |
+
+manifest 的读取分两段：先只读 `format` 和 `schema_version`，再按版本处理。高于当前版本返回 `STORE_SCHEMA_NEWER`。低于当前版本时依次经过 `MIGRATIONS` 中的迁移函数，迁移只发生在内存里；下一次提交前先把原始字节原样保存为 `backups/manifest.schema-<旧版本>.json`，同一旧版本只保留第一份。当前版本的文件仍直接从字节严格解析。
+
+改变 manifest 存储形状的步骤固定为四步：提高 `SCHEMA_VERSION`；在 `model/stored.rs` 的 `MIGRATIONS` 末尾追加一个迁移函数；新增 `tests/fixtures/manifests/v<N>.json`，内容覆盖该版本的全部变体和可选字段；不修改任何已有的历史夹具。只新增可选字段也要走这四步，这样旧版程序给出的是 `STORE_SCHEMA_NEWER` 而不是解析失败。`stored_manifest_contract` 测试要求每个历史夹具都能加载并通过校验，并要求当前夹具写回后与原文完全一致，以此发现没有升版本的形状变化。编译期断言保证迁移函数的数量与版本号一致。
+
+归属标记在初始化时写入一次，之后不再改写，所以它的版本号与 manifest 无关。
+
+短期记录的清单：`state/requests/<id>.json`、`state/core-requests/<id>.json`、`state/launch.json`、`state/shortcuts.json`、`state/login-task.json`、`state/core/runtime.json`、`state/core/update.json`、`state/core/start.json`、`state/core/generations/<generation>/generation.json`、监听安装计划、MSIX 请求目录中的 `state.json`。升级时安装器先等待协调进程排空，但未决记录可能跨升级保留。因此改变某种短期记录的格式时，新程序必须保留读取上一版本的分支，做法参照 `core_update.rs` 对 v1 计划的处理；不能假设升级时该记录已经清空。
+
+线上格式的清单：协调进程 IPC、事件管道、UAC ticket、MSIX 请求文件。
+
+安装器日志 `.app-proxy-upgrade.json` 是一个例外：已安装程序的启动闸门只依赖其中的 `published` 字段，并有意接受未知字段，这样旧程序能识别正在替换它的新安装器写下的日志。
+
