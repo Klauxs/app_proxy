@@ -19,8 +19,10 @@ use std::time::Duration;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use uuid::Uuid;
 
-const PROTOCOL_MAJOR: u32 = 3;
-const PROTOCOL_MINOR: u32 = 22;
+/// The console program, the host and the coordinator ship and are replaced as a
+/// set, so there is no negotiation below this number: any change to the wire
+/// format raises it, and a mismatch is refused during the handshake.
+const PROTOCOL_MAJOR: u32 = 4;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENTS: usize = 16;
 
@@ -31,7 +33,6 @@ mod launch_tests;
 #[serde(deny_unknown_fields)]
 struct Hello {
     protocol_major: u32,
-    protocol_minor: u32,
     version: String,
     store_id: Uuid,
     session_id: u32,
@@ -467,7 +468,6 @@ pub struct Status {
 fn hello(store_id: Uuid, session_id: u32, epoch: Option<Uuid>) -> Hello {
     Hello {
         protocol_major: PROTOCOL_MAJOR,
-        protocol_minor: PROTOCOL_MINOR,
         version: env!("CARGO_PKG_VERSION").into(),
         store_id,
         session_id,
@@ -602,7 +602,6 @@ async fn handle(
 ) -> Result<()> {
     let status = &shared.identity;
     let request: Hello = connection.receive().await?;
-    let client_minor = request.protocol_minor;
     let rejection = if request.protocol_major != PROTOCOL_MAJOR {
         Some("PROTOCOL_VERSION_MISMATCH")
     } else if request.store_id != status.store_id {
@@ -632,106 +631,7 @@ async fn handle(
     }
     let request_id = request.request_id;
     let epoch = status.epoch;
-    if login_operation(&request.operation) && client_minor < 18 {
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: Reply::Error {
-                    code: "GUARD_LOGIN_PROTOCOL_UPDATE_REQUIRED".into(),
-                },
-            })
-            .await;
-    }
-    if instance_edit_operation(&request.operation) && client_minor < 17 {
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: Reply::Error {
-                    code: "INSTANCE_EDIT_PROTOCOL_UPDATE_REQUIRED".into(),
-                },
-            })
-            .await;
-    }
-    if shortcut_operation(&request.operation) && client_minor < 19 {
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: Reply::Error {
-                    code: "SHORTCUT_PROTOCOL_UPDATE_REQUIRED".into(),
-                },
-            })
-            .await;
-    }
-    if matches!(&request.operation, Operation::SubscriptionNodes { .. }) && client_minor < 21 {
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: Reply::Error {
-                    code: "SUBSCRIPTION_PROTOCOL_UPDATE_REQUIRED".into(),
-                },
-            })
-            .await;
-    }
-    if subscription_preview_operation(&request.operation) && client_minor < 22 {
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: Reply::Error {
-                    code: "SUBSCRIPTION_PROTOCOL_UPDATE_REQUIRED".into(),
-                },
-            })
-            .await;
-    }
-    if subscription_edit_operation(&request.operation) && client_minor < 21 {
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: Reply::Error {
-                    code: "SUBSCRIPTION_PROTOCOL_UPDATE_REQUIRED".into(),
-                },
-            })
-            .await;
-    }
-    if core_operation(&request.operation) && client_minor < 20 {
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: Reply::Error {
-                    code: "CORE_PROTOCOL_UPDATE_REQUIRED".into(),
-                },
-            })
-            .await;
-    }
-    if matches!(&request.operation, Operation::Catalog { .. }) && client_minor < 21 {
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: Reply::Error {
-                    code: "CATALOG_PROTOCOL_UPDATE_REQUIRED".into(),
-                },
-            })
-            .await;
-    }
     if let Operation::RuntimeStatus { instance_id } = request.operation {
-        if client_minor < 15 {
-            return connection
-                .send(&Response {
-                    request_id,
-                    epoch,
-                    result: Reply::Error {
-                        code: "RUNTIME_PROTOCOL_UPDATE_REQUIRED".into(),
-                    },
-                })
-                .await;
-        }
         let permit = shared.guard_queries.clone().try_acquire_owned().ok();
         let runtime = tokio::runtime::Handle::current();
         let result = tokio::task::spawn_blocking(move || {
@@ -757,17 +657,6 @@ async fn handle(
             .await;
     }
     if let Operation::GuardStatus { instance_id } = request.operation {
-        if client_minor < 10 {
-            return connection
-                .send(&Response {
-                    request_id,
-                    epoch,
-                    result: Reply::Error {
-                        code: "GUARD_PROTOCOL_UPDATE_REQUIRED".into(),
-                    },
-                })
-                .await;
-        }
         let permit = shared.guard_queries.clone().try_acquire_owned().ok();
         let runtime = tokio::runtime::Handle::current();
         let result = tokio::task::spawn_blocking(move || {
@@ -1046,55 +935,6 @@ async fn rpc(
     {
         return Err(Error::Invalid("IPC_SERVER_HELLO_MISMATCH"));
     }
-    if matches!(
-        &request.operation,
-        Operation::Launch { .. } | Operation::LaunchStatus { .. } | Operation::CancelLaunch { .. }
-    ) && server.protocol_minor < 7
-    {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if matches!(
-        &request.operation,
-        Operation::Launch {
-            expected_revision: Some(_),
-            ..
-        }
-    ) && server.protocol_minor < 8
-    {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if matches!(&request.operation, Operation::RuntimeStatus { .. }) && server.protocol_minor < 15 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if shortcut_operation(&request.operation) && server.protocol_minor < 19 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if core_operation(&request.operation) && server.protocol_minor < 20 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if login_operation(&request.operation) && server.protocol_minor < 18 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if instance_edit_operation(&request.operation) && server.protocol_minor < 17 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if matches!(&request.operation, Operation::GuardStatus { .. }) && server.protocol_minor < 10 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if matches!(&request.operation, Operation::Catalog { .. }) && server.protocol_minor < 21 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if subscription_edit_operation(&request.operation) && server.protocol_minor < 21 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if subscription_preview_operation(&request.operation) && server.protocol_minor < 22 {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
-    if matches!(&request.operation, Operation::SubscriptionNodes { .. })
-        && server.protocol_minor < 21
-    {
-        return Err(Error::Invalid("PROTOCOL_VERSION_MISMATCH"));
-    }
     let request_id = request.request_id;
     connection.send(&request).await?;
     let response: Response = connection.receive().await?;
@@ -1145,16 +985,6 @@ pub async fn configure(root: PathBuf, request: ConfigRequest) -> Result<ConfigOu
     }
 }
 
-fn instance_edit_operation(operation: &Operation) -> bool {
-    matches!(
-        operation,
-        Operation::InstanceSettings { .. }
-            | Operation::Configure {
-                action: ConfigAction::EditInstance { .. },
-                ..
-            }
-    )
-}
 pub async fn instance_settings(
     root: PathBuf,
     instance_id: Uuid,
@@ -1170,26 +1000,6 @@ pub async fn instance_settings(
         Reply::InstanceSettings { settings } if settings.instance_id == instance_id => Ok(settings),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
-}
-fn shortcut_operation(operation: &Operation) -> bool {
-    matches!(
-        operation,
-        Operation::ShortcutApply { .. }
-            | Operation::ShortcutResume { .. }
-            | Operation::ShortcutRequest { .. }
-            | Operation::ShortcutStatus { .. }
-            | Operation::ShortcutCheck { .. }
-    )
-}
-
-fn login_operation(operation: &Operation) -> bool {
-    matches!(
-        operation,
-        Operation::LoginApply { .. }
-            | Operation::LoginResume { .. }
-            | Operation::LoginRequest { .. }
-            | Operation::LoginStatus {}
-    )
 }
 pub async fn login_apply(
     root: PathBuf,
@@ -1311,28 +1121,6 @@ pub async fn shortcut_check(
         Reply::ShortcutCheck { check } if check.instance_id == instance_id => Ok(check),
         _ => Err(Error::Invalid("IPC_RESPONSE_MISMATCH")),
     }
-}
-
-fn subscription_edit_operation(operation: &Operation) -> bool {
-    matches!(
-        operation,
-        Operation::Configure {
-            action: ConfigAction::EditSubscriptionProfile { .. },
-            ..
-        } | Operation::ControlCore {
-            action: CoreAction::PrepareSubscription { .. }
-        }
-    )
-}
-
-fn subscription_preview_operation(operation: &Operation) -> bool {
-    matches!(
-        operation,
-        Operation::SubscriptionPreview { .. }
-            | Operation::SubscriptionPreviewPage { .. }
-            | Operation::SubscriptionPreviewClose { .. }
-            | Operation::SubscriptionStage { .. }
-    )
 }
 
 pub async fn subscription_preview(
@@ -1673,15 +1461,6 @@ async fn ensure_store(root: &Path) -> Result<()> {
     }
     store::describe(root)?;
     Ok(())
-}
-
-fn core_operation(operation: &Operation) -> bool {
-    matches!(
-        operation,
-        Operation::ControlCore { .. }
-            | Operation::CoreStatus {}
-            | Operation::CoreRequestStatus { .. }
-    )
 }
 
 #[cfg(test)]

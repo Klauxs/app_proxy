@@ -60,7 +60,7 @@ app-proxy uninstall [--keep-data]
 
 **3. IPC 编码和请求**
 
-管道采用 4 字节 little-endian 长度 + UTF-8 JSON。单帧上限 1 MiB，先验证长度再分配；订阅正文和文件导入走单独受限文件/流式服务，不通过不断增大单帧传输。握手包含 protocol_major/minor、client/server version、store ID、session/epoch；major 不同拒绝，minor 只允许向后兼容的新增可选字段。
+管道采用 4 字节 little-endian 长度 + UTF-8 JSON。单帧上限 1 MiB，先验证长度再分配；订阅正文和文件导入走单独受限文件/流式服务，不通过不断增大单帧传输。握手包含 protocol_major、client/server version、store ID、session/epoch；major 不同即拒绝。2026-09-21 起不再有 minor：CLI、host 和 coordinator 成套发行，安装器成套替换，任何线上格式变化都提高 major。
 
 请求 envelope：`protocol_major, request_id, operation, expected_revision?, payload`。操作由固定 enum 解析，不能用字符串反射调用任意函数。响应 `request_id, status, result?, error?, attempt_id?`。创建和启动等写操作必须有 request ID；同 ID + 同规范化 payload 重放返回原结果，同 ID + 不同 payload 返回 REQUEST_ID_CONFLICT。
 
@@ -68,7 +68,7 @@ app-proxy uninstall [--keep-data]
 
 客户端取消订阅事件不取消任务。配置编辑用 expected_revision；冲突响应携带当前 revision 和冲突实体 ID，不回显完整配置或秘密。程序启动参数等敏感 payload 不写 access log。
 
-当前 Rust coordinator 协议为 3.20。CoreStatus/CoreRequestStatus/ControlCore 双向要求 minor 至少为 20，覆盖 PrepareRemove、RecoverStart、ProfileRemoved、Reconciled 和移除影响字段。移除 GuardStatus.ifeo 和 Ifeo 启动来源属于不兼容变更，major 升为 3；旧 major 在握手时拒绝。更新需使用同一代 CLI/host/coordinator，不自动终止旧进程。启动、启动请求查询及显式取消要求服务端 minor 至少为 7，带 expected_revision 的启动要求至少为 8，Guard 状态要求至少为 10。订阅协议扩展后的 Catalog 要求两端 minor 至少为 11；订阅 Refresh/Select 配置动作和 PrepareSubscription 要求两端至少为 12；下载预览及 stage 要求至少为 13；保存节点列表要求至少为 14；独立只读 RuntimeStatus 要求两端至少为 15；ShortcutApply/Resume/Request/Status/Check 要求两端至少为 19（新增 Repair/Repaired，拒绝旧客户端误解恢复状态）；InstanceSettings 和 EditInstance 要求两端至少为 17；LoginApply/Resume/Request/Status 要求两端至少为 18，在 major 3 内 GuardStatus 门槛仍为 10。版本不足时不接纳对应请求。旧客户端不会收到无法解析的新协议枚举，旧服务端也不会被当作支持新操作。新启动请求只包含已登记实例 ID、来源及可选版本条件，回执不含参数、环境值或凭据；接纳 ACK 不表示创建成功，客户端查询持久 attempt 阶段。订阅、快捷方式 CLI 和日常中文菜单已接入，菜单与 CLI 共用业务函数；独立运行状态已接入菜单列表和 instance inspect，配置、进程与保护证据分别展示；高级设置已接入同一配置事务、CLI 和菜单；维护入口仍按本章设计继续实现。
+当前 Rust coordinator 协议为 major 4。2026-09-21 删除了 `protocol_minor` 字段、两端共 22 处按 minor 判断操作是否可用的门控，以及 `*_PROTOCOL_UPDATE_REQUIRED` 错误码；版本不一致一律在握手时以 `PROTOCOL_VERSION_MISMATCH` 拒绝，不自动终止旧进程，由用户退出旧的协调进程后重试。以下为 major 3 时期各 minor 的历史记录，仅供查阅：当前 Rust coordinator 协议为 3.20。CoreStatus/CoreRequestStatus/ControlCore 双向要求 minor 至少为 20，覆盖 PrepareRemove、RecoverStart、ProfileRemoved、Reconciled 和移除影响字段。移除 GuardStatus.ifeo 和 Ifeo 启动来源属于不兼容变更，major 升为 3；旧 major 在握手时拒绝。更新需使用同一代 CLI/host/coordinator，不自动终止旧进程。启动、启动请求查询及显式取消要求服务端 minor 至少为 7，带 expected_revision 的启动要求至少为 8，Guard 状态要求至少为 10。订阅协议扩展后的 Catalog 要求两端 minor 至少为 11；订阅 Refresh/Select 配置动作和 PrepareSubscription 要求两端至少为 12；下载预览及 stage 要求至少为 13；保存节点列表要求至少为 14；独立只读 RuntimeStatus 要求两端至少为 15；ShortcutApply/Resume/Request/Status/Check 要求两端至少为 19（新增 Repair/Repaired，拒绝旧客户端误解恢复状态）；InstanceSettings 和 EditInstance 要求两端至少为 17；LoginApply/Resume/Request/Status 要求两端至少为 18，在 major 3 内 GuardStatus 门槛仍为 10。版本不足时不接纳对应请求。旧客户端不会收到无法解析的新协议枚举，旧服务端也不会被当作支持新操作。新启动请求只包含已登记实例 ID、来源及可选版本条件，回执不含参数、环境值或凭据；接纳 ACK 不表示创建成功，客户端查询持久 attempt 阶段。订阅、快捷方式 CLI 和日常中文菜单已接入，菜单与 CLI 共用业务函数；独立运行状态已接入菜单列表和 instance inspect，配置、进程与保护证据分别展示；高级设置已接入同一配置事务、CLI 和菜单；维护入口仍按本章设计继续实现。
 
 快捷方式 RPC 不接受可选文件位置或启动器参数。ShortcutApply 的外层请求 ID 与内层 ID 必须一致；Remove 还需 expected_creation，对显示的原创建进行原子核对。Status 返回当前登记及优先的待删除操作，Created 回执是历史证据，不证明文件现在仍在。Request 只读；Resume 使用原意图且不重做安装解析。断线/超时/Ctrl+C 不当作取消服务工作，JSON 未确认报告保留原 ID；没有记录也不推断锁外准备已经停止。实际工作单槽有界，忙时额外变更立即拒绝，状态连接仍可使用。
 
