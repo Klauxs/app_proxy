@@ -558,6 +558,8 @@ pub(crate) async fn submit(
             let exit = rejection_exit(&code);
             let message = if code == "CORE_RECONFIGURATION_REQUIRED" {
                 "该代理仍属于共享内核的当前配置；需确认影响后重配置。此流程尚未接入，当前配置保持不变。".into()
+            } else if code == "INTEGRATION_CLEANUP_REQUIRED" {
+                "实例尚未移除：关联的桌面入口或未完成操作需要先清理；请在“管理实例 → 桌面快捷方式”中处理。".into()
             } else {
                 code
             };

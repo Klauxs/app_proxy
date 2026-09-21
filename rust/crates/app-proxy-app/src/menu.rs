@@ -720,22 +720,83 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
             .map(|_| ())
         }
         7 => {
-            confirm("移除此实例登记？保留应用及数据，不关闭应用。", foreground).await?;
-            instance_cli::save(
-                root,
-                instance_cli::Command::Remove { id },
-                false,
-                Some(snapshot.revision),
+            confirm(
+                "移除此实例登记及其桌面快捷方式？保留应用及数据，不关闭应用。",
                 foreground,
             )
             .await?;
-            println!("登记已移除，数据已保留。");
-            Ok(())
+            remove_instance(root, id, snapshot.revision, foreground).await
         }
         8 => manage_shortcut(root, id, foreground).await,
         9 => advanced_settings(root, id, foreground).await,
         _ => unreachable!(),
     }
+}
+
+async fn remove_instance(
+    root: &Path,
+    id: Uuid,
+    revision: u64,
+    foreground: &mut Foreground,
+) -> Result<(), Failure> {
+    use app_proxy_windows::shortcuts::journal::Action;
+    foreground.check()?;
+    let view = coordinator::shortcut_status(root.into(), id)
+        .await
+        .map_err(|e| fail(3, e.to_string()))?;
+    if view.revision != revision {
+        return Err(fail(4, "配置已变化，请重新确认移除。"));
+    }
+    if let Some(entry) = view.integration {
+        let result = match entry.request.action {
+            Action::Create => {
+                crate::shortcut_cli::change(
+                    root,
+                    id,
+                    view.revision,
+                    Action::Remove,
+                    Some(entry.request.id),
+                    foreground,
+                )
+                .await
+            }
+            Action::Remove => {
+                // Continue an interrupted removal with its original request.
+                crate::shortcut_cli::resume(root, entry.request.id, foreground).await
+            }
+            Action::Repair => {
+                return Err(fail(
+                    4,
+                    "实例尚未移除：桌面入口有未完成的恢复操作，请先在“桌面快捷方式”中处理。",
+                ));
+            }
+        };
+        foreground.check()?;
+        if result.is_err() {
+            return Err(fail(
+                4,
+                "实例尚未移除：桌面入口清理未完成，请按上方原因处理后重试。",
+            ));
+        }
+    }
+    // Shortcut removal can commit a new revision. Re-read its registration
+    // before removing the instance, keeping the core's ownership guard intact.
+    let current = coordinator::shortcut_status(root.into(), id)
+        .await
+        .map_err(|e| fail(3, e.to_string()))?;
+    if current.integration.is_some() {
+        return Err(fail(4, "实例尚未移除：桌面入口登记已变化，请重新选择。"));
+    }
+    instance_cli::save(
+        root,
+        instance_cli::Command::Remove { id },
+        false,
+        Some(current.revision),
+        foreground,
+    )
+    .await?;
+    println!("实例登记已移除；应用及数据已保留。");
+    Ok(())
 }
 
 async fn advanced_settings(
