@@ -14,6 +14,32 @@ struct ListenerRecord {
 }
 
 impl Deployment {
+    pub(crate) fn write_install_diagnostic(
+        store: Uuid,
+        request: Uuid,
+        error: Option<String>,
+    ) -> Result<()> {
+        identity::assert_elevated_user()?;
+        ids(store, request)?;
+        let (root, _directories) = location(&identity::current()?.user_sid, store, true)?;
+        let mut file = security::new_file(&root.join(format!("install-result-{request}.json")))?;
+        file.write_all(&serde_json::to_vec(&error)?)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    pub(crate) fn install_diagnostic(store: Uuid, request: Uuid) -> Result<Option<String>> {
+        ids(store, request)?;
+        let (root, _directories) = location(&identity::current()?.user_sid, store, false)?;
+        let file = security::read_file(&root.join(format!("install-result-{request}.json")))?;
+        let mut bytes = Vec::new();
+        file.take(RECORD_LIMIT + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > RECORD_LIMIT {
+            return Err(Error::Invalid("GUARD_INSTALL_DIAGNOSTIC_SIZE"));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
     /// Reads a protected installation intent; task verification and an
     /// authenticated stream are separate requirements, never inferred here.
     pub fn listener(store: Uuid) -> Result<Self> {

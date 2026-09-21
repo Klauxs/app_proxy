@@ -28,6 +28,7 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(60);
 #[serde(deny_unknown_fields)]
 struct Ticket {
     version: u32,
+    request: Uuid,
     store: Uuid,
     issuer: ProcessIdentity,
     source: SourceExpectation,
@@ -40,13 +41,20 @@ struct Ticket {
 pub fn elevated(encoded: &str) -> Result<()> {
     identity::assert_elevated_user()?;
     let ticket = decode(encoded)?;
-    Deployment::install_listener(
+    let result = Deployment::install_listener(
         ticket.store,
         &ticket.issuer,
         &ticket.source,
         ticket.upgrade_from,
-    )?;
-    Ok(())
+    );
+    // ShellExecute elevation has no inherited stderr. Keep a protected receipt
+    // for this exact attempt so the caller can retain the actual Windows error.
+    let _ = Deployment::write_install_diagnostic(
+        ticket.store,
+        ticket.request,
+        result.as_ref().err().map(ToString::to_string),
+    );
+    result.map(|_| ())
 }
 
 /// Synchronous foreground worker. UAC cancellation is final for this attempt;
@@ -88,6 +96,7 @@ fn authorize(store: Uuid, update: bool) -> Result<Uuid> {
     }
     let ticket = Ticket {
         version: 1,
+        request: Uuid::new_v4(),
         store,
         issuer: identity::current()?,
         source: source.expectation(),
@@ -109,6 +118,17 @@ fn authorize(store: Uuid, update: bool) -> Result<Uuid> {
                 while let Ok(None) = wait(&process, Duration::from_secs(1)) {}
             });
         return Err(Error::Invalid("GUARD_INSTALL_RESULT_UNKNOWN"));
+    }
+    if completed.is_some_and(|code| code != 0) {
+        let detail = Deployment::install_diagnostic(store, ticket.request)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "管理员安装进程未返回详细诊断".into());
+        return Err(std::io::Error::other(format!(
+            "GUARD_INSTALL_FAILED (exit {}): {detail}",
+            completed.unwrap()
+        ))
+        .into());
     }
     // A successful process exit is not installation evidence; a nonzero exit
     // after registration is not proof that the task was never created either.
@@ -154,6 +174,7 @@ fn decode(encoded: &str) -> Result<Ticket> {
     let ticket: Ticket = serde_json::from_slice(&bytes)
         .map_err(|_| Error::Invalid("INVALID_GUARD_INSTALL_TICKET"))?;
     if ticket.version != 1
+        || ticket.request.is_nil()
         || ticket.store.is_nil()
         || ticket.issuer.pid == 0
         || ticket.issuer.creation_time == 0

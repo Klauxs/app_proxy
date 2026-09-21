@@ -7,6 +7,7 @@ use std::{
 fn ticket() -> Ticket {
     Ticket {
         version: 1,
+        request: Uuid::new_v4(),
         upgrade_from: None,
         store: Uuid::new_v4(),
         issuer: identity::current().unwrap(),
