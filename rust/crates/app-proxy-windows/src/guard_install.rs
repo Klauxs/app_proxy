@@ -31,6 +31,8 @@ struct Ticket {
     store: Uuid,
     issuer: ProcessIdentity,
     source: SourceExpectation,
+    #[serde(default)]
+    upgrade_from: Option<Uuid>,
 }
 
 /// Called only by the fixed host guard-install entry point after UAC. The
@@ -38,27 +40,47 @@ struct Ticket {
 pub fn elevated(encoded: &str) -> Result<()> {
     identity::assert_elevated_user()?;
     let ticket = decode(encoded)?;
-    Deployment::install_listener(ticket.store, &ticket.issuer, &ticket.source)?;
+    Deployment::install_listener(
+        ticket.store,
+        &ticket.issuer,
+        &ticket.source,
+        ticket.upgrade_from,
+    )?;
     Ok(())
 }
 
 /// Synchronous foreground worker. UAC cancellation is final for this attempt;
 /// after dispatch, errors/timeouts mean unconfirmed, never automatic reexecution.
 pub fn authorize_listener(store: Uuid) -> Result<Uuid> {
+    authorize(store, false)
+}
+
+/// Setup-only foreground flow, with the previous immutable generation included
+/// in the UAC ticket. Ordinary guard enable never replaces another release.
+pub fn authorize_listener_update(store: Uuid) -> Result<Uuid> {
+    authorize(store, true)
+}
+
+fn authorize(store: Uuid, update: bool) -> Result<Uuid> {
     identity::assert_ordinary_user()?;
     if store.is_nil() {
         return Err(Error::Invalid("GUARD_DEPLOYMENT_ID_REQUIRED"));
     }
     let source = InstallerSource::capture()?;
+    let mut upgrade_from = None;
     match Deployment::listener(store) {
         Ok(deployment) => {
             if !source.matches_listener(&deployment) {
-                return Err(Error::Invalid("GUARD_LISTENER_RELEASE_CONFLICT"));
-            }
-            match guard_task::verify_registered(&deployment) {
-                Ok(()) => return Ok(deployment.generation()),
-                Err(Error::Invalid("GUARD_TASK_MISSING")) => {}
-                Err(error) => return Err(error),
+                if !update {
+                    return Err(Error::Invalid("GUARD_LISTENER_RELEASE_CONFLICT"));
+                }
+                upgrade_from = Some(deployment.generation());
+            } else {
+                match guard_task::verify_registered(&deployment) {
+                    Ok(()) => return Ok(deployment.generation()),
+                    Err(Error::Invalid("GUARD_TASK_MISSING")) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         Err(Error::Invalid("GUARD_LISTENER_MISSING")) => {}
@@ -69,6 +91,7 @@ pub fn authorize_listener(store: Uuid) -> Result<Uuid> {
         store,
         issuer: identity::current()?,
         source: source.expectation(),
+        upgrade_from,
     };
     let encoded = encode(&ticket)?;
     creation_guard::ensure_plain_creation(source.path())?;
@@ -135,6 +158,7 @@ fn decode(encoded: &str) -> Result<Ticket> {
         || ticket.issuer.pid == 0
         || ticket.issuer.creation_time == 0
         || ticket.issuer.session_id == 0
+        || ticket.upgrade_from.is_some_and(|id| id.is_nil())
     {
         return Err(Error::Invalid("INVALID_GUARD_INSTALL_TICKET"));
     }

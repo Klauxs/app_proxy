@@ -40,6 +40,7 @@ impl Deployment {
         store: Uuid,
         issuer: &ProcessIdentity,
         expected: &SourceExpectation,
+        upgrade_from: Option<Uuid>,
     ) -> Result<Self> {
         identity::assert_elevated_user()?;
         let current = identity::current()?;
@@ -75,7 +76,17 @@ impl Deployment {
                 record.generation,
             )?;
             if !matches_source(&deployment, &source) {
-                return Err(Error::Invalid("GUARD_LISTENER_RELEASE_CONFLICT"));
+                if upgrade_from != Some(deployment.generation()) {
+                    return Err(Error::Invalid("GUARD_LISTENER_RELEASE_CONFLICT"));
+                }
+                return upgrade_listener(
+                    store,
+                    source,
+                    deployment,
+                    &root,
+                    &current.user_sid,
+                    &issuer_handle,
+                );
             }
             deployment
         } else {
@@ -105,6 +116,90 @@ impl Deployment {
         issuer_alive(&issuer_handle)?;
         Ok(deployment)
     }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Upgrade {
+    version: u32,
+    from: Uuid,
+    to: Uuid,
+}
+
+fn upgrade_listener(
+    store: Uuid,
+    source: Source,
+    previous: Deployment,
+    root: &Path,
+    sid: &str,
+    issuer: &OwnedHandle,
+) -> Result<Deployment> {
+    let pending = root.join("listener-upgrade.json");
+    let next = match security::read_file(&pending) {
+        Ok(mut file) => {
+            let mut bytes = Vec::new();
+            Read::by_ref(&mut file)
+                .take(RECORD_LIMIT + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > RECORD_LIMIT {
+                return Err(Error::Invalid("GUARD_UPGRADE_RECORD_SIZE"));
+            }
+            let plan: Upgrade = serde_json::from_slice(&bytes)?;
+            if plan.version == 1 && plan.to == previous.generation() && plan.from != plan.to {
+                drop(file);
+                std::fs::remove_file(&pending)?;
+                return upgrade_listener(store, source, previous, root, sid, issuer);
+            }
+            if plan.version != 1
+                || plan.from != previous.generation()
+                || plan.to.is_nil()
+                || plan.to == plan.from
+            {
+                return Err(Error::Invalid("GUARD_UPGRADE_CONFLICT"));
+            }
+            let next = Deployment::open(store, plan.to)?;
+            if !matches_source(&next, &source) {
+                return Err(Error::Invalid("GUARD_UPGRADE_SOURCE_CHANGED"));
+            }
+            next
+        }
+        Err(Error::Windows { code: 2 | 3, .. }) => {
+            let (base, directories) = location(sid, store, false)?;
+            let next = stage_source(store, source, sid, base, directories)?;
+            let plan = Upgrade {
+                version: 1,
+                from: previous.generation(),
+                to: next.generation(),
+            };
+            let mut file = security::new_file(&pending)?;
+            file.write_all(&serde_json::to_vec(&plan)?)?;
+            file.sync_all()?;
+            next
+        }
+        Err(error) => return Err(error),
+    };
+    issuer_alive(issuer)?;
+    guard_task::retire_for_upgrade(&previous)?;
+    drop(previous);
+    issuer_alive(issuer)?;
+    let record = ListenerRecord {
+        format: FORMAT.into(),
+        store,
+        owner_sid: sid.into(),
+        generation: next.generation(),
+    };
+    let stage = root.join(format!("listener-{}.tmp", Uuid::new_v4()));
+    let mut file = security::new_file(&stage)?;
+    file.write_all(&serde_json::to_vec(&record)?)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&stage, root.join(LISTENER))?;
+    // After this switch, re-running setup can complete registration even if
+    // the installer was interrupted. The old generation remains for diagnosis.
+    guard_task::register(&next)?;
+    guard_task::verify_registered(&next)?;
+    std::fs::remove_file(pending)?;
+    Ok(next)
 }
 
 fn missing(error: Error) -> Error {

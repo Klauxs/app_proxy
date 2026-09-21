@@ -280,6 +280,14 @@ impl CoreControl {
             && store.ensure_core_update_idle().is_ok())
     }
 
+    pub(crate) fn drained(&self) -> Result<bool> {
+        Ok(self
+            .active
+            .lock()
+            .map_err(|_| Error::Invalid("CORE_CONTROL_WORKER_FAILED"))?
+            .is_empty())
+    }
+
     pub fn snapshot(&self) -> Result<crate::core_manager::CoreSnapshot> {
         self.manager.snapshot()
     }

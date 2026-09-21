@@ -55,6 +55,14 @@ fn main() {
             home,
             notify,
         } => {
+            if app_proxy_windows::setup::ensure_available().is_err() {
+                if notify {
+                    let _ = app_proxy_windows::console::notify_launch_failure(
+                        "AppProxy 正在升级，请安装完成后再打开。",
+                    );
+                }
+                std::process::exit(5);
+            }
             let result = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()

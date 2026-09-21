@@ -496,6 +496,7 @@ pub async fn serve(root: PathBuf) -> Result<()> {
 
 pub async fn serve_expected(root: PathBuf, expected_store: Option<Uuid>) -> Result<()> {
     identity::assert_ordinary_user()?;
+    app_proxy_windows::setup::ensure_available()?;
     let owned = store::Store::open_expected(&root, expected_store)?;
     let manifest = owned.load()?;
     let current = identity::current()?;
@@ -525,7 +526,11 @@ async fn serve_connections(
     shared: Arc<Shared>,
     idle_timeout: Duration,
 ) -> Result<()> {
-    let _guard_listener = shared.guard_monitor.start()?;
+    let mut guard_listener = Some(shared.guard_monitor.start()?);
+    let program_directory = app_proxy_windows::setup::current_directory()?;
+    let mut update_check = tokio::time::interval(Duration::from_millis(250));
+    update_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut draining = false;
     let mut idle_allowed = shared.idle_allowed()?;
     let mut clients = tokio::task::JoinSet::new();
     let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
@@ -533,7 +538,18 @@ async fn serve_connections(
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            accepted = listener.accept(), if clients.len() < MAX_CLIENTS => {
+            _ = update_check.tick() => {
+                if app_proxy_windows::setup::requested_at(&program_directory)? {
+                    draining = true;
+                    // Revoke guard dispatch before waiting for already accepted work.
+                    drop(guard_listener.take());
+                }
+                if draining && clients.is_empty() && shared.jobs.load(Ordering::SeqCst) == 0
+                    && shared.core.drained()? && shared.launch.drained()? {
+                    break;
+                }
+            }
+            accepted = listener.accept(), if !draining && clients.len() < MAX_CLIENTS => {
                 match accepted {
                     Ok(connection) => {
                         idle_deadline = tokio::time::Instant::now() + idle_timeout;
@@ -610,6 +626,7 @@ async fn handle(
         })
         .await?;
     let request: Request = connection.receive().await?;
+    app_proxy_windows::setup::ensure_available()?;
     if request.protocol_major != PROTOCOL_MAJOR || request.request_id.is_nil() {
         return Err(Error::Invalid("INVALID_RPC_REQUEST"));
     }

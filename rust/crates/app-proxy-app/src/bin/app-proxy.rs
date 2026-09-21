@@ -14,6 +14,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(hide = true)]
+    SetupPrepare,
+    #[command(hide = true)]
+    SetupVerify,
     /// 管理桌面快捷方式及中断操作
     Shortcut {
         #[command(subcommand)]
@@ -122,7 +126,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     use app_proxy_windows::{identity, package};
     identity::assert_ordinary_user()?;
     let cli = Cli::parse();
+    if matches!(cli.command, Some(Commands::SetupPrepare)) {
+        let root = cli
+            .home
+            .map(Ok)
+            .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+        app_proxy_app::setup::prepare(root)?;
+        return Ok(());
+    }
+    app_proxy_windows::setup::ensure_available()?;
     match cli.command.unwrap_or(Commands::Menu) {
+        Commands::SetupPrepare => unreachable!(),
+        Commands::SetupVerify => {
+            let root = cli
+                .home
+                .map(Ok)
+                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            runtime.block_on(app_proxy_app::setup::verify(root))?;
+            Ok(())
+        }
         Commands::Shortcut { command, json } => {
             let root = cli
                 .home

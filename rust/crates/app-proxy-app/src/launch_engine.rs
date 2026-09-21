@@ -52,6 +52,13 @@ pub struct LaunchEngine {
     after_guard_stop: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl LaunchEngine {
+    pub(crate) fn drained(&self) -> Result<bool> {
+        Ok(self
+            .active
+            .lock()
+            .map_err(|_| Error::Invalid("LAUNCH_WORKER_FAILED"))?
+            .is_empty())
+    }
     pub fn new(
         configuration: Arc<Configuration>,
         manager: Arc<CoreManager>,

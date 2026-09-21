@@ -7,6 +7,7 @@ use std::{
 fn ticket() -> Ticket {
     Ticket {
         version: 1,
+        upgrade_from: None,
         store: Uuid::new_v4(),
         issuer: identity::current().unwrap(),
         source: serde_json::from_value(serde_json::json!({
@@ -62,6 +63,19 @@ fn ordinary_install_entry_rejects_before_decoding_or_machine_writes() {
         Err(Error::Invalid("ELEVATED_USER_REQUIRED"))
     ));
     assert!(authorize_listener(Uuid::nil()).is_err());
+}
+
+#[test]
+fn upgrade_ticket_binds_exact_previous_generation() {
+    let mut value = ticket();
+    let generation = Uuid::new_v4();
+    value.upgrade_from = Some(generation);
+    assert_eq!(
+        decode(&encode(&value).unwrap()).unwrap().upgrade_from,
+        Some(generation)
+    );
+    value.upgrade_from = Some(Uuid::nil());
+    assert!(decode(&encode(&value).unwrap()).is_err());
 }
 
 #[test]

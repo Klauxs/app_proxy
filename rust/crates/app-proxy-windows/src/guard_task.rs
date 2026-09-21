@@ -194,6 +194,40 @@ pub fn remove_idle(deployment: &Deployment) -> Result<()> {
     Ok(())
 }
 
+/// Setup has drained the ordinary coordinator. Stop only the exact verified
+/// elevated task, then remove it. Foreign task definitions are never touched.
+pub(crate) fn retire_for_upgrade(deployment: &Deployment) -> Result<()> {
+    identity::assert_elevated_user()?;
+    let spec = Spec::deployment(deployment)?;
+    let session = Session::connect()?;
+    let Some(task) = session.find(&spec)? else {
+        return Ok(());
+    };
+    verify(&task, &spec)?;
+    // SAFETY: the task definition and ACL bind this exact protected generation.
+    // Stop applies only to its scheduler instances; no process-name matching.
+    unsafe {
+        if task
+            .GetInstances(0)
+            .map_err(com_error)?
+            .Count()
+            .map_err(com_error)?
+            != 0
+        {
+            task.Stop(0).map_err(com_error)?;
+        }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match remove_idle(deployment) {
+            Err(Error::Invalid("GUARD_TASK_RUNNING")) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            result => return result,
+        }
+    }
+}
+
 struct Apartment;
 impl Drop for Apartment {
     fn drop(&mut self) {
