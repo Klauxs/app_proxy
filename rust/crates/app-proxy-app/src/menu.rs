@@ -494,6 +494,31 @@ async fn finish_instance(
         .find(|i| i.id == id)
         .ok_or_else(|| fail(4, "实例已变化。"))?;
     println!("已保存：{}。", display(&instance.name));
+    // Publish the entry before Guard authorization or the launch prompt, so
+    // returning from either still leaves an entry for the saved instance.
+    if crate::shortcut_cli::change(
+        root,
+        id,
+        snapshot.revision,
+        app_proxy_windows::shortcuts::journal::Action::Create,
+        None,
+        foreground,
+    )
+    .await
+    .is_err()
+    {
+        foreground.check()?;
+        println!("实例已保留，桌面入口尚未就绪；可在“管理实例 → 桌面快捷方式”中重试。");
+    }
+    foreground.check()?;
+    // Creating the link commits a new manifest revision. Guard must use that
+    // revision, rather than the receipt from saving the instance itself.
+    let snapshot = catalog(root).await?;
+    let instance = snapshot
+        .instances
+        .iter()
+        .find(|i| i.id == id)
+        .ok_or_else(|| fail(4, "实例已变化。"))?;
     let protection = if instance.guard == Desired::Enabled {
         guard_cli::run_with_foreground(
             root.into(),
