@@ -1,6 +1,7 @@
 //! Durable admission and result lookup for serialized core operations.
 use crate::{configuration::Configuration, core_manager::CoreManager};
 use app_proxy_core::core_control::{CoreAction, CoreOutcome, CoreRequestStatus};
+use app_proxy_core::error_code::{self, Certainty};
 use app_proxy_windows::{Error, Result, core_requests::CoreRequestPhase, core_state::CoreState};
 use std::{
     collections::HashMap,
@@ -224,10 +225,9 @@ impl CoreControl {
             Ok(outcome) => outcome,
             Err(Error::Invalid(code)) => {
                 // Unknown process/journal results must never look safe to retry.
-                if code.contains("UNKNOWN") || code.contains("UNCONFIRMED") {
-                    CoreOutcome::Indeterminate { code: code.into() }
-                } else {
-                    CoreOutcome::Failed { code: code.into() }
+                match error_code::certainty(code) {
+                    Certainty::Indeterminate => CoreOutcome::Indeterminate { code: code.into() },
+                    Certainty::Definite => CoreOutcome::Failed { code: code.into() },
                 }
             }
             Err(_) => CoreOutcome::Indeterminate {

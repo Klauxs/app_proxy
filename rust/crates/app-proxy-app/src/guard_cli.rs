@@ -1,7 +1,8 @@
 use crate::{
     coordinator,
+    exit::{self, Failure, fail},
     guard_control::{ComponentState, GuardPhase, GuardStatus},
-    instance_cli::{Failure, fail, submit},
+    instance_cli::submit,
 };
 use app_proxy_core::{model::Desired, registry::ConfigAction};
 use clap::Subcommand;
@@ -72,13 +73,13 @@ where
     while settling(&status) {
         tokio::select! {
             biased;
-            _ = foreground.cancelled() => return Err(fail(5, "已停止等待；实例和已登记的登录自启动均保留。")),
+            _ = foreground.cancelled() => return Err(fail(exit::ACTION_REQUIRED, "已停止等待；实例和已登记的登录自启动均保留。")),
             _ = tokio::time::sleep_until(deadline) => break,
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
         }
         let next = tokio::select! {
             biased;
-            _ = foreground.cancelled() => return Err(fail(5, "已停止等待；实例和已登记的登录自启动均保留。")),
+            _ = foreground.cancelled() => return Err(fail(exit::ACTION_REQUIRED, "已停止等待；实例和已登记的登录自启动均保留。")),
             result = tokio::time::timeout_at(deadline, poll()) => result,
         };
         match next {
@@ -183,14 +184,14 @@ pub(crate) async fn run_with_foreground(
     if desired == Some(Desired::Enabled) {
         coordinator::login_request(root.clone(), Uuid::new_v4())
             .await
-            .map_err(|e| fail(3, e.to_string()))?;
+            .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     }
     // Check protocol support before changing configuration with an older host.
     let mut status = coordinator::guard_status(root.clone(), id)
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if expected_revision.is_some_and(|revision| revision != status.revision) {
-        return Err(fail(4, "配置已变化，请重新确认保护设置。"));
+        return Err(fail(exit::CONFLICT, "配置已变化，请重新确认保护设置。"));
     }
     let mut confirmed_revision = status.revision;
     let mut request_id = None;
@@ -202,16 +203,16 @@ pub(crate) async fn run_with_foreground(
         foreground.check()?;
         let catalog = coordinator::catalog(root.clone())
             .await
-            .map_err(|e| fail(3, e.to_string()))?;
+            .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
         if confirmed_revision != catalog.revision {
-            return Err(fail(4, "配置已变化，请重新确认保护设置。"));
+            return Err(fail(exit::CONFLICT, "配置已变化，请重新确认保护设置。"));
         }
         foreground.check()?;
         let instance = catalog
             .instances
             .iter()
             .find(|i| i.id == id)
-            .ok_or_else(|| fail(2, "INSTANCE_NOT_FOUND"))?;
+            .ok_or_else(|| fail(exit::INVALID, "INSTANCE_NOT_FOUND"))?;
         let (request, applied) = submit(
             &root,
             catalog.revision,
@@ -240,18 +241,21 @@ pub(crate) async fn run_with_foreground(
                             login_operation: None,
                             requires_action: Some("query_guard_status"),
                         })
-                        .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
                     );
                 }
                 return Err(fail(
-                    6,
+                    exit::UNCONFIRMED,
                     "配置回执已保存；保护状态暂未确认，请查询 guard status，不要重复配置请求。",
                 ));
             }
         }
     }
     if confirmed_revision != status.revision {
-        return Err(fail(4, "保护设置已保存，但配置随后发生变化；请重新确认。"));
+        return Err(fail(
+            exit::CONFLICT,
+            "保护设置已保存，但配置随后发生变化；请重新确认。",
+        ));
     }
     if desired == Some(Desired::Enabled)
         && status.listener == ComponentState::NeedsAuthorization
@@ -268,18 +272,21 @@ pub(crate) async fn run_with_foreground(
             foreground.check()?;
             let catalog = coordinator::catalog(root.clone())
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if catalog.revision != status.revision
                 || !catalog
                     .instances
                     .iter()
                     .any(|i| i.id == id && i.guard == Desired::Enabled)
             {
-                return Err(fail(5, "配置已变化，未发起授权；请重新查看 guard status。"));
+                return Err(fail(
+                    exit::ACTION_REQUIRED,
+                    "配置已变化，未发起授权；请重新查看 guard status。",
+                ));
             }
             let store = coordinator::status(root.clone())
                 .await
-                .map_err(|e| fail(3, e.to_string()))?
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?
                 .store_id;
             foreground.check()?;
             println!("等待 Windows 授权及组件核验；取消 UAC 会保留当前实例配置。");
@@ -293,11 +300,11 @@ pub(crate) async fn run_with_foreground(
                     let _ =
                         sender.send(app_proxy_windows::guard_install::authorize_listener(store));
                 })
-                .map_err(|_| fail(6, "未能启动授权流程。"))?;
+                .map_err(|_| fail(exit::UNCONFIRMED, "未能启动授权流程。"))?;
             let installed = tokio::select! {
                 biased;
-                _ = foreground.cancelled() => return Err(fail(6, "已停止等待授权。若 Windows 授权窗口仍在，请选择取消；已提交的安装结果未确认，请先查询 guard status，不要重复安装。")),
-                result = result => result.map_err(|_| fail(6, "组件安装结果不明，请先查询 guard status，不要重复安装。"))?,
+                _ = foreground.cancelled() => return Err(fail(exit::UNCONFIRMED, "已停止等待授权。若 Windows 授权窗口仍在，请选择取消；已提交的安装结果未确认，请先查询 guard status，不要重复安装。")),
+                result = result => result.map_err(|_| fail(exit::UNCONFIRMED, "组件安装结果不明，请先查询 guard status，不要重复安装。"))?,
             };
             match installed {
                 Ok(_) => {
@@ -305,11 +312,14 @@ pub(crate) async fn run_with_foreground(
                     println!("监听组件已安装，正在连接…")
                 }
                 Err(app_proxy_windows::Error::Invalid("GUARD_INSTALL_CANCELLED")) => {
-                    return Err(fail(5, "已取消 Windows 授权，实例配置保留。"));
+                    return Err(fail(
+                        exit::ACTION_REQUIRED,
+                        "已取消 Windows 授权，实例配置保留。",
+                    ));
                 }
                 Err(error) => {
                     return Err(fail(
-                        6,
+                        exit::UNCONFIRMED,
                         format!(
                             "监听组件安装未确认：{error}。请先查询 guard status；不会自动重试。"
                         ),
@@ -319,12 +329,12 @@ pub(crate) async fn run_with_foreground(
             foreground.check()?;
             status = coordinator::guard_status(root.clone(), id)
                 .await
-                .map_err(|e| fail(6, e.to_string()))?;
+                .map_err(|e| fail(exit::UNCONFIRMED, e.to_string()))?;
         }
     }
     if confirmed_revision != status.revision {
         return Err(fail(
-            4,
+            exit::CONFLICT,
             "配置已变化；未继续登记登录入口，请重新确认保护设置。",
         ));
     }
@@ -342,7 +352,7 @@ pub(crate) async fn run_with_foreground(
         })
         .await?;
         if status.revision != confirmed_revision {
-            return Err(fail(4, "配置已变化，请重新确认保护设置。"));
+            return Err(fail(exit::CONFLICT, "配置已变化，请重新确认保护设置。"));
         }
     }
     let mut login = login_view(root.clone()).await;
@@ -350,7 +360,7 @@ pub(crate) async fn run_with_foreground(
     if desired == Some(Desired::Enabled) {
         foreground.check()?;
         if login.revision != 0 && login.revision != confirmed_revision {
-            return Err(fail(4, "配置已变化，请重新确认保护设置。"));
+            return Err(fail(exit::CONFLICT, "配置已变化，请重新确认保护设置。"));
         }
         // Installation authority is independent of the first event heartbeat.
         // Native login admission re-verifies the deployment before registering.
@@ -423,7 +433,7 @@ pub(crate) async fn run_with_foreground(
                 login_operation,
                 requires_action
             })
-            .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
         );
     } else {
         if let Some(outcome) = &login_operation {
@@ -531,7 +541,10 @@ pub(crate) async fn run_with_foreground(
         }
     }
     if desired.is_some() && requires_action.is_some() {
-        return Err(fail(5, "保护尚未完全就绪，请按状态提示处理。"));
+        return Err(fail(
+            exit::ACTION_REQUIRED,
+            "保护尚未完全就绪，请按状态提示处理。",
+        ));
     }
     Ok(Some(status))
 }

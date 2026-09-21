@@ -2,6 +2,7 @@
 //! hashes run outside the configuration gate. No application is ever launched.
 use crate::configuration::Configuration;
 use app_proxy_core::core_control::{CoreOutcome, InstallPhase, InstallProgress};
+use app_proxy_core::error_code::{self, Certainty};
 use app_proxy_windows::{Error, Result, singbox_install};
 use std::{
     sync::{
@@ -83,10 +84,9 @@ impl InstallFailure {
             self.downloaded,
             self.elapsed_ms
         );
-        if self.code.contains("UNKNOWN") || self.code.contains("UNCONFIRMED") {
-            CoreOutcome::Indeterminate { code }
-        } else {
-            CoreOutcome::Failed { code }
+        match error_code::certainty(self.code) {
+            Certainty::Indeterminate => CoreOutcome::Indeterminate { code },
+            Certainty::Definite => CoreOutcome::Failed { code },
         }
     }
 }

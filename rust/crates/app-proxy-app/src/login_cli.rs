@@ -1,7 +1,7 @@
 use crate::{
     coordinator,
+    exit::{self, Failure, fail},
     foreground::Foreground,
-    instance_cli::{Failure, fail},
     login_tasks::View,
 };
 use app_proxy_windows::guard_task::login::journal::{Action, Request, Status};
@@ -55,7 +55,7 @@ fn print_outcome(outcome: &Outcome, json: bool) -> Result<(), Failure> {
         println!(
             "{}",
             serde_json::to_string_pretty(outcome)
-                .map_err(|_| fail(10, "OUTPUT_SERIALIZE_FAILED"))?
+                .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
         );
     } else {
         println!("登录入口请求：{}。", outcome.request_id);
@@ -125,12 +125,12 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Status => {
             let view = coordinator::login_status(root)
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&view)
-                        .map_err(|_| fail(10, "OUTPUT_SERIALIZE_FAILED"))?
+                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
                 );
             } else {
                 print_view(&view);
@@ -140,7 +140,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Request { id } => {
             let status = coordinator::login_request(root, id)
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             return print_outcome(
                 &Outcome {
                     request_id: id,
@@ -154,13 +154,13 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Remove => {
             let view = coordinator::login_status(root.clone())
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             let entry = view
                 .integration
-                .ok_or_else(|| fail(2, "未登记登录启动入口。"))?;
+                .ok_or_else(|| fail(exit::INVALID, "未登记登录启动入口。"))?;
             if entry.request.action == Action::Remove {
                 return Err(fail(
-                    4,
+                    exit::CONFLICT,
                     format!(
                         "已有未完成删除请求，请用 guard login resume {} 继续。",
                         entry.request.id
@@ -184,7 +184,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Ok(())
     } else {
         Err(fail(
-            6,
+            exit::UNCONFIRMED,
             format!(
                 "登录入口操作尚未确认，保留原请求 {}，请先查询结果。",
                 outcome.request_id

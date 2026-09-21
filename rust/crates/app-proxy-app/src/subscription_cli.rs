@@ -1,8 +1,8 @@
 //! Subscription commands share the existing durable configuration/core protocols.
 use crate::{
     coordinator, core_cli,
+    exit::{self, Failure, fail},
     foreground::Foreground,
-    instance_cli::{Failure, fail},
     proxy_cli::Command,
     subscription_preview::{NodeSummary, PreviewRequest, PreviewStatus, SavedPage, StageRequest},
 };
@@ -41,7 +41,8 @@ fn show_groups(nodes: &[&NodeSummary], selected: &[usize]) -> Vec<(&'static str,
 fn print(value: &impl serde::Serialize) -> Result<(), Failure> {
     println!(
         "{}",
-        serde_json::to_string_pretty(value).map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+        serde_json::to_string_pretty(value)
+            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
     );
     Ok(())
 }
@@ -110,12 +111,12 @@ pub(crate) async fn run_with_foreground(
                     .iter()
                     .any(|id| !page.nodes.iter().any(|n| n.id == *id))
                 {
-                    return Err(fail(2, "SELECTED_NODE_NOT_FOUND"));
+                    return Err(fail(exit::INVALID, "SELECTED_NODE_NOT_FOUND"));
                 }
                 node
             } else {
                 if json || !core_cli::interactive() {
-                    return Err(fail(2, "请提供节点 ID，或在终端交互选择。"));
+                    return Err(fail(exit::INVALID, "请提供节点 ID，或在终端交互选择。"));
                 }
                 let groups = show_groups(
                     &page.nodes.iter().map(|n| &n.node).collect::<Vec<_>>(),
@@ -167,7 +168,10 @@ pub(crate) async fn run_with_foreground(
             apply_to_running,
         } => {
             if node.is_empty() && (json || !core_cli::interactive()) {
-                return Err(fail(2, "非交互导入请用 --node 指定准确节点名。"));
+                return Err(fail(
+                    exit::INVALID,
+                    "非交互导入请用 --node 指定准确节点名。",
+                ));
             }
             let url = read_url(url_stdin, foreground).await?;
             let fallback_title = selection::source_label(&url);
@@ -190,7 +194,7 @@ pub(crate) async fn run_with_foreground(
                         .iter()
                         .any(|name| !nodes.iter().any(|n| n.name == *name))
                     {
-                        return Err(fail(2, "SELECTED_NODE_NOT_FOUND"));
+                        return Err(fail(exit::INVALID, "SELECTED_NODE_NOT_FOUND"));
                     }
                     node
                 } else {
@@ -203,7 +207,7 @@ pub(crate) async fn run_with_foreground(
                 };
                 let catalog = coordinator::catalog(root.clone())
                     .await
-                    .map_err(|e| fail(3, e.to_string()))?;
+                    .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
                 let name = name.unwrap_or_else(|| {
                     selection::automatic_name(
                         title.as_deref().unwrap_or(&fallback_title),
@@ -216,10 +220,10 @@ pub(crate) async fn run_with_foreground(
                 let mut endpoint = None;
                 for _ in 0..64 {
                     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                        .map_err(|_| fail(3, "LOCAL_PROXY_PORT_UNAVAILABLE"))?;
+                        .map_err(|_| fail(exit::UNAVAILABLE, "LOCAL_PROXY_PORT_UNAVAILABLE"))?;
                     let port = listener
                         .local_addr()
-                        .map_err(|_| fail(3, "LOCAL_PROXY_PORT_UNAVAILABLE"))?
+                        .map_err(|_| fail(exit::UNAVAILABLE, "LOCAL_PROXY_PORT_UNAVAILABLE"))?
                         .port();
                     reservations.push(listener);
                     if !catalog.profiles.iter().any(|p| p.endpoint.port == port) {
@@ -236,8 +240,9 @@ pub(crate) async fn run_with_foreground(
                     StageRequest::Import {
                         profile_id,
                         name,
-                        endpoint: endpoint
-                            .ok_or_else(|| fail(3, "LOCAL_PROXY_PORT_UNAVAILABLE"))?,
+                        endpoint: endpoint.ok_or_else(|| {
+                            fail(exit::UNAVAILABLE, "LOCAL_PROXY_PORT_UNAVAILABLE")
+                        })?,
                         selected_names,
                     },
                     foreground,
@@ -284,21 +289,21 @@ pub(crate) async fn run_with_foreground(
 
 async fn read_url(from_stdin: bool, foreground: &mut Foreground) -> Result<String, Failure> {
     if !from_stdin && !core_cli::interactive() {
-        return Err(fail(2, "请通过 --url-stdin 提供订阅地址。"));
+        return Err(fail(exit::INVALID, "请通过 --url-stdin 提供订阅地址。"));
     }
     foreground.check()?;
     if io::stdin().is_terminal() {
         eprint!("请输入订阅地址（不回显）：");
         io::stderr()
             .flush()
-            .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
+            .map_err(|_| fail(exit::INTERNAL, "PROMPT_WRITE_FAILED"))?;
     }
     let url = foreground
         .read_secret_line(8192)
         .await?
-        .ok_or_else(|| fail(5, "已返回；未导入订阅。"))?;
+        .ok_or_else(|| fail(exit::ACTION_REQUIRED, "已返回；未导入订阅。"))?;
     app_proxy_core::subscription::source_url(&url)
-        .map_err(|_| fail(2, "SUBSCRIPTION_URL_INVALID"))?;
+        .map_err(|_| fail(exit::INVALID, "SUBSCRIPTION_URL_INVALID"))?;
     Ok(url)
 }
 fn network(via: Option<Uuid>) -> NetworkBinding {
@@ -320,11 +325,11 @@ async fn prepare_route(
 async fn saved_nodes(root: &Path, id: Uuid) -> Result<SavedPage, Failure> {
     let mut page = coordinator::subscription_nodes(root.into(), id, 0, None)
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     while let Some(offset) = page.next_offset {
         let next = coordinator::subscription_nodes(root.into(), id, offset, Some(page.revision))
             .await
-            .map_err(|e| fail(3, e.to_string()))?;
+            .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
         page.nodes.extend(next.nodes);
         page.next_offset = next.next_offset;
     }
@@ -339,12 +344,12 @@ async fn choose_nodes(
         eprint!("选择节点 [1-{count}]：如 1,3-5；G1 选整组；all 全选；0/回车返回：");
         io::stderr()
             .flush()
-            .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
+            .map_err(|_| fail(exit::INTERNAL, "PROMPT_WRITE_FAILED"))?;
         let Some(input) = foreground.read_optional_line().await? else {
-            return Err(fail(5, "已返回；原配置保留。"));
+            return Err(fail(exit::ACTION_REQUIRED, "已返回；原配置保留。"));
         };
         if input.trim().is_empty() || input.trim() == "0" {
-            return Err(fail(5, "已返回；原配置保留。"));
+            return Err(fail(exit::ACTION_REQUIRED, "已返回；原配置保留。"));
         }
         if let Some(selected) = selection::parse(&input, count, groups) {
             return Ok(selected);
@@ -366,7 +371,7 @@ async fn preview(
         foreground.check()?;
         match response {
             Ok(page) => match page.status {
-                PreviewStatus::Failed { code } => return Err(fail(3, code)),
+                PreviewStatus::Failed { code } => return Err(fail(exit::UNAVAILABLE, code)),
                 PreviewStatus::Ready {
                     nodes: _,
                     unsupported,
@@ -380,7 +385,7 @@ async fn preview(
                         foreground.check()?;
                         let page = coordinator::subscription_preview_page(root.into(), id, next)
                             .await
-                            .map_err(|e| fail(3, e.to_string()))?;
+                            .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
                         nodes.extend(page.nodes);
                         offset = page.next_offset;
                     }
@@ -389,16 +394,16 @@ async fn preview(
                 PreviewStatus::Pending {} => {}
             },
             Err(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED")) => {
-                return Err(fail(3, "订阅预览已失效，请重新读取。"));
+                return Err(fail(exit::UNAVAILABLE, "订阅预览已失效，请重新读取。"));
             }
             Err(error) if retryable(&error) => {}
             Err(error) => return Err(rpc_failure(error)),
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(fail(3, "SUBSCRIPTION_PREVIEW_TIMEOUT"));
+            return Err(fail(exit::UNAVAILABLE, "SUBSCRIPTION_PREVIEW_TIMEOUT"));
         }
         tokio::select! { biased;
-            _ = foreground.cancelled() => return Err(fail(5, "已取消订阅下载；原配置保留。")),
+            _ = foreground.cancelled() => return Err(fail(exit::ACTION_REQUIRED, "已取消订阅下载；原配置保留。")),
             _ = tokio::time::sleep(Duration::from_millis(250)) => {}
         }
         response = coordinator::subscription_preview_page(root.into(), id, 0).await;
@@ -421,10 +426,13 @@ async fn stage(
             Err(error) => return Err(rpc_failure(error)),
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(fail(3, "订阅准备结果未确认；未提交配置，可重新读取订阅。"));
+            return Err(fail(
+                exit::UNAVAILABLE,
+                "订阅准备结果未确认；未提交配置，可重新读取订阅。",
+            ));
         }
         tokio::select! { biased;
-            _ = foreground.cancelled() => return Err(fail(5, "已返回；未提交订阅配置。")),
+            _ = foreground.cancelled() => return Err(fail(exit::ACTION_REQUIRED, "已返回；未提交订阅配置。")),
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
     }
@@ -439,7 +447,7 @@ fn retryable(error: &Error) -> bool {
 }
 fn rpc_failure(error: Error) -> Failure {
     fail(
-        3,
+        exit::UNAVAILABLE,
         match error {
             Error::Invalid(code) => code,
             _ => "SUBSCRIPTION_RPC_FAILED",
@@ -492,7 +500,7 @@ async fn commit(
             foreground.check()?;
             core_cli::prepare_and_apply_with_foreground(
                 root.into(),
-                prepare.ok_or_else(|| fail(5, code))?,
+                prepare.ok_or_else(|| fail(exit::ACTION_REQUIRED, code))?,
                 apply,
                 json,
                 foreground,
@@ -506,10 +514,10 @@ async fn commit(
             let ConfigOutcome::Rejected { code, .. } = outcome else {
                 unreachable!()
             };
-            Err(fail(2, code))
+            Err(fail(exit::INVALID, code))
         }
         None => Err(fail(
-            6,
+            exit::UNCONFIRMED,
             format!("结果未确认，请用 proxy request {id} 查询；不要自动重新提交。"),
         )),
     }

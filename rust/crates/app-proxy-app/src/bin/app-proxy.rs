@@ -111,7 +111,7 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(
             error
-                .downcast_ref::<app_proxy_app::instance_cli::Failure>()
+                .downcast_ref::<app_proxy_app::exit::Failure>()
                 .map_or(1, |e| e.exit_code),
         );
     }

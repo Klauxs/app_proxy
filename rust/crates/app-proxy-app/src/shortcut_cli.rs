@@ -1,8 +1,8 @@
 //! Shared foreground entry for desktop links; retries always retain request IDs.
 use crate::{
     coordinator,
+    exit::{self, Failure, fail},
     foreground::Foreground,
-    instance_cli::{Failure, fail},
     shortcuts::InstanceStatus,
 };
 use app_proxy_windows::{
@@ -58,7 +58,7 @@ fn print(
                 status,
                 error
             })
-            .map_err(|_| fail(10, "OUTPUT_SERIALIZE_FAILED"))?
+            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
         );
     } else {
         match status {
@@ -151,7 +151,10 @@ fn friendly_error(code: &str) -> String {
     }
 }
 fn unresolved() -> Failure {
-    fail(4, "请进入“管理实例 → 桌面快捷方式”，选择“继续处理”重试。")
+    fail(
+        exit::CONFLICT,
+        "请进入“管理实例 → 桌面快捷方式”，选择“继续处理”重试。",
+    )
 }
 async fn perform(
     root: &Path,
@@ -239,25 +242,26 @@ pub(crate) async fn resume(
     perform(root, request_id, None, false, foreground).await
 }
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
-    app_proxy_windows::store::describe(&root).map_err(|e| fail(3, e.to_string()))?;
+    app_proxy_windows::store::describe(&root)
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     let mut foreground = Foreground::new();
     match command {
         Command::Request { id } => {
             let status = coordinator::shortcut_request(root.clone(), id)
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             print(id, status.as_ref(), None, json)
         }
         Command::Resume { id } => perform(&root, id, None, json, &mut foreground).await,
         Command::Check { id } => {
             let view = coordinator::shortcut_check(root, id)
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&view)
-                        .map_err(|_| fail(10, "OUTPUT_SERIALIZE_FAILED"))?
+                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
                 );
             } else {
                 print_check(&view);
@@ -267,12 +271,12 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Status { id } => {
             let view = coordinator::shortcut_status(root, id)
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&view)
-                        .map_err(|_| fail(10, "OUTPUT_SERIALIZE_FAILED"))?
+                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
                 );
             } else {
                 print_registration(&view);
@@ -287,15 +291,15 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             };
             let view = coordinator::shortcut_status(root.clone(), id)
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             let expected_creation = if action != Action::Create {
                 let entry = view
                     .integration
                     .as_ref()
-                    .ok_or_else(|| fail(2, "未登记快捷方式。"))?;
+                    .ok_or_else(|| fail(exit::INVALID, "未登记快捷方式。"))?;
                 if entry.request.action != Action::Create {
                     return Err(fail(
-                        4,
+                        exit::CONFLICT,
                         format!(
                             "已有未完成请求；请使用 shortcut resume {} 继续。",
                             entry.request.id

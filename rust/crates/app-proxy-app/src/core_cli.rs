@@ -2,8 +2,8 @@
 use crate::{
     coordinator,
     core_manager::CoreObserved,
+    exit::{self, Failure, fail},
     foreground::Foreground,
-    instance_cli::{Failure, fail},
 };
 use app_proxy_core::core_control::{CoreAction, CoreOutcome, CoreRequestStatus, InstallPhase};
 use clap::Subcommand;
@@ -54,7 +54,7 @@ pub(crate) fn output(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({"request_id": id, "result": status}))
-                .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+                .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
         );
     } else {
         println!(
@@ -141,7 +141,7 @@ pub(crate) fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> 
             outcome: CoreOutcome::Restored { core_down },
             ..
         }) => Err(fail(
-            3,
+            exit::UNAVAILABLE,
             if core_down {
                 "变更失败，旧配置已保留但代理未恢复；请检查 core status。"
             } else {
@@ -151,12 +151,15 @@ pub(crate) fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> 
         Some(CoreRequestStatus::Complete {
             outcome: CoreOutcome::Cancelled {},
             ..
-        }) => Err(fail(5, "安装已取消；保留代理配置。")),
+        }) => Err(fail(exit::ACTION_REQUIRED, "安装已取消；保留代理配置。")),
         Some(CoreRequestStatus::Complete {
             outcome: CoreOutcome::Failed { code },
             ..
-        }) => Err(fail(3, code)),
-        _ => Err(fail(6, "请求结果未确认；请查询原编号，不要自动重新提交。")),
+        }) => Err(fail(exit::UNAVAILABLE, code)),
+        _ => Err(fail(
+            exit::UNCONFIRMED,
+            "请求结果未确认；请查询原编号，不要自动重新提交。",
+        )),
     }
 }
 
@@ -167,12 +170,12 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Status => {
             let snapshot = coordinator::core_status(root)
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&snapshot)
-                        .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
                 );
             } else {
                 println!(
@@ -215,7 +218,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         Command::Request { id } => {
             let status = coordinator::core_request_status(root, id)
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             output(id, &status, json)?;
             return outcome(status);
         }
@@ -224,12 +227,14 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             use app_proxy_windows::core_state::CoreState;
             let snapshot = coordinator::core_status(root.clone())
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             let generation = match snapshot.recorded {
                 CoreState::Starting { generation }
                 | CoreState::Running { generation, .. }
                 | CoreState::Down { generation } => generation,
-                CoreState::Stopped {} => return Err(fail(3, "没有待核对的内核创建。")),
+                CoreState::Stopped {} => {
+                    return Err(fail(exit::UNAVAILABLE, "没有待核对的内核创建。"));
+                }
             };
             CoreAction::RecoverStart { generation }
         }
@@ -245,17 +250,20 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             apply = apply_to_running;
             let required = required
                 .or_else(|| profiles.first().copied())
-                .ok_or_else(|| fail(2, "PROFILE_REQUIRED"))?;
+                .ok_or_else(|| fail(exit::INVALID, "PROFILE_REQUIRED"))?;
             CoreAction::Start { profiles, required }
         }
     };
     let mut action = action;
-    action.normalize().map_err(|e| fail(2, e.0))?;
+    action.normalize().map_err(|e| fail(exit::INVALID, e.0))?;
     let (mut id, mut status, interrupted) =
         submit(root.clone(), action.clone(), json, &mut foreground).await;
     if interrupted {
         output(id, &status, json)?;
-        return Err(fail(5, "已返回原流程；如操作结果未确认，请查询原编号。"));
+        return Err(fail(
+            exit::ACTION_REQUIRED,
+            "已返回原流程；如操作结果未确认，请查询原编号。",
+        ));
     }
     if missing_binary(&status)
         && !json
@@ -271,7 +279,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         status = resumed.1;
         if resumed.2 {
             output(id, &status, json)?;
-            return Err(fail(5, "已返回；请查询原操作编号。"));
+            return Err(fail(exit::ACTION_REQUIRED, "已返回；请查询原操作编号。"));
         }
     }
     if matches!(&status, Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == "CORE_RECONFIGURE_REQUIRES_CONFIRMATION")
@@ -279,7 +287,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
     {
         let catalog = coordinator::catalog(root.clone())
             .await
-            .map_err(|e| fail(3, e.to_string()))?;
+            .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
         return prepare_and_apply_with_foreground(
             root,
             CoreAction::PrepareExpand {
@@ -310,14 +318,14 @@ pub(crate) async fn install_interactively(
     foreground: &mut Foreground,
 ) -> Result<(), Failure> {
     if !choose("未找到可用的 sing-box。", "安装并继续", foreground).await? {
-        return Err(fail(5, "已返回；保留代理配置。"));
+        return Err(fail(exit::ACTION_REQUIRED, "已返回；保留代理配置。"));
     }
     loop {
         let (id, installed, interrupted) =
             submit(root.clone(), CoreAction::Install {}, false, foreground).await;
         output(id, &installed, false)?;
         if interrupted {
-            return Err(fail(5, "已返回原流程；不会继续启动。"));
+            return Err(fail(exit::ACTION_REQUIRED, "已返回原流程；不会继续启动。"));
         }
         match &installed {
             Some(CoreRequestStatus::Complete {
@@ -330,7 +338,7 @@ pub(crate) async fn install_interactively(
             }) => {
                 eprintln!("安装失败：{code}");
                 if !choose("可以重新下载安装。", "重试", foreground).await? {
-                    return Err(fail(5, "已返回；保留代理配置。"));
+                    return Err(fail(exit::ACTION_REQUIRED, "已返回；保留代理配置。"));
                 }
             }
             _ => return outcome(installed),
@@ -347,7 +355,7 @@ async fn choose(
         eprint!("{message}\n1. {primary}（默认）  2. 返回\n请选择 [1/2]：");
         std::io::stderr()
             .flush()
-            .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
+            .map_err(|_| fail(exit::INTERNAL, "PROMPT_WRITE_FAILED"))?;
         let input = foreground.read_line().await?;
         match input.trim() {
             "" | "1" => return Ok(true),
@@ -449,7 +457,10 @@ async fn prepare_and_apply_result(
     let (request_id, status, interrupted) = submit(root.clone(), action, json, foreground).await;
     if interrupted {
         output(request_id, &status, json)?;
-        return Err(fail(5, "已停止后续操作；请查询原请求编号。"));
+        return Err(fail(
+            exit::ACTION_REQUIRED,
+            "已停止后续操作；请查询原请求编号。",
+        ));
     }
     let Some(CoreRequestStatus::Complete {
         outcome: CoreOutcome::Prepared { ref impact },
@@ -458,7 +469,7 @@ async fn prepare_and_apply_result(
     else {
         output(request_id, &status, json)?;
         outcome(status)?;
-        return Err(fail(6, "CORE_UPDATE_PLAN_MISSING"));
+        return Err(fail(exit::UNCONFIRMED, "CORE_UPDATE_PLAN_MISSING"));
     };
     let plan_id = impact.plan_id;
     if json {
@@ -477,7 +488,7 @@ async fn prepare_and_apply_result(
     };
     if !confirmed {
         return Err(fail(
-            5,
+            exit::ACTION_REQUIRED,
             format!("配置未切换；确认此计划可运行 core apply-update {plan_id}。"),
         ));
     }
@@ -486,7 +497,10 @@ async fn prepare_and_apply_result(
         submit(root, CoreAction::ApplyUpdate { plan_id }, json, foreground).await;
     if interrupted {
         output(id, &status, json)?;
-        return Err(fail(5, "已停止后续操作；请查询原请求编号。"));
+        return Err(fail(
+            exit::ACTION_REQUIRED,
+            "已停止后续操作；请查询原请求编号。",
+        ));
     }
     Ok((id, status))
 }
@@ -522,7 +536,7 @@ async fn ensure_profile(
     foreground.check()?;
     let snapshot = coordinator::core_status(root.clone())
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if !probe_current
         && matches!(snapshot.observed, CoreObserved::Listening)
         && snapshot.profiles.iter().any(|p| p.id == profile_id)
@@ -542,13 +556,16 @@ async fn ensure_profile(
     }
     if interrupted {
         output(id, &status, json)?;
-        return Err(fail(5, "已停止下载；请查询原代理操作编号。"));
+        return Err(fail(
+            exit::ACTION_REQUIRED,
+            "已停止下载；请查询原代理操作编号。",
+        ));
     }
     if matches!(&status, Some(CoreRequestStatus::Complete { outcome: CoreOutcome::Failed { code }, .. }) if code == "CORE_RECONFIGURE_REQUIRES_CONFIRMATION")
     {
         let revision = coordinator::catalog(root.clone())
             .await
-            .map_err(|e| fail(3, e.to_string()))?
+            .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?
             .revision;
         (id, status) = prepare_and_apply_result(
             root,
@@ -601,7 +618,7 @@ pub(crate) async fn confirm_impact(foreground: &mut Foreground) -> Result<bool, 
     eprint!("1. 应用变更  2. 返回（默认）\n请选择 [1/2]：");
     std::io::stderr()
         .flush()
-        .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))?;
+        .map_err(|_| fail(exit::INTERNAL, "PROMPT_WRITE_FAILED"))?;
     let answer = foreground.read_line().await?;
     Ok(answer.trim() == "1")
 }

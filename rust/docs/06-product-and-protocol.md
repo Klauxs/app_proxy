@@ -103,6 +103,8 @@ UI/CLI JSON 结果分开表达：
 | 结果未知或仍在执行 | LAUNCH_INDETERMINATE、OPERATION_PENDING | 6 |
 | 内部异常/存储损坏 | STORAGE_CORRUPT、INTERNAL | 10 |
 
+2026-09-21 实现落点：稳定错误码的公共规则集中在 `app-proxy-core::error_code`。`certainty()` 依据显式登记表 `INDETERMINATE` 判断失败是否可能已经生效，不再按名称子串判断；该模块的源码扫描测试要求名称含 UNKNOWN、UNCONFIRMED 或 INDETERMINATE 的错误码必须登记，登记项也必须仍在源码中使用，改名或新增时测试会失败。协调进程客户端用 `intern()` 还原线上错误码，不再维护第二份白名单；格式不合法的文本仍折叠为 `COORDINATOR_OPERATION_FAILED`。退出码常量、`Failure` 类型和错误码到退出码的唯一映射表 `for_code()` 位于 `app-proxy-app::exit`，各命令只保留自己的默认类别：配置拒绝默认为 2，启动失败默认为 3。合并两张旧表后，`STALE_MANIFEST_REVISION` 等配置竞争在启动命令下返回 4，`INSTANCE_RUNNING_*` 等占用冲突在实例配置命令下返回 4，与上表一致。上述错误 DTO 的 stage、retryability 等字段仍未实现。
+
 更具体的 Guard 事件记录 `GUARD_STOPPED_PROXY_UNAVAILABLE`、`GUARD_RESTART_FAILED`、`GUARD_IDENTITY_UNKNOWN`、`GUARD_RATE_LIMITED`。它们分别说明动作结果，不用一个“保护成功”掩盖重启失败。
 
 **6. 日志和诊断包**

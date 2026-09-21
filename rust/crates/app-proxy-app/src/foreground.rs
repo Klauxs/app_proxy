@@ -1,5 +1,5 @@
 //! Sticky Ctrl+C intent across dependency repair, prompts and launch continuation.
-use crate::instance_cli::{Failure, fail};
+use crate::exit::{self, Failure, fail};
 use tokio::sync::watch;
 
 fn secret_bytes(reader: &mut impl std::io::BufRead, limit: usize) -> std::io::Result<Vec<u8>> {
@@ -44,7 +44,7 @@ impl Foreground {
         let hidden = if std::io::stdin().is_terminal() {
             Some(
                 app_proxy_windows::console::HiddenInput::begin()
-                    .map_err(|_| fail(3, "SECRET_INPUT_UNAVAILABLE"))?,
+                    .map_err(|_| fail(exit::UNAVAILABLE, "SECRET_INPUT_UNAVAILABLE"))?,
             )
         } else {
             None
@@ -55,8 +55,8 @@ impl Foreground {
             let _ = sender.send(result);
         });
         let result = tokio::select! { biased;
-            _ = self.cancelled() => Err(fail(5, "已返回；不会继续操作。")),
-            result = receiver => result.map_err(|_| fail(2, "SECRET_INPUT_FAILED"))?.map_err(|_| fail(2, "SECRET_INPUT_FAILED")),
+            _ = self.cancelled() => Err(fail(exit::ACTION_REQUIRED, "已返回；不会继续操作。")),
+            result = receiver => result.map_err(|_| fail(exit::INVALID, "SECRET_INPUT_FAILED"))?.map_err(|_| fail(exit::INVALID, "SECRET_INPUT_FAILED")),
         };
         if hidden.is_some() {
             eprintln!();
@@ -66,7 +66,8 @@ impl Foreground {
         if bytes.is_empty() {
             return Ok(None);
         }
-        let mut text = String::from_utf8(bytes).map_err(|_| fail(2, "SECRET_INPUT_INVALID"))?;
+        let mut text =
+            String::from_utf8(bytes).map_err(|_| fail(exit::INVALID, "SECRET_INPUT_INVALID"))?;
         if text.ends_with('\n') {
             text.pop();
             if text.ends_with('\r') {
@@ -74,7 +75,7 @@ impl Foreground {
             }
         }
         if text.len() > limit || text.contains('\0') {
-            return Err(fail(2, "SECRET_INPUT_INVALID"));
+            return Err(fail(exit::INVALID, "SECRET_INPUT_INVALID"));
         }
         Ok(Some(text))
     }
@@ -103,7 +104,7 @@ impl Foreground {
         // the task is first polled.
         let mut signal = tokio::signal::windows::ctrl_c().map_err(|_| {
             self.signal_error = true;
-            fail(3, "CANCEL_LISTENER_UNAVAILABLE")
+            fail(exit::UNAVAILABLE, "CANCEL_LISTENER_UNAVAILABLE")
         })?;
         let (sender, cancelled) = watch::channel(false);
         let listener = tokio::spawn(async move {
@@ -130,11 +131,11 @@ impl Foreground {
             return self.check();
         }
         if !self.allow_console {
-            return Err(fail(5, "FOREGROUND_REQUIRED"));
+            return Err(fail(exit::ACTION_REQUIRED, "FOREGROUND_REQUIRED"));
         }
         self.console = Some(
             app_proxy_windows::console::ForegroundConsole::open()
-                .map_err(|e| fail(3, e.to_string()))?,
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?,
         );
         // Detached launch has never registered Tokio signals, so allocation
         // cannot discard its handler. Register only after the console exists.
@@ -164,10 +165,13 @@ impl Foreground {
     }
     pub fn check(&self) -> Result<(), Failure> {
         if self.signal_error {
-            return Err(fail(3, "CANCEL_LISTENER_UNAVAILABLE"));
+            return Err(fail(exit::UNAVAILABLE, "CANCEL_LISTENER_UNAVAILABLE"));
         }
         if self.is_cancelled() {
-            Err(fail(5, "已取消后续操作；已接受的操作请按原编号查询。"))
+            Err(fail(
+                exit::ACTION_REQUIRED,
+                "已取消后续操作；已接受的操作请按原编号查询。",
+            ))
         } else {
             Ok(())
         }
@@ -198,10 +202,10 @@ impl Foreground {
         });
         tokio::select! {
             biased;
-            _ = self.cancelled() => Err(fail(5, "已返回；不会继续执行后续操作。")),
+            _ = self.cancelled() => Err(fail(exit::ACTION_REQUIRED, "已返回；不会继续执行后续操作。")),
             result = receiver => {
-                let (bytes, input) = result.map_err(|_| fail(10, "PROMPT_READ_FAILED"))?
-                    .map_err(|_| fail(10, "PROMPT_READ_FAILED"))?;
+                let (bytes, input) = result.map_err(|_| fail(exit::INTERNAL, "PROMPT_READ_FAILED"))?
+                    .map_err(|_| fail(exit::INTERNAL, "PROMPT_READ_FAILED"))?;
                 if bytes == 0 { Ok(None) } else { Ok(Some(input)) }
             }
         }

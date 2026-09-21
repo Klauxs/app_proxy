@@ -1,6 +1,10 @@
 //! Instance configuration commands. Application launch and protection are separate
 //! operations; saving a desired guard must never be reported as active protection.
-use crate::{configuration::CatalogPage, coordinator};
+use crate::{
+    configuration::CatalogPage,
+    coordinator,
+    exit::{self, Failure, fail},
+};
 use app_proxy_core::{model::*, registry::*};
 use app_proxy_windows::{
     config_transaction::{ConfigOutcome, ConfigRequestStatus},
@@ -110,30 +114,14 @@ pub enum Command {
     Request { id: Uuid },
 }
 
-#[derive(Debug)]
-pub struct Failure {
-    pub exit_code: i32,
-    message: String,
-}
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-impl std::error::Error for Failure {}
-pub(crate) fn fail(code: i32, message: impl Into<String>) -> Failure {
-    Failure {
-        exit_code: code,
-        message: message.into(),
-    }
-}
 fn dependency(e: app_proxy_windows::Error) -> Failure {
-    fail(3, e.to_string())
+    fail(exit::UNAVAILABLE, e.to_string())
 }
 fn print(value: &impl Serialize) -> Result<(), Failure> {
     println!(
         "{}",
-        serde_json::to_string_pretty(value).map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+        serde_json::to_string_pretty(value)
+            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
     );
     Ok(())
 }
@@ -191,7 +179,10 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
             Some(ConfigRequestStatus::Complete {
                 outcome: ConfigOutcome::Rejected { code, .. },
             }) => Err(fail(rejection_exit(&code), code)),
-            _ => Err(fail(6, "请求结果未确认；请查询原编号，不要自动重复创建。")),
+            _ => Err(fail(
+                exit::UNCONFIRMED,
+                "请求结果未确认；请查询原编号，不要自动重复创建。",
+            )),
         };
     }
     if matches!(command, Command::List) {
@@ -253,7 +244,7 @@ pub(crate) async fn save(
         .await
         .map_err(dependency)?;
     if expected_revision.is_some_and(|revision| revision != catalog.revision) {
-        return Err(fail(4, "配置已变化，请重新确认。"));
+        return Err(fail(exit::CONFLICT, "配置已变化，请重新确认。"));
     }
     let action = match command {
         Command::Create {
@@ -281,7 +272,7 @@ pub(crate) async fn save(
                     )
                 }
                 None => {
-                    let path = exe.ok_or_else(|| fail(2, "EXE_REQUIRED"))?;
+                    let path = exe.ok_or_else(|| fail(exit::INVALID, "EXE_REQUIRED"))?;
                     let name = path
                         .file_stem()
                         .and_then(|s| s.to_str())
@@ -290,14 +281,14 @@ pub(crate) async fn save(
                     (
                         ApplicationLocator::Exe { path },
                         adapter
-                            .ok_or_else(|| fail(2, "ADAPTER_REQUIRED"))?
+                            .ok_or_else(|| fail(exit::INVALID, "ADAPTER_REQUIRED"))?
                             .template(),
                         name,
                     )
                 }
             };
             if matches!(data, Data::Isolated) && !template.supports_isolation() {
-                return Err(fail(2, "ISOLATION_UNSUPPORTED"));
+                return Err(fail(exit::INVALID, "ISOLATION_UNSUPPORTED"));
             }
             let name = name.unwrap_or_else(|| {
                 format!(
@@ -311,7 +302,7 @@ pub(crate) async fn save(
                 )
             });
             if name.trim().is_empty() || name.contains('\0') {
-                return Err(fail(2, "INVALID_INSTANCE_NAME"));
+                return Err(fail(exit::INVALID, "INVALID_INSTANCE_NAME"));
             }
             check_profile(&catalog, network.binding())?;
             let resolved = installation::resolve(&locator).map_err(dependency)?;
@@ -382,12 +373,12 @@ pub(crate) async fn save(
                 .instances
                 .iter()
                 .find(|i| i.id == id)
-                .ok_or_else(|| fail(2, "INSTANCE_NOT_FOUND"))?;
+                .ok_or_else(|| fail(exit::INVALID, "INSTANCE_NOT_FOUND"))?;
             let application = catalog
                 .applications
                 .iter()
                 .find(|a| a.id == instance.application_id)
-                .ok_or_else(|| fail(2, "APPLICATION_NOT_FOUND"))?;
+                .ok_or_else(|| fail(exit::INVALID, "APPLICATION_NOT_FOUND"))?;
             let resolved = installation::resolve(&application.locator).map_err(dependency)?;
             let network = proxy
                 .map(|profile_id| NetworkBinding::Profile { profile_id })
@@ -426,7 +417,7 @@ pub(crate) async fn save(
         | Command::Inspect { .. }
         | Command::Edit { .. }
         | Command::Settings { .. } => {
-            return Err(fail(2, "CONFIGURATION_EDIT_REQUIRED"));
+            return Err(fail(exit::INVALID, "CONFIGURATION_EDIT_REQUIRED"));
         }
     };
     let check_guard = matches!(
@@ -466,7 +457,10 @@ async fn report_saved(
                         receipt.entity_id
                     );
                 }
-                return Err(fail(5, "实例已保存；保护需要前台组件授权或核验。"));
+                return Err(fail(
+                    exit::ACTION_REQUIRED,
+                    "实例已保存；保护需要前台组件授权或核验。",
+                ));
             }
             Ok(status) => protection = Some(status),
             Err(_) => {
@@ -477,7 +471,7 @@ async fn report_saved(
                     )?;
                 }
                 return Err(fail(
-                    6,
+                    exit::UNCONFIRMED,
                     "实例配置已保存；保护状态暂未确认，请查询 guard status，不要重复创建。",
                 ));
             }
@@ -512,23 +506,13 @@ fn check_profile(catalog: &CatalogPage, binding: NetworkBinding) -> Result<(), F
     if let NetworkBinding::Profile { profile_id } = binding
         && !catalog.profiles.iter().any(|p| p.id == profile_id)
     {
-        return Err(fail(2, "PROFILE_NOT_FOUND"));
+        return Err(fail(exit::INVALID, "PROFILE_NOT_FOUND"));
     }
     Ok(())
 }
+/// A rejected configuration edit is an input problem unless its code says otherwise.
 fn rejection_exit(code: &str) -> i32 {
-    match code {
-        "STALE_MANIFEST_REVISION"
-        | "DUPLICATE_ORIGINAL"
-        | "DUPLICATE_PHYSICAL_ORIGINAL"
-        | "DUPLICATE_PHYSICAL_APPLICATION" => 4,
-        "APP_NOT_INSTALLED"
-        | "INSTALLATION_CHECK_FAILED"
-        | "INSTALLATION_ACCESS_DENIED"
-        | "AMBIGUOUS_PACKAGE" => 3,
-        "INTEGRATION_CLEANUP_REQUIRED" | "CORE_RECONFIGURATION_REQUIRED" => 5,
-        _ => 2,
-    }
+    exit::for_code(code).unwrap_or(exit::INVALID)
 }
 pub(crate) async fn submit(
     root: &Path,
@@ -566,7 +550,7 @@ pub(crate) async fn submit(
             Err(fail(exit, message))
         }
         Err(_) => Err(fail(
-            6,
+            exit::UNCONFIRMED,
             format!("结果未确认，请查询原请求：instance request {request_id}；不要自动重新创建。"),
         )),
     }

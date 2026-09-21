@@ -1110,84 +1110,26 @@ async fn rpc(
         return Err(Error::Invalid("IPC_RESPONSE_MISMATCH"));
     }
     if let Reply::Error { code } = &response.result {
-        if let Some(value) = code.strip_prefix("SHORTCUT_COM_ERROR:")
-            && let Ok(code) = value.parse::<u32>()
-        {
-            return Err(Error::Windows {
-                operation: "ShortcutCom",
-                code,
-            });
-        }
-        return Err(Error::Invalid(match code.as_str() {
-            "GUARD_LOGIN_BUSY" => "GUARD_LOGIN_BUSY",
-            "GUARD_LOGIN_CHECK_TIMEOUT" => "GUARD_LOGIN_CHECK_TIMEOUT",
-            "GUARD_LOGIN_STATE_CHANGED" => "GUARD_LOGIN_STATE_CHANGED",
-            "GUARD_LOGIN_REQUEST_NOT_FOUND" => "GUARD_LOGIN_REQUEST_NOT_FOUND",
-            "GUARD_LOGIN_ALREADY_REGISTERED" => "GUARD_LOGIN_ALREADY_REGISTERED",
-            "GUARD_LOGIN_NOT_NEEDED" => "GUARD_LOGIN_NOT_NEEDED",
-            "GUARD_LOGIN_REGISTRATION_CHANGED" => "GUARD_LOGIN_REGISTRATION_CHANGED",
-            "GUARD_LOGIN_OPERATION_PENDING" => "GUARD_LOGIN_OPERATION_PENDING",
-            "GUARD_LOGIN_REMOVAL_PENDING" => "GUARD_LOGIN_REMOVAL_PENDING",
-            "GUARD_LOGIN_OWNERSHIP_UNAVAILABLE" => "GUARD_LOGIN_OWNERSHIP_UNAVAILABLE",
-            "GUARD_LOGIN_TASK_RUNNING" => "GUARD_LOGIN_TASK_RUNNING",
-            "GUARD_LOGIN_METADATA_CONFLICT" => "GUARD_LOGIN_METADATA_CONFLICT",
-            "GUARD_LISTENER_MISSING" => "GUARD_LISTENER_MISSING",
-            "GUARD_TASK_MISSING" => "GUARD_TASK_MISSING",
-            "INVALID_LOGIN_REQUEST" => "INVALID_LOGIN_REQUEST",
-            "INVALID_SHORTCUT_REQUEST" => "INVALID_SHORTCUT_REQUEST",
-            "SHORTCUT_OPERATION_BUSY" => "SHORTCUT_OPERATION_BUSY",
-            "SHORTCUT_ALREADY_REGISTERED" => "SHORTCUT_ALREADY_REGISTERED",
-            "SHORTCUT_REGISTRATION_CHANGED" => "SHORTCUT_REGISTRATION_CHANGED",
-            "SHORTCUT_OWNERSHIP_UNAVAILABLE" => "SHORTCUT_OWNERSHIP_UNAVAILABLE",
-            "SHORTCUT_OPERATION_PENDING" => "SHORTCUT_OPERATION_PENDING",
-            "SHORTCUT_REMOVAL_PENDING" => "SHORTCUT_REMOVAL_PENDING",
-            "SHORTCUT_REQUEST_NOT_FOUND" => "SHORTCUT_REQUEST_NOT_FOUND",
-            "SHORTCUT_PATH_OCCUPIED" => "SHORTCUT_PATH_OCCUPIED",
-            "SHORTCUT_CHANGED" => "SHORTCUT_CHANGED",
-            "SHORTCUT_FILE_BUSY" => "SHORTCUT_FILE_BUSY",
-            "SHORTCUT_CONTENT_CONFLICT" => "SHORTCUT_CONTENT_CONFLICT",
-            "SHORTCUT_PATH_INVALID" => "SHORTCUT_PATH_INVALID",
-            "SHORTCUT_METADATA_CONFLICT" => "SHORTCUT_METADATA_CONFLICT",
-            "SHORTCUT_LOCATIONS_CONFLICT" => "SHORTCUT_LOCATIONS_CONFLICT",
-            "SHORTCUT_JOURNAL_INVALID" => "SHORTCUT_JOURNAL_INVALID",
-            "SHORTCUT_JOURNAL_REVISION_INVALID" => "SHORTCUT_JOURNAL_REVISION_INVALID",
-            "SHORTCUT_RECORD_LIMIT" => "SHORTCUT_RECORD_LIMIT",
-            "ICON_GROUP_MISSING" => "ICON_GROUP_MISSING",
-            "ICON_CACHE_CONFLICT" => "ICON_CACHE_CONFLICT",
-            "REQUEST_ID_CONFLICT" => "REQUEST_ID_CONFLICT",
-            "INVALID_REQUEST_ID" => "INVALID_REQUEST_ID",
-            "CONFIG_REQUEST_PENDING" => "CONFIG_REQUEST_PENDING",
-            "CATALOG_CHANGED" => "CATALOG_CHANGED",
-            "CATALOG_ENTRY_TOO_LARGE" => "CATALOG_ENTRY_TOO_LARGE",
-            "SUBSCRIPTION_PREVIEW_EXPIRED" => "SUBSCRIPTION_PREVIEW_EXPIRED",
-            "SUBSCRIPTION_PREVIEW_LIMIT" => "SUBSCRIPTION_PREVIEW_LIMIT",
-            "SUBSCRIPTION_PREVIEW_NOT_READY" => "SUBSCRIPTION_PREVIEW_NOT_READY",
-            "SUBSCRIPTION_STAGE_PENDING" => "SUBSCRIPTION_STAGE_PENDING",
-            "SUBSCRIPTION_STAGE_FAILED" => "SUBSCRIPTION_STAGE_FAILED",
-            "SUBSCRIPTION_STAGE_TOO_LARGE" => "SUBSCRIPTION_STAGE_TOO_LARGE",
-            "SUBSCRIPTION_PREVIEW_KIND_MISMATCH" => "SUBSCRIPTION_PREVIEW_KIND_MISMATCH",
-            "STALE_SUBSCRIPTION_SOURCE" => "STALE_SUBSCRIPTION_SOURCE",
-            "SUBSCRIPTION_SELECTED_NODE_REMOVED" => "SUBSCRIPTION_SELECTED_NODE_REMOVED",
-            "SUBSCRIPTION_URL_INVALID" => "SUBSCRIPTION_URL_INVALID",
-            "SUBSCRIPTION_PROFILE_REQUIRED" => "SUBSCRIPTION_PROFILE_REQUIRED",
-            "SUBSCRIPTION_REQUEST_TOO_LARGE" => "SUBSCRIPTION_REQUEST_TOO_LARGE",
-            "SELECTED_NODE_NOT_FOUND" => "SELECTED_NODE_NOT_FOUND",
-            "INVALID_SUBSCRIPTION_NODE" => "INVALID_SUBSCRIPTION_NODE",
-            "INVALID_SUBSCRIPTION_SECRET" => "INVALID_SUBSCRIPTION_SECRET",
-            "SECRET_ID_CONFLICT" => "SECRET_ID_CONFLICT",
-            "STALE_MANIFEST_REVISION" => "STALE_MANIFEST_REVISION",
-            "PROFILE_NOT_FOUND" => "PROFILE_NOT_FOUND",
-            "LAUNCH_ATTEMPT_NOT_FOUND" => "LAUNCH_ATTEMPT_NOT_FOUND",
-            "LAUNCH_OPERATION_LIMIT" => "LAUNCH_OPERATION_LIMIT",
-            "LAUNCH_CONFIG_CHANGED" => "LAUNCH_CONFIG_CHANGED",
-            "INSTANCE_RESOURCE_BUSY" => "INSTANCE_RESOURCE_BUSY",
-            "INSTANCE_NOT_FOUND" => "INSTANCE_NOT_FOUND",
-            "INSTANCE_RUNNING_WITH_OTHER_CONFIG" => "INSTANCE_RUNNING_WITH_OTHER_CONFIG",
-            "INSTANCE_RUNNING_IN_OTHER_SESSION" => "INSTANCE_RUNNING_IN_OTHER_SESSION",
-            _ => "COORDINATOR_OPERATION_FAILED",
-        }));
+        return Err(remote_error(code));
     }
     Ok(response.result)
+}
+
+/// Inverse of [`safe_error`]: every stable code the server sends stays
+/// matchable by callers. Interning replaces a second, hand-maintained list of
+/// codes that silently collapsed any newer code into the generic failure.
+fn remote_error(code: &str) -> Error {
+    if let Some(value) = code.strip_prefix("SHORTCUT_COM_ERROR:")
+        && let Ok(code) = value.parse::<u32>()
+    {
+        return Error::Windows {
+            operation: "ShortcutCom",
+            code,
+        };
+    }
+    Error::Invalid(
+        app_proxy_core::error_code::intern(code).unwrap_or("COORDINATOR_OPERATION_FAILED"),
+    )
 }
 
 /// On failure retain the same request ID and query its status; never manufacture
@@ -2232,6 +2174,32 @@ mod tests {
         ));
         server.await.unwrap();
         assert_eq!(shared.configuration.snapshot().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn remote_errors_round_trip_without_a_client_side_code_list() {
+        // Both codes were raised by the server but missing from the old list.
+        for code in ["INVALID_LAUNCH_REQUEST", "CORE_OPERATION_LIMIT"] {
+            let sent = safe_error(Error::Invalid(code));
+            assert!(matches!(remote_error(&sent), Error::Invalid(found) if found == code));
+        }
+        let sent = safe_error(Error::Windows {
+            operation: "ShortcutCom",
+            code: 5,
+        });
+        assert!(matches!(
+            remote_error(&sent),
+            Error::Windows {
+                operation: "ShortcutCom",
+                code: 5
+            }
+        ));
+        for text in ["", "not a code", "SHORTCUT_COM_ERROR:x", "C:\\secret\\path"] {
+            assert!(matches!(
+                remote_error(text),
+                Error::Invalid("COORDINATOR_OPERATION_FAILED")
+            ));
+        }
     }
 
     #[tokio::test]

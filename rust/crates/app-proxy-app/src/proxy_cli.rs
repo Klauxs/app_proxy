@@ -2,7 +2,8 @@
 //! never through process arguments, output or persisted request bodies.
 use crate::{
     coordinator,
-    instance_cli::{self, Failure, fail},
+    exit::{self, Failure, fail},
+    instance_cli,
 };
 use app_proxy_core::{
     model::{Endpoint, ManualProtocol},
@@ -111,22 +112,25 @@ impl Node {
     fn input(self, updating: bool) -> Result<ManualProxyInput, Failure> {
         if updating && self.username.is_none() && !self.no_auth {
             return Err(fail(
-                2,
+                exit::INVALID,
                 "更新时请选择 --no-auth，或 --username 与 --password-stdin。",
             ));
         }
         let credentials = if let Some(username) = self.username {
             if io::stdin().is_terminal() {
-                return Err(fail(2, "请通过重定向的标准输入提供密码，避免终端回显。"));
+                return Err(fail(
+                    exit::INVALID,
+                    "请通过重定向的标准输入提供密码，避免终端回显。",
+                ));
             }
             let mut bytes = Vec::new();
             io::stdin()
                 .lock()
                 .take(32771)
                 .read_to_end(&mut bytes)
-                .map_err(|_| fail(2, "PASSWORD_INPUT_FAILED"))?;
-            let mut password =
-                String::from_utf8(bytes).map_err(|_| fail(2, "INVALID_PROXY_PASSWORD"))?;
+                .map_err(|_| fail(exit::INVALID, "PASSWORD_INPUT_FAILED"))?;
+            let mut password = String::from_utf8(bytes)
+                .map_err(|_| fail(exit::INVALID, "INVALID_PROXY_PASSWORD"))?;
             if password.ends_with('\n') {
                 password.pop();
                 if password.ends_with('\r') {
@@ -134,7 +138,7 @@ impl Node {
                 }
             }
             if password.len() > 32768 || password.contains('\0') {
-                return Err(fail(2, "INVALID_PROXY_PASSWORD"));
+                return Err(fail(exit::INVALID, "INVALID_PROXY_PASSWORD"));
             }
             Some(ProxyCredentialInput { username, password })
         } else {
@@ -155,7 +159,8 @@ impl Node {
 fn print(value: &impl serde::Serialize) -> Result<(), Failure> {
     println!(
         "{}",
-        serde_json::to_string_pretty(value).map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+        serde_json::to_string_pretty(value)
+            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
     );
     Ok(())
 }
@@ -180,7 +185,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
     }
     let catalog = coordinator::catalog(root.clone())
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     let action = match command {
         Command::List | Command::Show { .. } => {
             let selected = match command {
@@ -193,7 +198,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 .filter(|p| selected.is_none_or(|id| p.id == id))
                 .collect();
             if selected.is_some() && profiles.is_empty() {
-                return Err(fail(2, "PROFILE_NOT_FOUND"));
+                return Err(fail(exit::INVALID, "PROFILE_NOT_FOUND"));
             }
             if json {
                 print(&serde_json::json!({"revision":catalog.revision,"profiles":profiles}))?;
@@ -300,10 +305,10 @@ pub(crate) async fn save_manual(
             let mut endpoint = None;
             for _ in 0..64 {
                 let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                    .map_err(|_| fail(3, "LOCAL_PROXY_PORT_UNAVAILABLE"))?;
+                    .map_err(|_| fail(exit::UNAVAILABLE, "LOCAL_PROXY_PORT_UNAVAILABLE"))?;
                 let port = listener
                     .local_addr()
-                    .map_err(|_| fail(3, "LOCAL_PROXY_PORT_UNAVAILABLE"))?
+                    .map_err(|_| fail(exit::UNAVAILABLE, "LOCAL_PROXY_PORT_UNAVAILABLE"))?
                     .port();
                 reservations.push(listener);
                 if !catalog.profiles.iter().any(|p| p.endpoint.port == port) {
@@ -317,14 +322,15 @@ pub(crate) async fn save_manual(
             ConfigAction::CreateManualProfile {
                 profile_id: Uuid::new_v4(),
                 name,
-                endpoint: endpoint.ok_or_else(|| fail(3, "LOCAL_PROXY_PORT_UNAVAILABLE"))?,
+                endpoint: endpoint
+                    .ok_or_else(|| fail(exit::UNAVAILABLE, "LOCAL_PROXY_PORT_UNAVAILABLE"))?,
                 node,
             }
         }
         ManualEdit::Update { id } => {
             let snapshot = coordinator::core_status(root.clone())
                 .await
-                .map_err(|e| fail(3, e.to_string()))?;
+                .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if snapshot.profiles.iter().any(|p| p.id == id) {
                 crate::core_cli::prepare_and_apply_with_foreground(
                     root,
@@ -376,19 +382,19 @@ pub(crate) async fn remove(
     foreground.check()?;
     let snapshot = coordinator::core_status(root.clone())
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if snapshot.profiles.iter().any(|p| p.id == id) {
         use app_proxy_windows::core_state::CoreState;
         match snapshot.recorded {
             CoreState::Starting { .. } => {
                 return Err(fail(
-                    6,
+                    exit::UNCONFIRMED,
                     "内核创建尚待核对；请先执行 core recover-start，再移除代理。",
                 ));
             }
             CoreState::Down { .. } => {
                 return Err(fail(
-                    3,
+                    exit::UNAVAILABLE,
                     "内核已退出但保留恢复集合；请先执行 core stop，再移除代理。",
                 ));
             }

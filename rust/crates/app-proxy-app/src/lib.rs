@@ -8,6 +8,7 @@ pub mod core_control;
 mod core_installer;
 pub mod core_manager;
 mod core_reconfigure;
+pub mod exit;
 mod foreground;
 pub mod guard_cli;
 pub mod guard_control;

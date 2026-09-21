@@ -2,10 +2,11 @@
 use crate::{
     configuration::{CatalogPage, InstanceSummary, ProfileProtocol},
     coordinator, core_cli,
+    exit::{self, Failure, fail},
     foreground::Foreground,
     guard_cli,
     guard_control::{GuardPhase, GuardStatus},
-    instance_cli::{self, Adapter, Data, Failure, Network, Preset, fail},
+    instance_cli::{self, Adapter, Data, Network, Preset},
     launch_cli,
     launch_engine::GuardObservation,
     proxy_cli, subscription_cli,
@@ -26,18 +27,18 @@ fn display(text: &str) -> String {
         .collect()
 }
 fn returned() -> Failure {
-    fail(5, "已返回，保留已保存的配置。")
+    fail(exit::ACTION_REQUIRED, "已返回，保留已保存的配置。")
 }
 async fn catalog(root: &Path) -> Result<CatalogPage, Failure> {
     coordinator::catalog(root.into())
         .await
-        .map_err(|e| fail(3, e.to_string()))
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))
 }
 fn prompt(text: &str) -> Result<(), Failure> {
     eprint!("{text}");
     io::stderr()
         .flush()
-        .map_err(|_| fail(10, "PROMPT_WRITE_FAILED"))
+        .map_err(|_| fail(exit::INTERNAL, "PROMPT_WRITE_FAILED"))
 }
 async fn line(text: &str, foreground: &mut Foreground) -> Result<String, Failure> {
     prompt(text)?;
@@ -54,7 +55,7 @@ async fn text(
         return default.map(str::to_owned).ok_or_else(returned);
     }
     if value.len() > 32768 || value.chars().any(char::is_control) {
-        return Err(fail(2, "输入过长或包含控制字符。"));
+        return Err(fail(exit::INVALID, "输入过长或包含控制字符。"));
     }
     Ok(value.into())
 }
@@ -206,7 +207,10 @@ fn observation(status: Option<&GuardStatus>, revision: u64) -> (&'static str, &'
 
 pub async fn run(root: PathBuf) -> Result<(), Failure> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() || !io::stderr().is_terminal() {
-        return Err(fail(2, "菜单需要交互终端；自动化请使用 --help 中的命令。"));
+        return Err(fail(
+            exit::INVALID,
+            "菜单需要交互终端；自动化请使用 --help 中的命令。",
+        ));
     }
     let mut foreground = Foreground::new();
     println!("App Proxy · 应用实例与代理");
@@ -252,7 +256,7 @@ async fn select_instance(
 ) -> Result<(CatalogPage, Uuid), Failure> {
     let snapshot = catalog(root).await?;
     if snapshot.instances.is_empty() {
-        return Err(fail(2, "尚无实例，请先添加。"));
+        return Err(fail(exit::INVALID, "尚无实例，请先添加。"));
     }
     let mut options = Vec::new();
     if with_status {
@@ -305,7 +309,7 @@ async fn launch_confirmed(
         .instances
         .iter()
         .find(|i| i.id == id)
-        .ok_or_else(|| fail(4, "实例已变化，请重新选择。"))?;
+        .ok_or_else(|| fail(exit::CONFLICT, "实例已变化，请重新选择。"))?;
     println!("将启动：{}", instance_label(snapshot, instance));
     confirm("启动此实例？", foreground).await?;
     launch_cli::from_menu(root.into(), id, snapshot.revision, foreground).await
@@ -486,13 +490,16 @@ async fn finish_instance(
     foreground.check()?;
     let snapshot = catalog(root).await?;
     if snapshot.revision != saved_revision {
-        return Err(fail(4, "实例已保存，但配置随后发生变化；请重新选择实例。"));
+        return Err(fail(
+            exit::CONFLICT,
+            "实例已保存，但配置随后发生变化；请重新选择实例。",
+        ));
     }
     let instance = snapshot
         .instances
         .iter()
         .find(|i| i.id == id)
-        .ok_or_else(|| fail(4, "实例已变化。"))?;
+        .ok_or_else(|| fail(exit::CONFLICT, "实例已变化。"))?;
     println!("已保存：{}。", display(&instance.name));
     // Publish the entry before Guard authorization or the launch prompt, so
     // returning from either still leaves an entry for the saved instance.
@@ -518,7 +525,7 @@ async fn finish_instance(
         .instances
         .iter()
         .find(|i| i.id == id)
-        .ok_or_else(|| fail(4, "实例已变化。"))?;
+        .ok_or_else(|| fail(exit::CONFLICT, "实例已变化。"))?;
     let protection = if instance.guard == Desired::Enabled {
         guard_cli::run_with_foreground(
             root.into(),
@@ -550,7 +557,10 @@ fn post_guard_launch_message(
     revision: u64,
 ) -> Result<Option<&'static str>, Failure> {
     if status.instance_id != id || status.revision != revision {
-        return Err(fail(4, "实例已保存，但配置随后发生变化；请重新选择实例。"));
+        return Err(fail(
+            exit::CONFLICT,
+            "实例已保存，但配置随后发生变化；请重新选择实例。",
+        ));
     }
     let scan = status.scan.as_ref().filter(|scan| {
         scan.instance_id == id && scan.revision == revision && status.desired == Desired::Enabled
@@ -598,9 +608,9 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
                 .applications
                 .iter()
                 .find(|a| a.id == instance.application_id)
-                .ok_or_else(|| fail(4, "应用记录不可用，请重新选择。"))?;
+                .ok_or_else(|| fail(exit::CONFLICT, "应用记录不可用，请重新选择。"))?;
             if !application.template_ref.supports_isolation() {
-                return Err(fail(2, "此应用类型不支持分身。"));
+                return Err(fail(exit::INVALID, "此应用类型不支持分身。"));
             }
             let name = automatic_instance_name(&snapshot, &application.name, true);
             println!(
@@ -639,7 +649,7 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
                 .instances
                 .iter()
                 .find(|i| i.id == id)
-                .ok_or_else(|| fail(4, "实例已变化，请重新选择。"))?;
+                .ok_or_else(|| fail(exit::CONFLICT, "实例已变化，请重新选择。"))?;
             println!("实例：{}", instance_label(&current, target));
             println!(
                 "下次启动生效：{}。当前应用进程不会被本次编辑重启。",
@@ -661,7 +671,7 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
             let current = catalog(root).await?;
             if current.revision != receipt.revision {
                 return Err(fail(
-                    4,
+                    exit::CONFLICT,
                     "网络绑定已保存，但配置随后发生变化；请重新选择实例。",
                 ));
             }
@@ -743,9 +753,9 @@ async fn remove_instance(
     foreground.check()?;
     let view = coordinator::shortcut_status(root.into(), id)
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if view.revision != revision {
-        return Err(fail(4, "配置已变化，请重新确认移除。"));
+        return Err(fail(exit::CONFLICT, "配置已变化，请重新确认移除。"));
     }
     if let Some(entry) = view.integration {
         let result = match entry.request.action {
@@ -766,7 +776,7 @@ async fn remove_instance(
             }
             Action::Repair => {
                 return Err(fail(
-                    4,
+                    exit::CONFLICT,
                     "实例尚未移除：桌面入口有未完成的恢复操作，请先在“桌面快捷方式”中处理。",
                 ));
             }
@@ -774,7 +784,7 @@ async fn remove_instance(
         foreground.check()?;
         if result.is_err() {
             return Err(fail(
-                4,
+                exit::CONFLICT,
                 "实例尚未移除：桌面入口清理未完成，请按上方原因处理后重试。",
             ));
         }
@@ -783,9 +793,12 @@ async fn remove_instance(
     // before removing the instance, keeping the core's ownership guard intact.
     let current = coordinator::shortcut_status(root.into(), id)
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if current.integration.is_some() {
-        return Err(fail(4, "实例尚未移除：桌面入口登记已变化，请重新选择。"));
+        return Err(fail(
+            exit::CONFLICT,
+            "实例尚未移除：桌面入口登记已变化，请重新选择。",
+        ));
     }
     instance_cli::save(
         root,
@@ -810,7 +823,7 @@ async fn advanced_settings(
     };
     let summary = coordinator::instance_settings(root.into(), id)
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     crate::instance_settings::display(&summary);
     let action = fixed(
         "高级设置",
@@ -834,8 +847,8 @@ async fn advanced_settings(
                 .read_secret_line(128 * 1024)
                 .await?
                 .ok_or_else(returned)?;
-            let args: Vec<String> =
-                serde_json::from_str(&input).map_err(|_| fail(2, "参数须为 JSON 字符串数组。"))?;
+            let args: Vec<String> = serde_json::from_str(&input)
+                .map_err(|_| fail(exit::INVALID, "参数须为 JSON 字符串数组。"))?;
             println!("将替换为 {} 项启动参数。", args.len());
             edit.args = Some(args);
         }
@@ -893,7 +906,7 @@ async fn manage_shortcut(
     use app_proxy_windows::shortcuts::journal::{Action, Status};
     let view = coordinator::shortcut_status(root.into(), id)
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     crate::shortcut_cli::print_registration(&view);
     match view.integration {
         None => {
@@ -920,7 +933,7 @@ async fn manage_shortcut(
             } else {
                 let check = coordinator::shortcut_check(root.into(), id)
                     .await
-                    .map_err(|e| fail(3, e.to_string()))?;
+                    .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
                 crate::shortcut_cli::print_check(&check);
                 let action = fixed(
                     "桌面入口维护",
@@ -933,7 +946,7 @@ async fn manage_shortcut(
                 if action == 0 {
                     if check.revision != view.revision || check.request_id != Some(entry.request.id)
                     {
-                        return Err(fail(4, "入口登记已变化，请重新选择。"));
+                        return Err(fail(exit::CONFLICT, "入口登记已变化，请重新选择。"));
                     }
                     confirm(
                         "在原位置恢复入口？已有链接须保持原样，启动器和图标须仍可用。",
@@ -981,7 +994,7 @@ async fn manual_input(foreground: &mut Foreground) -> Result<ManualProxyInput, F
         .parse::<u16>()
         .ok()
         .filter(|p| *p > 0)
-        .ok_or_else(|| fail(2, "端口须为 1–65535。"))?;
+        .ok_or_else(|| fail(exit::INVALID, "端口须为 1–65535。"))?;
     let authenticated = fixed(
         "认证方式（明确选择）",
         &["无需认证", "输入用户名和密码"],
@@ -1037,7 +1050,7 @@ async fn add_proxy(root: &Path, foreground: &mut Foreground) -> Result<Uuid, Fai
         foreground,
     )
     .await?
-    .ok_or_else(|| fail(6, "订阅保存结果未确认。"))
+    .ok_or_else(|| fail(exit::UNCONFIRMED, "订阅保存结果未确认。"))
 }
 async fn add_manual_proxy(root: &Path, foreground: &mut Foreground) -> Result<Uuid, Failure> {
     let snapshot = catalog(root).await?;
@@ -1074,7 +1087,7 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
     }
     let snapshot = catalog(root).await?;
     if snapshot.profiles.is_empty() {
-        return Err(fail(2, "尚无代理配置。"));
+        return Err(fail(exit::INVALID, "尚无代理配置。"));
     }
     let options = snapshot
         .profiles

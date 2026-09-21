@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod core_control;
+pub mod error_code;
 pub mod launch;
 pub mod model;
 pub mod registry;

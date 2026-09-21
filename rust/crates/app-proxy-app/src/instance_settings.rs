@@ -1,8 +1,9 @@
 //! Advanced edits use protected input and the existing configuration transaction.
 use crate::{
     coordinator,
+    exit::{self, Failure, fail},
     foreground::Foreground,
-    instance_cli::{self, Failure, fail},
+    instance_cli,
 };
 use app_proxy_core::{
     model::{Manifest, WorkingDirectory},
@@ -123,7 +124,7 @@ pub(crate) async fn save(
     )
     .await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "request_id": request_id, "receipt": receipt, "takes_effect": "next_launch", "application_restarted": false })).map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?);
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "request_id": request_id, "receipt": receipt, "takes_effect": "next_launch", "application_restarted": false })).map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?);
     } else {
         println!("高级设置已保存，下次启动生效。当前应用未重启。");
     }
@@ -143,11 +144,12 @@ pub fn edit_file(root: &Path, id: Uuid, path: &Path, revision: u64) -> Result<In
 pub async fn show(root: &Path, instance_id: Uuid, json: bool) -> std::result::Result<(), Failure> {
     let view = coordinator::instance_settings(root.into(), instance_id)
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&view).map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+            serde_json::to_string_pretty(&view)
+                .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
         );
     } else {
         display(&view);

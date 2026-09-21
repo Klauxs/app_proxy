@@ -1,7 +1,7 @@
 //! Display runtime evidence separately from configuration and protection.
 use crate::{
     coordinator,
-    instance_cli::{Failure, fail},
+    exit::{self, Failure, fail},
     launch_engine::{InstanceObservation, RuntimeStatus},
 };
 use app_proxy_core::launch::LaunchNetwork;
@@ -28,20 +28,20 @@ pub(crate) fn label(status: &RuntimeStatus, revision: u64) -> &'static str {
 pub async fn inspect(root: &Path, id: Uuid, json: bool) -> Result<(), Failure> {
     let catalog = coordinator::catalog(root.into())
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     let instance = catalog
         .instances
         .iter()
         .find(|i| i.id == id)
-        .ok_or_else(|| fail(2, "INSTANCE_NOT_FOUND"))?;
+        .ok_or_else(|| fail(exit::INVALID, "INSTANCE_NOT_FOUND"))?;
     let application = catalog
         .applications
         .iter()
         .find(|a| a.id == instance.application_id)
-        .ok_or_else(|| fail(2, "APPLICATION_NOT_FOUND"))?;
+        .ok_or_else(|| fail(exit::INVALID, "APPLICATION_NOT_FOUND"))?;
     let runtime = coordinator::runtime_status(root.into(), id)
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     let guard = coordinator::guard_status(root.into(), id).await.ok();
     if runtime.revision != catalog.revision
         || guard
@@ -49,11 +49,14 @@ pub async fn inspect(root: &Path, id: Uuid, json: bool) -> Result<(), Failure> {
             .is_some_and(|g| g.revision != catalog.revision)
         || coordinator::catalog(root.into())
             .await
-            .map_err(|e| fail(3, e.to_string()))?
+            .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?
             .revision
             != catalog.revision
     {
-        return Err(fail(4, "配置在查询期间发生变化，请重新查看实例详情。"));
+        return Err(fail(
+            exit::CONFLICT,
+            "配置在查询期间发生变化，请重新查看实例详情。",
+        ));
     }
     if json {
         println!(
@@ -64,7 +67,7 @@ pub async fn inspect(root: &Path, id: Uuid, json: bool) -> Result<(), Failure> {
                 "protection_diagnostic": if guard.is_none() { Some("GUARD_STATUS_UNCONFIRMED") } else { None },
                 "target_traffic_evidence": "not_observed"
             }))
-            .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
         );
     } else {
         let display = |text: &str| {

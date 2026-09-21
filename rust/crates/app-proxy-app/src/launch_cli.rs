@@ -2,8 +2,8 @@
 //! result is uncertain; dependency repair resumes only a definite pre-spawn failure.
 use crate::{
     coordinator, core_cli,
+    exit::{self, Failure, fail},
     foreground::Foreground,
-    instance_cli::{Failure, fail},
 };
 use app_proxy_core::{
     core_control::{CoreAction, CoreOutcome, CoreRequestStatus, UpdateImpact},
@@ -80,7 +80,7 @@ impl Report {
             println!(
                 "{}",
                 serde_json::to_string_pretty(self)
-                    .map_err(|_| fail(10, "OUTPUT_ENCODING_FAILED"))?
+                    .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
             );
         } else {
             println!(
@@ -115,36 +115,26 @@ impl Report {
             return Err(fail(error_exit(code), code));
         }
         if self.requires_action.is_some() {
-            return Err(fail(5, "需要完成上述前台操作；应用尚未创建。"));
+            return Err(fail(
+                exit::ACTION_REQUIRED,
+                "需要完成上述前台操作；应用尚未创建。",
+            ));
         }
         match self.attempt.as_ref().map(|a| &a.phase) {
             Some(LaunchPhase::Confirmed { .. }) => Ok(()),
-            Some(LaunchPhase::Cancelled {}) => Err(fail(5, "启动已取消。")),
+            Some(LaunchPhase::Cancelled {}) => Err(fail(exit::ACTION_REQUIRED, "启动已取消。")),
             Some(LaunchPhase::Failed { code }) => Err(fail(error_exit(code), code)),
             _ => Err(fail(
-                6,
+                exit::UNCONFIRMED,
                 "启动结果未确认；请使用 launch inspect 查询原编号。",
             )),
         }
     }
 }
 
+/// A failed launch is a dependency problem unless its code says otherwise.
 fn error_exit(code: &str) -> i32 {
-    match code {
-        "INVALID_LAUNCH_REQUEST"
-        | "INVALID_REQUEST_ID"
-        | "INSTANCE_NOT_FOUND"
-        | "REQUEST_ID_CONFLICT"
-        | "LAUNCH_ATTEMPT_NOT_FOUND" => 2,
-        "INSTANCE_RUNNING_WITH_OTHER_CONFIG"
-        | "INSTANCE_RUNNING_IN_OTHER_SESSION"
-        | "LAUNCH_CONFIG_CHANGED"
-        | "INSTANCE_EXTERNALLY_RUNNING"
-        | "INSTANCE_STILL_RUNNING"
-        | "INSTANCE_RESOURCE_BUSY" => 4,
-        "LAUNCH_OPERATION_LIMIT" | "LAUNCH_INDETERMINATE" => 6,
-        _ => 3,
-    }
+    exit::for_code(code).unwrap_or(exit::UNAVAILABLE)
 }
 
 pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
@@ -161,8 +151,12 @@ pub async fn run(root: PathBuf, command: Command) -> Result<(), Failure> {
 /// Hidden shortcut entry. It cannot initialize a missing store. Dependency
 /// prompts use the same workflow and request IDs as CLI/menu launch.
 pub async fn from_shortcut(root: PathBuf, instance: Uuid, notify: bool) -> Result<(), Failure> {
-    app_proxy_windows::store::describe(&root)
-        .map_err(|e| fail(3, format!("无法打开实例数据目录：{}\n{e}", root.display())))?;
+    app_proxy_windows::store::describe(&root).map_err(|e| {
+        fail(
+            exit::UNAVAILABLE,
+            format!("无法打开实例数据目录：{}\n{e}", root.display()),
+        )
+    })?;
     let mut foreground = Foreground::detached(notify);
     let result = run_with_foreground(
         root.clone(),
@@ -234,18 +228,18 @@ async fn run_with_foreground(
     }
     let instance_id = command
         .instance
-        .ok_or_else(|| fail(2, "INSTANCE_REQUIRED"))?;
+        .ok_or_else(|| fail(exit::INVALID, "INSTANCE_REQUIRED"))?;
     let mut id = command.request_id.unwrap_or_else(Uuid::new_v4);
     if id.is_nil() || instance_id.is_nil() {
-        return Err(fail(2, "INVALID_LAUNCH_REQUEST"));
+        return Err(fail(exit::INVALID, "INVALID_LAUNCH_REQUEST"));
     }
     // This snapshot is used only for foreground dependency repair. Replays still
     // work if the instance has subsequently been removed from the catalog.
     let catalog = coordinator::catalog(root.clone())
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if menu_revision.is_some_and(|revision| revision != catalog.revision) {
-        return Err(fail(4, "配置已变化，请重新确认启动。"));
+        return Err(fail(exit::CONFLICT, "配置已变化，请重新确认启动。"));
     }
     let instance = catalog.instances.iter().find(|i| i.id == instance_id);
     if !foreground.quiet() && instance.is_some_and(|i| i.guard == Desired::Enabled) {
@@ -281,7 +275,7 @@ async fn run_with_foreground(
             report.output(json, foreground)?;
             return if interrupted {
                 Err(fail(
-                    5,
+                    exit::ACTION_REQUIRED,
                     "已请求取消；以上述持久状态为准，已创建的应用会保留。",
                 ))
             } else {
@@ -303,7 +297,7 @@ async fn run_with_foreground(
             }
             let profile = match instance.map(|i| &i.network) {
                 Some(NetworkBinding::Profile { profile_id }) => *profile_id,
-                _ => return Err(fail(4, "LAUNCH_CONFIG_CHANGED")),
+                _ => return Err(fail(exit::CONFLICT, "LAUNCH_CONFIG_CHANGED")),
             };
             ensure_revision(&root, catalog.revision).await?;
             foreground.check()?;
@@ -342,7 +336,10 @@ async fn run_with_foreground(
             }
             core_cli::show_impact(impact);
             if !core_cli::confirm_impact(foreground).await? {
-                return Err(fail(5, "已返回；共享代理未切换，应用未创建。"));
+                return Err(fail(
+                    exit::ACTION_REQUIRED,
+                    "已返回；共享代理未切换，应用未创建。",
+                ));
             }
             foreground.check()?;
             let (core_id, applied, interrupted) = core_cli::submit(
@@ -356,7 +353,10 @@ async fn run_with_foreground(
             .await;
             core_cli::output(core_id, &applied, false)?;
             if interrupted {
-                return Err(fail(5, "已停止后续启动；共享代理操作请按原编号查询。"));
+                return Err(fail(
+                    exit::ACTION_REQUIRED,
+                    "已停止后续启动；共享代理操作请按原编号查询。",
+                ));
             }
             core_cli::outcome(applied)?;
             expanded = true;
@@ -372,9 +372,9 @@ async fn run_with_foreground(
 async fn ensure_revision(root: &std::path::Path, revision: u64) -> Result<(), Failure> {
     let current = coordinator::catalog(root.to_owned())
         .await
-        .map_err(|e| fail(3, e.to_string()))?;
+        .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if current.revision != revision {
-        return Err(fail(4, "LAUNCH_CONFIG_CHANGED"));
+        return Err(fail(exit::CONFLICT, "LAUNCH_CONFIG_CHANGED"));
     }
     Ok(())
 }
