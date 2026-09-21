@@ -26,7 +26,6 @@ fn initial_install_upgrade_and_same_package_retry_preserve_identity() {
     let identity = app_proxy_windows::identity::file_identity(&root.path().join(NAMES[1])).unwrap();
     assert!(Installation::begin(root.path(), &next).is_err());
     drop(transaction); // UAC cancellation or installer process ending.
-    assert!(Installation::begin(root.path(), &first).is_err());
     install(root.path(), &next);
     assert_eq!(
         app_proxy_windows::identity::file_identity(&root.path().join(NAMES[1])).unwrap(),
@@ -37,6 +36,47 @@ fn initial_install_upgrade_and_same_package_retry_preserve_identity() {
         app_proxy_windows::identity::file_identity(&root.path().join(NAMES[1])).unwrap(),
         identity
     );
+}
+
+#[test]
+fn fixed_package_recovers_a_published_but_unfinished_upgrade() {
+    for initial in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("app");
+        fs::create_dir(&root).unwrap();
+        let first = package([b"cli-v1", b"host-v1"], "1");
+        let broken = package([b"cli-v2", b"host-v2"], "2");
+        let fixed = package([b"cli-v3", b"host-v3"], "3");
+        if initial {
+            install(&root, &first);
+        }
+        drop(Installation::begin(&root, &broken).unwrap());
+        fs::write(temp.path().join("preserved.txt"), b"user data").unwrap();
+        install(&root, &fixed);
+        verify_installation(&root, &fixed.manifest().unwrap()).unwrap();
+        assert!(!root.join(JOURNAL).exists());
+        assert_eq!(
+            fs::read(temp.path().join("preserved.txt")).unwrap(),
+            b"user data"
+        );
+    }
+}
+
+#[test]
+fn recovery_does_not_overwrite_modified_published_files() {
+    let root = tempfile::tempdir().unwrap();
+    let first = package([b"cli-v1", b"host-v1"], "1");
+    let broken = package([b"cli-v2", b"host-v2"], "2");
+    let fixed = package([b"cli-v3", b"host-v3"], "3");
+    install(root.path(), &first);
+    drop(Installation::begin(root.path(), &broken).unwrap());
+    fs::write(root.path().join(NAMES[1]), b"user changed file").unwrap();
+    assert!(Installation::begin(root.path(), &fixed).is_err());
+    assert_eq!(
+        fs::read(root.path().join(NAMES[1])).unwrap(),
+        b"user changed file"
+    );
+    assert_eq!(fs::read(root.path().join(NAMES[0])).unwrap(), b"cli-v2");
 }
 
 #[test]

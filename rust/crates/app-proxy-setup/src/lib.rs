@@ -115,21 +115,23 @@ impl Installation {
         wait_for_exit(root, Duration::from_secs(60))?;
         let journal_path = root.join(JOURNAL);
         if journal_path.try_exists()? {
-            let pending: Journal = read_json(&journal_path)?;
+            let mut pending: Journal = read_json(&journal_path)?;
             validate_journal(&pending)?;
             if pending.published {
-                if pending.new != new {
-                    return Err(Error::Invalid(
-                        "请先重新运行上次的安装包，完成未结束的升级。",
-                    ));
-                }
                 verify_installation(root, &pending.new)?;
-                return Ok(Self {
-                    root: root.into(),
-                    journal: pending,
-                    lease,
-                    _owner: owner,
-                });
+                if pending.new == new {
+                    return Ok(Self {
+                        root: root.into(),
+                        journal: pending,
+                        lease,
+                        _owner: owner,
+                    });
+                }
+                // A fixed installer must be able to replace a release whose
+                // finalization failed. Roll back only journal-owned binaries
+                // first; the new transaction still validates every file.
+                pending.published = false;
+                atomic_json(&journal_path, &pending)?;
             }
             rollback(root, &pending, (pending.new == new).then_some(payload))?;
         }
