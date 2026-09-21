@@ -10,6 +10,7 @@ pub(crate) struct ObservedTarget {
     pub(super) data: Option<PreparedData>,
     pub(super) instance_id: Uuid,
     pub(super) revision: u64,
+    pub(super) stopped: Option<app_proxy_windows::process_stop::ObservedGuardStop>,
 }
 impl std::ops::Deref for ObservedTarget {
     type Target = PinnedProcess;
@@ -115,9 +116,12 @@ impl LaunchEngine {
             .iter()
             .filter(|a| a.instance_id == scan.instance_id && a.reserves_instance())
         {
-            match &attempt.phase {
-                LaunchPhase::Confirmed { process } if !process::is_running_exact(process)? => {}
-                _ => return Ok(None),
+            // Preserve a known managed session's historical proxy binding.
+            // A different pending launch never excuses this unproxied main.
+            if let LaunchPhase::Confirmed { process } = &attempt.phase
+                && process == pinned.identity()
+            {
+                return Ok(None);
             }
         }
         pinned.verify()?;
@@ -131,11 +135,12 @@ impl LaunchEngine {
             data,
             instance_id: scan.instance_id,
             revision: scan.revision,
+            stopped: None,
         };
         Ok(Some((scan, observed)))
     }
 
-    pub(crate) fn submit_guard_event(
+    pub(crate) async fn submit_guard_event(
         self: &Arc<Self>,
         request: LaunchRequest,
         revision: u64,
@@ -148,9 +153,55 @@ impl LaunchEngine {
         {
             return Err(Error::IdentityMismatch);
         }
-        let _timing = app_proxy_windows::diagnostic_timing::Span::new("launch.admit", || {
-            format!("{}:{}", request.request_id, target.process.pid)
+        let engine = self.clone();
+        let queued = app_proxy_windows::diagnostic_timing::Span::new("event.stop_queue", || {
+            target.process.pid.to_string()
         });
-        self.submit_checked(request, Some(revision), Some(target), Some(pinned))
+        tokio::task::spawn_blocking(move || {
+            drop(queued);
+            engine.submit_checked(request, Some(revision), Some(target), Some(pinned))
+        })
+        .await
+        .map_err(|_| Error::Invalid("GUARD_EVENT_WORKER_INTERRUPTED"))?
+    }
+
+    /// The caller holds the admission/configuration gates across this short
+    /// boundary: a completed disable/edit cannot race a stale stop decision.
+    /// No history reconciliation, journal writes, resource locks or child scans.
+    pub(super) fn stop_event_before_admission(
+        &self,
+        store: &app_proxy_windows::store::Store,
+        request: &LaunchRequest,
+        target: &GuardTarget,
+        observed: &mut ObservedTarget,
+    ) -> Result<()> {
+        let timing = app_proxy_windows::diagnostic_timing::Span::new("event.stop_policy", || {
+            target.process.pid.to_string()
+        });
+        if request.origin != LaunchOrigin::Guard || request.request_id.is_nil() {
+            return Err(Error::Invalid("INVALID_GUARD_REQUEST"));
+        }
+        let snapshot = store.load()?;
+        if snapshot.revision != observed.revision {
+            return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
+        }
+        let (app, instance) = entries(&snapshot, request.instance_id)?;
+        if instance.guard.desired != Desired::Enabled
+            || !app.template_ref.supports_guard()
+            || !snapshot.profiles.iter().any(|p| {
+                instance.network == NetworkBinding::Profile { profile_id: p.id }
+                    && p.endpoint == target.endpoint
+            })
+        {
+            return Err(Error::Invalid("GUARD_CONFIG_CHANGED"));
+        }
+        // Observation already bound the native handle and parsed arguments.
+        // The native boundary only verifies that exact object is still alive.
+        drop(timing);
+        observed.stopped = Some(app_proxy_windows::process_stop::stop_observed_guard(
+            &observed.pinned,
+            target,
+        )?);
+        Ok(())
     }
 }

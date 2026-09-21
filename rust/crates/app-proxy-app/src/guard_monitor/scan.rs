@@ -1,5 +1,5 @@
-//! Coalesced, fair scans of registered instances. Event payloads never reach
-//! correction admission: the launch engine independently observes each target.
+//! Coalesced, fair discovery scans. A discovered main uses the same pinned,
+//! exact-process stop path as an ETW event before restart bookkeeping.
 use super::*;
 use crate::launch_engine::{GuardObservation, GuardScan};
 use app_proxy_core::launch::{LaunchAttempt, LaunchOrigin, LaunchPhase, LaunchRequest};
@@ -142,22 +142,22 @@ impl Monitor {
                 }
             }
             if let Some((id, result)) = completed {
-                // The same lock serializes listener revocation and admission.
-                // Once accepted, the durable launch checks configuration again.
-                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                if state.owner != Some(owner)
-                    || !state
-                        .authorization
-                        .as_ref()
-                        .is_some_and(|a| Arc::ptr_eq(a, authorization))
                 {
-                    continue;
+                    let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    if state.owner != Some(owner)
+                        || !state
+                            .authorization
+                            .as_ref()
+                            .is_some_and(|a| Arc::ptr_eq(a, authorization))
+                    {
+                        continue;
+                    }
                 }
                 let record = match result {
                     Ok(Ok(scan))
                         if scan.revision == manifest.revision && scan.instance_id == id =>
                     {
-                        self.apply_scan(scan).unwrap_or_else(|error| {
+                        self.apply_scan(scan).await.unwrap_or_else(|error| {
                             Record::new(
                                 manifest.revision,
                                 ScanPhase::Blocked,
@@ -171,6 +171,10 @@ impl Monitor {
                         Some("GUARD_SCAN_UNCONFIRMED".into()),
                     ),
                 };
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                if state.owner != Some(owner) {
+                    return;
+                }
                 schedule.finished(id, record.phase, Instant::now());
                 state.scans.insert(id, record);
             }
@@ -194,23 +198,37 @@ impl Monitor {
         }
     }
 
-    // Caller holds the current listener authorization gate. Kept synchronous so
-    // admission has no cancellation gap after that check.
-    pub(super) fn apply_scan(&self, scan: GuardScan) -> Result<Record> {
+    pub(super) async fn apply_scan(&self, scan: GuardScan) -> Result<Record> {
         if self.configuration.snapshot()?.revision != scan.revision {
             return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
         }
         let (phase, diagnostic) = match scan.observation {
             GuardObservation::Correction { target } => {
-                let attempt = self.launch.submit_guard(
-                    LaunchRequest {
-                        request_id: Uuid::new_v4(),
-                        instance_id: scan.instance_id,
-                        origin: LaunchOrigin::Guard,
-                    },
-                    scan.revision,
-                    target,
-                )?;
+                let hint = app_proxy_windows::etw::ProcessStartHint {
+                    pid: target.process.pid,
+                    creation_time: target.process.creation_time,
+                    event_time: target.process.creation_time as i64,
+                    image_name: String::new(),
+                };
+                let Some((current, pinned)) = self.launch.observe_guard_event(&hint).await? else {
+                    return Ok(Record::new(scan.revision, ScanPhase::Checking, None));
+                };
+                if current.revision != scan.revision || current.instance_id != scan.instance_id {
+                    return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
+                }
+                let attempt = self
+                    .launch
+                    .submit_guard_event(
+                        LaunchRequest {
+                            request_id: Uuid::new_v4(),
+                            instance_id: scan.instance_id,
+                            origin: LaunchOrigin::Guard,
+                        },
+                        scan.revision,
+                        target,
+                        pinned,
+                    )
+                    .await?;
                 (
                     ScanPhase::Checking,
                     Some(format!("GUARD_CORRECTION_PENDING: {}", attempt.id)),
@@ -236,6 +254,23 @@ impl Monitor {
             GuardObservation::Blocked { code } => (ScanPhase::Blocked, Some(code)),
             GuardObservation::Disabled {} => return Err(Error::Invalid("GUARD_CONFIG_DISABLED")),
             GuardObservation::Absent {} => {
+                // If the stop succeeded but saving its receipt failed, an empty
+                // journal is not success. Keep this runtime failure visible.
+                if let Some(previous) = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .scans
+                    .get(&scan.instance_id)
+                    && previous.revision == scan.revision
+                    && previous.diagnostic.as_deref() == Some("GUARD_STOPPED_RECORD_FAILED")
+                {
+                    return Ok(Record::new(
+                        scan.revision,
+                        ScanPhase::Blocked,
+                        previous.diagnostic.clone(),
+                    ));
+                }
                 // Preserve dispatched and non-transient failures across scans
                 // and restarts; only pre-stop process races can clear here.
                 let attempts = self.configuration.lock()?.launch_attempts()?;
@@ -466,6 +501,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_post_stop_record_is_not_hidden_by_an_absent_scan() {
+        let fixture = Fixture::guarded();
+        let monitor = fixture.monitor();
+        let manifest = monitor.configuration.snapshot().unwrap();
+        let id = manifest.instances[0].id;
+        monitor.state.lock().unwrap().scans.insert(
+            id,
+            Record::new(
+                manifest.revision,
+                ScanPhase::Blocked,
+                Some("GUARD_STOPPED_RECORD_FAILED".into()),
+            ),
+        );
+        let record = monitor
+            .apply_scan(GuardScan {
+                instance_id: id,
+                revision: manifest.revision,
+                observation: GuardObservation::Absent {},
+            })
+            .await
+            .unwrap();
+        assert!(record.phase == ScanPhase::Blocked);
+        assert_eq!(
+            record.diagnostic.as_deref(),
+            Some("GUARD_STOPPED_RECORD_FAILED")
+        );
+    }
+
+    #[tokio::test]
     async fn observation_adapter_preserves_original_and_compliant_clone() {
         for (isolated, matching) in [(false, false), (true, true)] {
             let fixture = Fixture::guarded();
@@ -480,7 +544,7 @@ mod tests {
             let child = fixture.external_guard_target(isolated, matching);
             fixture.events(1).await;
             let scan = monitor.launch.observe_guard(id).await.unwrap();
-            assert!(monitor.apply_scan(scan).unwrap().phase == ScanPhase::Ready);
+            assert!(monitor.apply_scan(scan).await.unwrap().phase == ScanPhase::Ready);
             assert!(process::is_running_exact(&child.0.identity).unwrap());
             assert!(
                 monitor
@@ -506,7 +570,7 @@ mod tests {
             scan.observation,
             GuardObservation::Correction { .. }
         ));
-        assert!(monitor.apply_scan(scan).unwrap().phase == ScanPhase::Checking);
+        assert!(monitor.apply_scan(scan).await.unwrap().phase == ScanPhase::Checking);
         let attempts = monitor
             .configuration
             .lock()
@@ -578,7 +642,7 @@ mod tests {
         assert!(!process::is_running_exact(&child.0.identity).unwrap());
         let scan = monitor.launch.observe_guard(id).await.unwrap();
         assert!(matches!(scan.observation, GuardObservation::Absent {}));
-        let record = monitor.apply_scan(scan).unwrap();
+        let record = monitor.apply_scan(scan).await.unwrap();
         assert!(record.phase == ScanPhase::Blocked);
         assert_eq!(
             record.diagnostic.as_deref(),
@@ -625,7 +689,7 @@ mod tests {
             store.commit(manifest.revision, manifest).unwrap();
         }
         assert!(matches!(
-            monitor.apply_scan(scan),
+            monitor.apply_scan(scan).await,
             Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"))
         ));
         assert!(process::is_running_exact(&child.0.identity).unwrap());

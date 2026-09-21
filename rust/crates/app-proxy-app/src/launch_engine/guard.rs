@@ -184,7 +184,14 @@ impl LaunchEngine {
         for observed in observed {
             match (observed.role, observed.relation) {
                 (_, InstanceRelation::Other) => {}
-                (ProcessRole::Auxiliary, InstanceRelation::Target) => auxiliary = true,
+                // Chromium gives original-mode helpers an explicit default data
+                // directory even when the main has none. Their unknown directory
+                // attribution must not veto an independently identified main.
+                // They still prevent an Absent claim, and are never stop targets;
+                // restart occupancy checks remain separate after the exact stop.
+                (ProcessRole::Auxiliary, InstanceRelation::Target | InstanceRelation::Unknown) => {
+                    auxiliary = true;
+                }
                 (ProcessRole::Main, InstanceRelation::Target) if main.is_none() => {
                     main = Some(observed)
                 }

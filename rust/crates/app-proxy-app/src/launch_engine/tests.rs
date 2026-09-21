@@ -972,10 +972,10 @@ async fn guard_event_keeps_pin_through_submission_and_rejects_changed_configurat
         }
         let mut request = fixture.request();
         request.origin = LaunchOrigin::Guard;
-        let admitted =
-            fixture
-                .engine
-                .submit_guard_event(request.clone(), scan.revision, target, pinned);
+        let admitted = fixture
+            .engine
+            .submit_guard_event(request.clone(), scan.revision, target, pinned)
+            .await;
         if edited {
             assert!(admitted.is_err());
             assert!(process::is_running_exact(&child.0.identity).unwrap());
@@ -992,9 +992,9 @@ async fn guard_event_keeps_pin_through_submission_and_rejects_changed_configurat
 }
 
 #[tokio::test]
-async fn guard_event_coalesces_progress_but_retains_cancel_and_config_stop_barriers() {
+async fn guard_event_stops_before_journal_and_preserves_config_stop_barrier() {
     use app_proxy_windows::etw::ProcessStartHint;
-    for cancel in [false, true] {
+    for disable in [false, true] {
         let fixture = Fixture::guarded();
         let child = fixture.external_guard_target(true, false);
         let hint = ProcessStartHint {
@@ -1016,31 +1016,287 @@ async fn guard_event_coalesces_progress_but_retains_cancel_and_config_stop_barri
         request.origin = LaunchOrigin::Guard;
         let id = request.request_id;
         let configuration = fixture.engine.configuration.clone();
+        let process_identity = child.0.identity.clone();
         *fixture.engine.before_guard_stop.lock().unwrap() = Some(Arc::new(move || {
             let mut store = configuration.lock().unwrap();
-            let attempt = store.launch_request(id).unwrap().unwrap();
-            assert_eq!(attempt.phase, LaunchPhase::Accepted {});
-            assert!(attempt.guard_correction.unwrap().stop_nonce.is_none());
-            if cancel {
-                store.request_launch_cancel(id).unwrap();
-            } else {
+            assert!(store.launch_request(id).unwrap().is_none());
+            assert!(process::is_running_exact(&process_identity).unwrap());
+            if disable {
                 let mut manifest = store.load().unwrap();
                 manifest.instances[0].guard.desired = Desired::Disabled;
                 store.commit(manifest.revision, manifest).unwrap();
             }
         }));
+        let admitted = fixture
+            .engine
+            .submit_guard_event(request, scan.revision, target, pinned)
+            .await;
+        if disable {
+            assert!(admitted.is_err());
+            assert!(process::is_running_exact(&child.0.identity).unwrap());
+            assert!(
+                fixture
+                    .engine
+                    .configuration
+                    .lock()
+                    .unwrap()
+                    .launch_request(id)
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            let admitted = admitted.unwrap();
+            assert!(admitted.guard_correction.unwrap().stop_confirmed);
+            assert!(!process::is_running_exact(&child.0.identity).unwrap());
+            let result = fixture.result(id).await;
+            assert!(matches!(result.phase, LaunchPhase::Failed { .. }));
+        }
+    }
+}
+
+#[tokio::test]
+async fn guard_event_stops_new_main_while_an_earlier_restart_is_pending() {
+    use app_proxy_windows::etw::ProcessStartHint;
+    let fixture = Fixture::guarded();
+    let first = fixture.external_guard_target(true, false);
+    let second = fixture.external_guard_target(true, false);
+    let mut pending = fixture.request();
+    pending.origin = LaunchOrigin::Guard;
+    let revision = fixture.engine.configuration.snapshot().unwrap().revision;
+    fixture
+        .engine
+        .configuration
+        .lock()
+        .unwrap()
+        .begin_guard_launch(
+            &pending,
+            fixture.engine.epoch,
+            revision,
+            GuardTarget {
+                process: first.0.identity.clone(),
+                endpoint: Endpoint {
+                    host: "127.0.0.1".parse().unwrap(),
+                    port: 44193,
+                },
+            },
+        )
+        .unwrap();
+    fixture
+        .engine
+        .active
+        .lock()
+        .unwrap()
+        .insert(pending.request_id);
+    let hint = ProcessStartHint {
+        pid: second.0.identity.pid,
+        creation_time: second.0.identity.creation_time,
+        event_time: 1,
+        image_name: "hint.exe".into(),
+    };
+    let (scan, pinned) = fixture
+        .engine
+        .observe_guard_event(&hint)
+        .await
+        .unwrap()
+        .expect("pending restart must not suppress a new unproxied main");
+    let GuardObservation::Correction { target } = scan.observation else {
+        panic!("not correction")
+    };
+    let mut request = fixture.request();
+    request.origin = LaunchOrigin::Guard;
+    let result = fixture
+        .engine
+        .submit_guard_event(request, revision, target, pinned)
+        .await
+        .unwrap();
+    assert_eq!(result.id, pending.request_id);
+    assert!(!process::is_running_exact(&second.0.identity).unwrap());
+    assert!(process::is_running_exact(&first.0.identity).unwrap());
+    assert_eq!(
+        fixture
+            .engine
+            .configuration
+            .lock()
+            .unwrap()
+            .launch_attempts()
+            .unwrap()
+            .len(),
+        1
+    );
+    fixture
+        .engine
+        .active
+        .lock()
+        .unwrap()
+        .remove(&pending.request_id);
+}
+
+#[tokio::test]
+async fn guard_event_stops_even_when_post_stop_journal_write_is_unavailable() {
+    use app_proxy_windows::etw::ProcessStartHint;
+    use std::os::windows::fs::OpenOptionsExt;
+    let fixture = Fixture::guarded();
+    let prior = fixture.request();
+    {
+        let mut store = fixture.engine.configuration.lock().unwrap();
+        store.begin_launch(&prior, fixture.engine.epoch).unwrap();
+        store
+            .advance_launch(
+                prior.request_id,
+                fixture.engine.epoch,
+                &LaunchPhase::Accepted {},
+                LaunchPhase::Cancelled {},
+            )
+            .unwrap();
+    }
+    let child = fixture.external_guard_target(true, false);
+    let hint = ProcessStartHint {
+        pid: child.0.identity.pid,
+        creation_time: child.0.identity.creation_time,
+        event_time: child.0.identity.creation_time as i64,
+        image_name: "hint.exe".into(),
+    };
+    let (scan, pinned) = fixture
+        .engine
+        .observe_guard_event(&hint)
+        .await
+        .unwrap()
+        .unwrap();
+    let GuardObservation::Correction { target } = scan.observation else {
+        panic!("not correction")
+    };
+    let path = fixture._root.path().join("store/state/launch.json");
+    let before = std::fs::read(&path).unwrap();
+    // Simulate a blocked journal replacement, without blocking configuration
+    // reads or the exact native process handle used for the urgent stop.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&path)
+        .unwrap();
+    let mut request = fixture.request();
+    request.origin = LaunchOrigin::Guard;
+    assert!(
         fixture
             .engine
             .submit_guard_event(request, scan.revision, target, pinned)
+            .await
+            .is_err()
+    );
+    assert!(!process::is_running_exact(&child.0.identity).unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(fixture.engine.active.lock().unwrap().is_empty());
+    drop(held);
+    // No saved request means recovery must not fabricate or replay a restart.
+    fixture
+        .engine
+        .configuration
+        .lock()
+        .unwrap()
+        .recover_launches(Uuid::new_v4())
+        .unwrap();
+    let attempts = fixture
+        .engine
+        .configuration
+        .lock()
+        .unwrap()
+        .launch_attempts()
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].id, prior.request_id);
+}
+
+#[tokio::test]
+async fn guard_event_stops_before_waiting_for_restart_resource() {
+    use app_proxy_windows::etw::ProcessStartHint;
+    let fixture = Fixture::guarded();
+    let child = fixture.external_guard_target(true, false);
+    let hint = ProcessStartHint {
+        pid: child.0.identity.pid,
+        creation_time: child.0.identity.creation_time,
+        event_time: child.0.identity.creation_time as i64,
+        image_name: "hint.exe".into(),
+    };
+    let (scan, pinned) = fixture
+        .engine
+        .observe_guard_event(&hint)
+        .await
+        .unwrap()
+        .unwrap();
+    let resource = InstanceResource::resolve(&pinned.application, pinned.data.as_ref()).unwrap();
+    let held = fixture.engine.resources.acquire(resource).unwrap();
+    let GuardObservation::Correction { target } = scan.observation else {
+        panic!("not correction")
+    };
+    let mut request = fixture.request();
+    request.origin = LaunchOrigin::Guard;
+    fixture
+        .engine
+        .submit_guard_event(request.clone(), scan.revision, target, pinned)
+        .await
+        .unwrap();
+    let result = fixture.result(request.request_id).await;
+    assert!(!process::is_running_exact(&child.0.identity).unwrap());
+    assert!(result.guard_correction.unwrap().stop_confirmed);
+    assert!(
+        matches!(result.phase, LaunchPhase::Failed { code } if code == "INSTANCE_RESOURCE_BUSY")
+    );
+    assert!(result.dispatch_id.is_none());
+    drop(held);
+}
+
+#[tokio::test]
+async fn original_guard_scan_keeps_exact_main_when_helpers_have_explicit_default_data() {
+    for process_type in ["renderer", "unexpected-role"] {
+        let fixture = Fixture::guarded();
+        fixture.edit(|m| m.instances[0].data = InstanceData::Original {});
+        let main = fixture.external_guard_target(false, false);
+        let directory = fixture._root.path().join("app-default-data");
+        std::fs::create_dir(&directory).unwrap();
+        let mut environment = app_proxy_core::EnvPatch::default();
+        environment.set.insert(
+            "APP_PROXY_ENGINE_EVENTS".into(),
+            fixture.events.to_str().unwrap().into(),
+        );
+        let helper = GuardChild(
+            process::spawn(SpawnSpec {
+                exe: fixture.exe.clone(),
+                args: vec![
+                    "--ignored".into(),
+                    "--exact".into(),
+                    "launch_engine::tests::engine_child".into(),
+                    "--skip".into(),
+                    format!("--type={process_type}").into(),
+                    "--skip".into(),
+                    format!("--user-data-dir={}", directory.display()).into(),
+                ],
+                cwd: fixture._root.path().into(),
+                environment,
+            })
+            .unwrap(),
+        );
+        let scan = fixture
+            .engine
+            .observe_guard(fixture.instance)
+            .await
             .unwrap();
-        let result = fixture.result(id).await;
-        let correction = result.guard_correction.unwrap();
-        assert!(correction.stop_nonce.is_none() && !correction.stop_confirmed);
-        assert!(process::is_running_exact(&child.0.identity).unwrap());
-        if cancel {
-            assert_eq!(result.phase, LaunchPhase::Cancelled {});
+        if process_type == "renderer" {
+            assert!(
+                matches!(scan.observation, GuardObservation::Correction { target }
+                if target.process == main.0.identity)
+            );
+            assert!(process::is_running_exact(&main.0.identity).unwrap());
+            assert!(process::is_running_exact(&helper.0.identity).unwrap());
+            drop(main);
+            assert!(
+                matches!(fixture.engine.observe_guard(fixture.instance).await.unwrap().observation,
+                GuardObservation::Blocked { code } if code == "GUARD_AUXILIARY_STILL_RUNNING")
+            );
         } else {
-            assert!(matches!(result.phase, LaunchPhase::Failed { .. }));
+            assert!(
+                matches!(scan.observation, GuardObservation::Blocked { code }
+                if code == "INSTANCE_PROCESS_UNKNOWN")
+            );
         }
     }
 }

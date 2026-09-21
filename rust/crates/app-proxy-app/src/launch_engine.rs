@@ -130,35 +130,85 @@ impl LaunchEngine {
         request: LaunchRequest,
         expected_revision: Option<u64>,
         guard_target: Option<GuardTarget>,
-        pinned: Option<event::ObservedTarget>,
+        mut pinned: Option<event::ObservedTarget>,
     ) -> Result<LaunchAttempt> {
+        #[cfg(test)]
+        if pinned.is_some()
+            && let Some(hook) = self.before_guard_stop.lock().unwrap().clone()
+        {
+            hook();
+        }
+        let gate_timing =
+            app_proxy_windows::diagnostic_timing::Span::new("launch.admission_gate", || {
+                request.request_id.to_string()
+            });
         let mut active = self
             .active
             .lock()
             .map_err(|_| Error::Invalid("LAUNCH_OWNER_FAILED"))?;
         let mut store = self.configuration.lock()?;
-        let admit = |store: &mut app_proxy_windows::store::Store| match &guard_target {
-            Some(target) => store.begin_guard_launch(
-                &request,
-                self.epoch,
-                expected_revision.unwrap(),
-                target.clone(),
-            ),
-            None => store.begin_launch_at_revision(&request, self.epoch, expected_revision),
-        };
-        if store.launch_request(request.request_id)?.is_some() {
-            return Ok(admit(&mut store)?.attempt);
-        }
-        store.recover_config_requests()?;
-        for attempt in store.launch_attempts()? {
-            if attempt.instance_id == request.instance_id && !active.contains(&attempt.id) {
-                self.reconcile(&mut store, &attempt)?;
+        drop(gate_timing);
+        if let (Some(observed), Some(target)) = (pinned.as_mut(), guard_target.as_ref()) {
+            if active.len() >= 32 {
+                return Err(Error::Invalid("LAUNCH_OPERATION_LIMIT"));
             }
+            self.stop_event_before_admission(&store, &request, target, observed)?;
         }
-        if active.len() >= 32 && store.launch_request(request.request_id)?.is_none() {
-            return Err(Error::Invalid("LAUNCH_OPERATION_LIMIT"));
-        }
-        if store.launch_request(request.request_id)?.is_none() {
+        // Everything below is restart bookkeeping and runs after an event stop.
+        let already_stopped = pinned.as_ref().is_some_and(|p| p.stopped.is_some());
+        let result = (|| {
+            let _admit_timing =
+                app_proxy_windows::diagnostic_timing::Span::new("launch.bookkeeping", || {
+                    request.request_id.to_string()
+                });
+            if already_stopped
+                && let Some(existing) = store.launch_attempts()?.into_iter().find(|a| {
+                    a.instance_id == request.instance_id
+                        && a.reserves_instance()
+                        && (active.contains(&a.id)
+                            || matches!(&a.phase, LaunchPhase::Confirmed { process } if process::is_running_exact(process).unwrap_or(false)))
+                })
+            {
+                // Stop each newly observed unproxied main immediately; keep
+                // the one restart/session already owned by this coordinator.
+                app_proxy_windows::diagnostic_timing::mark("event.stop_coalesced", || {
+                    format!("{}:{}", guard_target.as_ref().unwrap().process.pid, existing.id)
+                });
+                return Ok(existing);
+            }
+            let admit = |store: &mut app_proxy_windows::store::Store| match &guard_target {
+                Some(_) if pinned.as_ref().and_then(|p| p.stopped.as_ref()).is_some() => store
+                    .begin_stopped_guard_launch(
+                        &request,
+                        self.epoch,
+                        expected_revision.unwrap(),
+                        pinned.as_ref().unwrap().stopped.as_ref().unwrap(),
+                    ),
+                Some(target) => store.begin_guard_launch(
+                    &request,
+                    self.epoch,
+                    expected_revision.unwrap(),
+                    target.clone(),
+                ),
+                None => store.begin_launch_at_revision(&request, self.epoch, expected_revision),
+            };
+            if store.launch_request(request.request_id)?.is_some() {
+                return Ok(admit(&mut store)?.attempt);
+            }
+            let recover_timing =
+                app_proxy_windows::diagnostic_timing::Span::new("launch.recover_history", || {
+                    request.request_id.to_string()
+                });
+            store.recover_config_requests()?;
+            for attempt in store.launch_attempts()? {
+                if attempt.instance_id == request.instance_id && !active.contains(&attempt.id) {
+                    self.reconcile(&mut store, &attempt)?;
+                }
+            }
+            drop(recover_timing);
+            if active.len() >= 32 {
+                return Err(Error::Invalid("LAUNCH_OPERATION_LIMIT"));
+            }
             for prior in store.launch_attempts()? {
                 if prior.instance_id == request.instance_id
                     && matches!(prior.phase, LaunchPhase::Confirmed { .. })
@@ -183,23 +233,38 @@ impl LaunchEngine {
                     }
                 }
             }
-        }
-        let admission = admit(&mut store)?;
-        if admission.is_new {
-            active.insert(admission.attempt.id);
-            let mut job = Job {
-                engine: self.clone(),
-                id: admission.attempt.id,
-                pinned,
-            };
-            tokio::spawn(async move {
-                // A panic/drop leaves a durable stage. Status/recovery never
-                // interprets it as proof that creation did not happen.
-                let pinned = job.pinned.take();
-                job.engine.execute(job.id, pinned).await;
-            });
-        }
-        Ok(admission.attempt)
+            let record_timing =
+                app_proxy_windows::diagnostic_timing::Span::new("launch.record", || {
+                    request.request_id.to_string()
+                });
+            let admission = admit(&mut store)?;
+            drop(record_timing);
+            if admission.is_new {
+                active.insert(admission.attempt.id);
+                let mut job = Job {
+                    engine: self.clone(),
+                    id: admission.attempt.id,
+                    pinned,
+                };
+                tokio::spawn(async move {
+                    // A panic/drop leaves a durable stage. Status/recovery never
+                    // interprets it as proof that creation did not happen.
+                    let pinned = job.pinned.take();
+                    job.engine.execute(job.id, pinned).await;
+                });
+            }
+            Ok(admission.attempt)
+        })();
+        result.map_err(|error| {
+            if already_stopped {
+                app_proxy_windows::diagnostic_timing::mark("event.post_stop_record_failed", || {
+                    format!("{}:{error}", request.request_id)
+                });
+                Error::Invalid("GUARD_STOPPED_RECORD_FAILED")
+            } else {
+                error
+            }
+        })
     }
 
     pub fn status(&self, request: Uuid) -> Result<Option<LaunchAttempt>> {
@@ -411,8 +476,8 @@ impl LaunchEngine {
         let timing =
             app_proxy_windows::diagnostic_timing::Span::new("launch.prepare", || id.to_string());
         let from_event = pinned.is_some();
-        // Event preparation is already pinned. Its two progress-only states are
-        // folded into the durable stop intent; Accepted still recovers safely.
+        // Event stops are already confirmed and saved at CheckingInstance.
+        // Only their restart preparation remains; never stop the target again.
         if !from_event {
             self.advance(id, LaunchPhase::Accepted {}, LaunchPhase::Resolving {})?;
         }
@@ -426,13 +491,18 @@ impl LaunchEngine {
         };
         let (app, instance) = entries(&snapshot, instance_id)?;
         let digest = dependency_digest(&snapshot, instance_id)?;
-        let (application, data, pinned) = if let Some(observed) = pinned {
+        let (application, data, pinned, stopped) = if let Some(observed) = pinned {
             if observed.instance_id != instance_id || observed.revision != snapshot.revision {
                 return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
             }
             // Revalidate registration while reusing held image/data pins.
             observed.application.verify_current()?;
-            (observed.application, observed.data, Some(observed.pinned))
+            (
+                observed.application,
+                observed.data,
+                Some(observed.pinned),
+                observed.stopped,
+            )
         } else {
             let locator = app.locator.clone();
             let resolving =
@@ -456,7 +526,7 @@ impl LaunchEngine {
                 LaunchPhase::Resolving {},
                 LaunchPhase::CheckingInstance {},
             )?;
-            (application, data, None)
+            (application, data, None, None)
         };
         let resources =
             app_proxy_windows::diagnostic_timing::Span::new("launch.resources", || id.to_string());
@@ -495,6 +565,12 @@ impl LaunchEngine {
         }
         acquired.reserve(owner)?;
         *reservation = Some(acquired);
+        if let Some(receipt) = stopped.as_ref() {
+            reservation
+                .as_mut()
+                .unwrap()
+                .record_observed_guard_stop(owner, receipt)?;
+        }
         drop(resources);
         drop(timing);
         let attempt = self.configuration.lock()?.launch_request(id)?.unwrap();
@@ -502,20 +578,21 @@ impl LaunchEngine {
         // the application. Only Guard must establish exclusivity around a stop
         // and correction; request/owned-session deduplication remains separate.
         let guard_launch = attempt.origin == LaunchOrigin::Guard;
-        let (application, data) = if let Some(correction) = attempt.guard_correction {
-            self.correct_guard(
-                id,
-                application,
-                data,
-                app.template_ref,
-                (&correction.target, pinned),
-                reservation,
-            )
-            .await?
-        } else {
-            (application, data)
-        };
-        if guard_launch {
+        let (application, data) =
+            if let Some(correction) = attempt.guard_correction.filter(|c| !c.stop_confirmed) {
+                self.correct_guard(
+                    id,
+                    application,
+                    data,
+                    app.template_ref,
+                    (&correction.target, pinned),
+                    reservation,
+                )
+                .await?
+            } else {
+                (application, data)
+            };
+        if guard_launch && !from_event {
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     match check_occupancy(&application, data.as_ref(), app.template_ref).await {
@@ -824,6 +901,8 @@ fn spawn_package(
             .cancel_requested)
     };
     let already_cancelled = cancelled().map_err(unknown)?;
+    let mut activations = 0;
+    let mut last_activation = std::time::Instant::now();
     if !already_cancelled {
         configuration
             .lock()
@@ -837,11 +916,22 @@ fn spawn_package(
             .map_err(unknown)?;
         // Even an activation error may have started a helper. Only the gate and
         // its durable receipt can resolve that uncertainty.
-        let _ = app_proxy_windows::package::activate_launch(
+        let activation = app_proxy_windows::package::activate_launch(
             application.package().unwrap(),
             &helper,
             &ticket.request_path(),
         );
+        app_proxy_windows::diagnostic_timing::mark("package.activation", || {
+            format!(
+                "{id}:{}",
+                activation
+                    .as_ref()
+                    .map(|_| "accepted".to_owned())
+                    .unwrap_or_else(|e| e.to_string())
+            )
+        });
+        activations = 1;
+        last_activation = std::time::Instant::now();
     }
     loop {
         let ending = cancelled().map_err(unknown)? || started.elapsed() >= Duration::from_secs(22);
@@ -858,8 +948,34 @@ fn spawn_package(
                     error: Error::Invalid("PACKAGE_APPLICATION_NOT_CREATED"),
                 });
             }
-            Ok(PackageOutcome::Pending | PackageOutcome::Indeterminate)
-            | Err(Error::Invalid("PACKAGE_REQUEST_BUSY"))
+            Ok(PackageOutcome::Pending) if !ending => {
+                // Desktop-package activation can fail transiently, including
+                // while the package is updating. Retry the SAME one-use
+                // ticket, never a fresh launch; its gate prevents duplication.
+                // Never retry Consuming/unknown or after cancellation/deadline.
+                if activations < 3
+                    && started.elapsed() < Duration::from_secs(10)
+                    && last_activation.elapsed() >= Duration::from_secs(1)
+                {
+                    let activation = app_proxy_windows::package::activate_launch(
+                        application.package().unwrap(),
+                        &helper,
+                        &ticket.request_path(),
+                    );
+                    app_proxy_windows::diagnostic_timing::mark("package.activation_retry", || {
+                        format!(
+                            "{id}:{}",
+                            activation
+                                .as_ref()
+                                .map(|_| "accepted".to_owned())
+                                .unwrap_or_else(|e| e.to_string())
+                        )
+                    });
+                    activations += 1;
+                    last_activation = std::time::Instant::now();
+                }
+            }
+            Ok(PackageOutcome::Indeterminate) | Err(Error::Invalid("PACKAGE_REQUEST_BUSY"))
                 if !ending => {}
             Ok(_) | Err(Error::Invalid("PACKAGE_REQUEST_BUSY")) => {
                 return Err(unknown(Error::Invalid("PACKAGE_RESULT_UNKNOWN")));

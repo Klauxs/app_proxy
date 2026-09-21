@@ -132,6 +132,15 @@ fn bridge_script<T: serde::de::DeserializeOwned>(
     }
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
     if let Some(code) = value.get("error").and_then(|v| v.as_str()) {
+        crate::diagnostic_timing::mark("package.bridge_error", || {
+            format!(
+                "{code}:{}",
+                value
+                    .get("system_code")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+            )
+        });
         return Err(Error::Invalid(match code {
             "APP_NOT_INSTALLED" => "APP_NOT_INSTALLED",
             "AMBIGUOUS_PACKAGE" => "AMBIGUOUS_PACKAGE",

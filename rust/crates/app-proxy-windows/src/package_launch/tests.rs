@@ -119,6 +119,44 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn repeated_activation_helpers_race_on_one_ticket_without_duplicate_creation() {
+    let fixture = Fixture::new(0);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let threads: Vec<_> = (0..2)
+        .map(|_| {
+            let barrier = barrier.clone();
+            let path = fixture.ticket.request_path();
+            let family = fixture.ticket.request.family.clone();
+            let full = fixture.ticket.request.full_name.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                consume(&path, Some(&family), Some(&full), |_, _| Ok(()))
+            })
+        })
+        .collect();
+    let mut successes = 0;
+    for thread in threads {
+        match thread.join().unwrap() {
+            Ok(()) => successes += 1,
+            Err(Error::Invalid("PACKAGE_REQUEST_BUSY" | "PACKAGE_REQUEST_ALREADY_CONSUMED")) => {}
+            other => panic!("unexpected helper result: {other:?}"),
+        }
+    }
+    assert_eq!(successes, 1);
+    let PackageOutcome::Created(first) = fixture.ticket.outcome().unwrap() else {
+        panic!("not created")
+    };
+    assert!(matches!(
+        fixture.consume(),
+        Err(Error::Invalid("PACKAGE_REQUEST_ALREADY_CONSUMED"))
+    ));
+    let PackageOutcome::Created(again) = fixture.ticket.outcome().unwrap() else {
+        panic!("not created")
+    };
+    assert_eq!(first, again);
+}
+
+#[test]
 fn revoked_request_cannot_be_consumed_even_after_reopen() {
     let fixture = Fixture::new(0);
     let PackageOutcome::NotCreated(proof) = fixture.ticket.revoke().unwrap() else {

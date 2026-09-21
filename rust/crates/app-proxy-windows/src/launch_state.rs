@@ -106,7 +106,7 @@ impl Store {
         epoch: Uuid,
         expected_revision: Option<u64>,
     ) -> Result<LaunchAdmission> {
-        self.begin_launch_checked(request, epoch, expected_revision, None)
+        self.begin_launch_checked(request, epoch, expected_revision, None, None)
     }
 
     pub fn begin_guard_launch(
@@ -119,7 +119,28 @@ impl Store {
         if request.origin != LaunchOrigin::Guard {
             return Err(Error::Invalid("INVALID_GUARD_REQUEST"));
         }
-        self.begin_launch_checked(request, epoch, Some(revision), Some(target))
+        self.begin_launch_checked(request, epoch, Some(revision), Some(target), None)
+    }
+
+    /// Save the confirmed stop and the restart request atomically, after the
+    /// latency-critical native stop. Recovery never replays an unrecorded stop.
+    pub fn begin_stopped_guard_launch(
+        &mut self,
+        request: &LaunchRequest,
+        epoch: Uuid,
+        revision: u64,
+        receipt: &crate::process_stop::ObservedGuardStop,
+    ) -> Result<LaunchAdmission> {
+        if request.origin != LaunchOrigin::Guard {
+            return Err(Error::Invalid("INVALID_GUARD_REQUEST"));
+        }
+        self.begin_launch_checked(
+            request,
+            epoch,
+            Some(revision),
+            Some(receipt.target.clone()),
+            Some(receipt),
+        )
     }
 
     fn begin_launch_checked(
@@ -128,6 +149,7 @@ impl Store {
         epoch: Uuid,
         expected_revision: Option<u64>,
         guard_target: Option<GuardTarget>,
+        stopped: Option<&crate::process_stop::ObservedGuardStop>,
     ) -> Result<LaunchAdmission> {
         if request.request_id.is_nil() || request.instance_id.is_nil() || epoch.is_nil() {
             return Err(Error::Invalid("INVALID_LAUNCH_REQUEST"));
@@ -203,9 +225,9 @@ impl Store {
             guard_correction: guard_target.clone().map(|target| {
                 Box::new(GuardCorrection {
                     target,
-                    stop_started_at: None,
-                    stop_nonce: None,
-                    stop_confirmed: false,
+                    stop_started_at: stopped.map(|s| s.started_at),
+                    stop_nonce: stopped.map(|s| s.nonce),
+                    stop_confirmed: stopped.is_some(),
                 })
             }),
             package_request: None,
@@ -213,8 +235,12 @@ impl Store {
             instance_id: request.instance_id,
             origin: request.origin,
             epoch,
-            phase: LaunchPhase::Accepted {},
-            accepted_at: now,
+            phase: if stopped.is_some() {
+                LaunchPhase::CheckingInstance {}
+            } else {
+                LaunchPhase::Accepted {}
+            },
+            accepted_at: stopped.map_or(now, |s| s.started_at),
             finished_at: None,
             cancel_requested: false,
             binding: None,

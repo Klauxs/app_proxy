@@ -409,8 +409,32 @@ impl ResourceReservation {
         dispatch: &crate::launch_state::GuardStopDispatch,
         at: u64,
     ) -> Result<()> {
-        let mut claim = self.require_owner(dispatch.owner)?.clone();
-        let target = &dispatch.target.process;
+        self.publish_guard_stop_record(dispatch.owner, &dispatch.target.process, dispatch.nonce, at)
+    }
+
+    /// Restart throttling and resource bookkeeping happen after an event stop.
+    /// Failure prevents restart; it cannot undo or repeat the confirmed stop.
+    pub fn record_observed_guard_stop(
+        &mut self,
+        owner: ResourceOwner,
+        receipt: &crate::process_stop::ObservedGuardStop,
+    ) -> Result<()> {
+        self.publish_guard_stop_record(
+            owner,
+            &receipt.target.process,
+            receipt.nonce,
+            receipt.started_at,
+        )
+    }
+
+    fn publish_guard_stop_record(
+        &mut self,
+        owner: ResourceOwner,
+        target: &app_proxy_core::ProcessIdentity,
+        nonce: Uuid,
+        at: u64,
+    ) -> Result<()> {
+        let mut claim = self.require_owner(owner)?.clone();
         if claim.phase != (ResourcePhase::Reserved {})
             || claim.guard_dispatch_id.is_some()
             || target.image_file != claim.image
@@ -436,7 +460,7 @@ impl ResourceReservation {
             return Err(Error::Invalid("GUARD_RATE_LIMIT"));
         }
         claim.guard_stops.push(at);
-        claim.guard_dispatch_id = Some(dispatch.nonce);
+        claim.guard_dispatch_id = Some(nonce);
         self.write(claim)
     }
 

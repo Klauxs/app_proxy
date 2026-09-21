@@ -41,32 +41,42 @@ impl Monitor {
                     break;
                 };
                 let result = self.launch.observe_guard_event(&hint).await;
-                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                if state.owner != Some(owner)
-                    || !state
-                        .authorization
-                        .as_ref()
-                        .is_some_and(|active| Arc::ptr_eq(active, &authorization))
                 {
-                    continue;
+                    let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    if state.owner != Some(owner)
+                        || !state
+                            .authorization
+                            .as_ref()
+                            .is_some_and(|active| Arc::ptr_eq(active, &authorization))
+                    {
+                        continue;
+                    }
                 }
                 match result {
                     Ok(Some((scan, pinned))) => {
                         let GuardObservation::Correction { target } = scan.observation else {
                             continue;
                         };
-                        let result = self.launch.submit_guard_event(
-                            LaunchRequest {
-                                request_id: Uuid::new_v4(),
-                                instance_id: scan.instance_id,
-                                origin: LaunchOrigin::Guard,
-                            },
-                            scan.revision,
-                            target,
-                            pinned,
-                        );
+                        let result = self
+                            .launch
+                            .submit_guard_event(
+                                LaunchRequest {
+                                    request_id: Uuid::new_v4(),
+                                    instance_id: scan.instance_id,
+                                    origin: LaunchOrigin::Guard,
+                                },
+                                scan.revision,
+                                target,
+                                pinned,
+                            )
+                            .await;
                         match result {
                             Ok(attempt) => {
+                                let mut state =
+                                    self.state.lock().unwrap_or_else(|p| p.into_inner());
+                                if state.owner != Some(owner) {
+                                    return;
+                                }
                                 state.scans.insert(
                                     scan.instance_id,
                                     scan::Record::new(
@@ -76,10 +86,36 @@ impl Monitor {
                                     ),
                                 );
                             }
-                            Err(_) => self.scan_requested.notify_one(),
+                            Err(error) => {
+                                if matches!(error, Error::Invalid("GUARD_STOPPED_RECORD_FAILED")) {
+                                    let mut state =
+                                        self.state.lock().unwrap_or_else(|p| p.into_inner());
+                                    if state.owner == Some(owner) {
+                                        state.scans.insert(
+                                            scan.instance_id,
+                                            scan::Record::new(
+                                                scan.revision,
+                                                scan::ScanPhase::Blocked,
+                                                Some(error.to_string()),
+                                            ),
+                                        );
+                                    }
+                                }
+                                app_proxy_windows::diagnostic_timing::mark(
+                                    "event.admission_failed",
+                                    || format!("{}:{error}", hint.pid),
+                                );
+                                self.scan_requested.notify_one();
+                            }
                         }
                     }
-                    Err(_) => self.scan_requested.notify_one(),
+                    Err(error) => {
+                        app_proxy_windows::diagnostic_timing::mark(
+                            "event.inspection_failed",
+                            || format!("{}:{error}", hint.pid),
+                        );
+                        self.scan_requested.notify_one();
+                    }
                     Ok(None) => {}
                 }
             }

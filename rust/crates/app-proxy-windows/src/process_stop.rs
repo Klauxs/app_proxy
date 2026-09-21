@@ -16,6 +16,38 @@ pub enum StopOutcome {
     StillRunning,
 }
 
+/// In-memory evidence of an observed, exact stop. Not deserializable: a saved
+/// record cannot authorize stopping another process or fabricate an exit.
+pub struct ObservedGuardStop {
+    pub(crate) target: app_proxy_core::launch::GuardTarget,
+    pub(crate) started_at: u64,
+    pub(crate) nonce: uuid::Uuid,
+}
+
+/// The caller establishes current Guard policy and main-process attribution.
+/// Stop on the retained handle before doing any journal or restart preparation.
+/// A crash before the caller saves this receipt does not replay the restart.
+pub fn stop_observed_guard(
+    process: &crate::native_process::PinnedProcess,
+    target: &app_proxy_core::launch::GuardTarget,
+) -> Result<ObservedGuardStop> {
+    let _timing =
+        crate::diagnostic_timing::Span::new("stop.total", || target.process.pid.to_string());
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Error::Invalid("CLOCK_BEFORE_EPOCH"))?
+        .as_secs();
+    let outcome = process.terminate(&target.process)?;
+    if !matches!(outcome, StopOutcome::Exited | StopOutcome::Forced) {
+        return Err(Error::Invalid("GUARD_TARGET_EXITED_BEFORE_STOP"));
+    }
+    Ok(ObservedGuardStop {
+        target: target.clone(),
+        started_at,
+        nonce: uuid::Uuid::new_v4(),
+    })
+}
+
 pub fn stop_guarded_pinned(
     permit: crate::instance_resource::AuthorizedGuardStop<'_>,
     process: &crate::native_process::PinnedProcess,
