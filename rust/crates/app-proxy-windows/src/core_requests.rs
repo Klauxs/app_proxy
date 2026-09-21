@@ -92,7 +92,9 @@ impl Store {
         {
             return Err(Error::Invalid("CORE_REQUEST_OWNER_CHANGED"));
         }
-        validate_outcome(&outcome, &self.load()?.owner_sid)?;
+        outcome
+            .validate(&self.load()?.owner_sid)
+            .map_err(|e| Error::Invalid(e.0))?;
         record.phase = CoreRequestPhase::Complete {
             outcome,
             completed_at: now()?.max(record.accepted_at),
@@ -183,7 +185,9 @@ impl Store {
     }
 
     fn resolve_core_record(&mut self, mut record: Record, outcome: CoreOutcome) -> Result<()> {
-        validate_outcome(&outcome, &self.load()?.owner_sid)?;
+        outcome
+            .validate(&self.load()?.owner_sid)
+            .map_err(|e| Error::Invalid(e.0))?;
         match &record.phase {
             CoreRequestPhase::Pending { .. }
             | CoreRequestPhase::Complete {
@@ -303,7 +307,9 @@ impl Store {
                 if *completed_at < record.accepted_at {
                     return Err(Error::Invalid("INVALID_CORE_REQUEST_RECORD"));
                 }
-                validate_outcome(outcome, &manifest.owner_sid)?;
+                outcome
+                    .validate(&manifest.owner_sid)
+                    .map_err(|e| Error::Invalid(e.0))?;
             }
             _ => {}
         }
@@ -354,140 +360,6 @@ impl Store {
     }
 }
 
-fn validate_outcome(outcome: &CoreOutcome, owner: &str) -> Result<()> {
-    match outcome {
-        CoreOutcome::Prepared { impact }
-            if impact.plan_id.is_nil()
-                || impact.manifest_revision == 0
-                || impact.previous_generation.is_nil()
-                || impact.changed_profile.is_nil()
-                || impact.added_profiles.iter().any(Uuid::is_nil)
-                || impact
-                    .added_profiles
-                    .iter()
-                    .any(|p| impact.affected_profiles.contains(p))
-                || impact.removed_profiles.iter().any(|p| {
-                    p.is_nil()
-                        || !impact.affected_profiles.contains(p)
-                        || impact.added_profiles.contains(p)
-                })
-                || impact.affected_profiles.iter().any(Uuid::is_nil)
-                || impact.bound_instances.iter().any(Uuid::is_nil)
-                || !(impact.affected_profiles.contains(&impact.changed_profile)
-                    || impact.added_profiles.contains(&impact.changed_profile)) =>
-        {
-            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
-        }
-        CoreOutcome::ProfileRemoved {
-            profile_id,
-            revision,
-        } if profile_id.is_nil() || *revision == 0 => {
-            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
-        }
-        CoreOutcome::Reconciled {
-            generation,
-            process,
-        } if generation.is_nil()
-            || process.as_ref().is_some_and(|p| {
-                p.pid == 0
-                    || p.creation_time == 0
-                    || p.user_sid != owner
-                    || !p.image_path.is_absolute()
-            }) =>
-        {
-            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
-        }
-        CoreOutcome::Reconfigured { revision: 0, .. } => {
-            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
-        }
-        CoreOutcome::CancelRequested { request_id } if request_id.is_nil() => {
-            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
-        }
-        CoreOutcome::Installed { version } if !crate::singbox_binary::valid_version(version) => {
-            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
-        }
-        CoreOutcome::Ready {
-            generation,
-            process,
-        }
-        | CoreOutcome::Reconfigured {
-            generation,
-            process,
-            ..
-        } if generation.is_nil()
-            || process.pid == 0
-            || process.creation_time == 0
-            || process.user_sid != owner
-            || !process.image_path.is_absolute() =>
-        {
-            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
-        }
-        CoreOutcome::Failed { code } | CoreOutcome::Indeterminate { code }
-            if !valid_failure_code(code) =>
-        {
-            return Err(Error::Invalid("INVALID_CORE_REQUEST_OUTCOME"));
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn valid_failure_code(value: &str) -> bool {
-    let mut parts = value.split("; ");
-    let code = parts.next().unwrap_or_default();
-    if code.is_empty()
-        || code.len() > 96
-        || !code.bytes().all(|c| c.is_ascii_uppercase() || c == b'_')
-    {
-        return false;
-    }
-    let details: Vec<_> = parts.collect();
-    if details.is_empty() {
-        return true;
-    }
-    if details.len() != 6 || value.len() > 512 {
-        return false;
-    }
-    let Some(phase) = details[0].strip_prefix("phase=") else {
-        return false;
-    };
-    if !matches!(
-        phase,
-        "checking_existing" | "downloading" | "verifying" | "checking_binary" | "publishing"
-    ) {
-        return false;
-    }
-    for (field, prefix) in [(details[1], "operation="), (details[3], "io_kind=")] {
-        let Some(name) = field.strip_prefix(prefix) else {
-            return false;
-        };
-        if name.is_empty()
-            || name.len() > 64
-            || !name
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'(' | b')'))
-        {
-            return false;
-        }
-    }
-    let Some(win32) = details[2].strip_prefix("win32=") else {
-        return false;
-    };
-    if win32 != "none" && win32.parse::<u32>().is_err() {
-        return false;
-    }
-    [
-        (details[4], "downloaded_bytes="),
-        (details[5], "elapsed_ms="),
-    ]
-    .iter()
-    .all(|(field, prefix)| {
-        field.strip_prefix(prefix).is_some_and(|v| {
-            !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit()) && v.parse::<u128>().is_ok()
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,26 +367,6 @@ mod tests {
         model::*,
         registry::{ConfigAction, ConfigRequest},
     };
-
-    #[test]
-    fn installation_diagnostics_remain_bounded_and_reject_arbitrary_text() {
-        let valid = "STORE_ACCESS_DENIED; phase=checking_existing; operation=GetTokenInformation(elevation); win32=5; io_kind=PermissionDenied; downloaded_bytes=0; elapsed_ms=10";
-        assert!(valid_failure_code(valid));
-        assert!(valid_failure_code("CORE_INSTALL_IO_FAILED"));
-        for invalid in [
-            valid.replace("checking_existing", "unknown"),
-            valid.replace("win32=5", "win32=broken"),
-            valid.replace("elapsed_ms=10", "elapsed_ms=-1"),
-            valid.replace(
-                "GetTokenInformation(elevation)",
-                "https://private?token=secret",
-            ),
-            format!("{valid}\nsecret"),
-            format!("{valid}; extra=secret"),
-        ] {
-            assert!(!valid_failure_code(&invalid));
-        }
-    }
 
     fn config(id: Uuid) -> ConfigRequest {
         ConfigRequest {

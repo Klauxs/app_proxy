@@ -197,25 +197,7 @@ fn candidates(root: &Path) -> Result<Vec<(PathBuf, Source)>> {
     Ok(found)
 }
 
-pub(crate) fn valid_version(value: &str) -> bool {
-    version_parts(value).is_some()
-}
-
-fn version_parts(value: &str) -> Option<[u64; 3]> {
-    if value.len() > 32 {
-        return None;
-    }
-    let mut parts = value.split('.');
-    let mut result = [0; 3];
-    for number in &mut result {
-        let part = parts.next()?;
-        if !part.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        *number = part.parse().ok()?;
-    }
-    parts.next().is_none().then_some(result)
-}
+use app_proxy_core::singbox::{valid_version, version_parts};
 
 fn parse_version(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;

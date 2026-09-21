@@ -127,3 +127,24 @@ pub fn compile(
     }
     Ok(CoreConfig { bytes, profiles })
 }
+
+/// Stable `major.minor.patch` only.
+pub fn valid_version(value: &str) -> bool {
+    version_parts(value).is_some()
+}
+
+pub fn version_parts(value: &str) -> Option<[u64; 3]> {
+    if value.len() > 32 {
+        return None;
+    }
+    let mut parts = value.split('.');
+    let mut result = [0; 3];
+    for number in &mut result {
+        let part = parts.next()?;
+        if !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *number = part.parse().ok()?;
+    }
+    parts.next().is_none().then_some(result)
+}
