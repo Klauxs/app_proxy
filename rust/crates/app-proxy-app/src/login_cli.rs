@@ -52,11 +52,7 @@ pub(crate) fn print_view(view: &View) {
 }
 fn print_outcome(outcome: &Outcome, json: bool) -> Result<(), Failure> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(outcome)
-                .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
-        );
+        crate::output::json(outcome)?;
     } else {
         println!("登录入口请求：{}。", outcome.request_id);
         match &outcome.status {
@@ -127,11 +123,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 .await
                 .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&view)
-                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
-                );
+                crate::output::json(&view)?;
             } else {
                 print_view(&view);
             }

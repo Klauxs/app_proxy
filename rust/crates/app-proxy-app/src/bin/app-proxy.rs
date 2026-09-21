@@ -122,6 +122,15 @@ fn print(value: &impl serde::Serialize) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+/// Every command that talks to the coordinator runs on the same small runtime.
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> std::io::Result<T> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(future))
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     use app_proxy_windows::{identity, package};
     identity::assert_ordinary_user()?;
@@ -135,114 +144,58 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     app_proxy_windows::setup::ensure_available()?;
+    // Resolved only by the commands that need it: the default location is
+    // created on first use, and read-only commands must not create it.
+    let explicit_home = cli.home;
+    let home = move || {
+        explicit_home
+            .map(Ok)
+            .unwrap_or_else(app_proxy_app::coordinator::default_home)
+    };
     match cli.command.unwrap_or(Commands::Menu) {
         Commands::SetupPrepare => unreachable!(),
         Commands::SetupVerify => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            runtime.block_on(app_proxy_app::setup::verify(root))?;
+            let root = home()?;
+            block_on(app_proxy_app::setup::verify(root))??;
             Ok(())
         }
         Commands::Shortcut { command, json } => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            runtime.block_on(app_proxy_app::shortcut_cli::run(root, command, json))?;
+            let root = home()?;
+            block_on(app_proxy_app::shortcut_cli::run(root, command, json))??;
             Ok(())
         }
         Commands::Menu => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            runtime.block_on(app_proxy_app::menu::run(root))?;
+            let root = home()?;
+            block_on(app_proxy_app::menu::run(root))??;
             Ok(())
         }
         Commands::Guard { command, json } => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            runtime.block_on(app_proxy_app::guard_cli::run(root, command, json))?;
+            let root = home()?;
+            block_on(app_proxy_app::guard_cli::run(root, command, json))??;
             Ok(())
         }
         Commands::Launch(command) => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            runtime.block_on(app_proxy_app::launch_cli::run(root, command))?;
+            let root = home()?;
+            block_on(app_proxy_app::launch_cli::run(root, command))??;
             Ok(())
         }
         Commands::Proxy { command, json } => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            runtime.block_on(app_proxy_app::proxy_cli::run(root, command, json))?;
+            let root = home()?;
+            block_on(app_proxy_app::proxy_cli::run(root, command, json))??;
             Ok(())
         }
         Commands::Core { command, json } => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            runtime.block_on(app_proxy_app::core_cli::run(root, command, json))?;
+            let root = home()?;
+            block_on(app_proxy_app::core_cli::run(root, command, json))??;
             Ok(())
         }
         Commands::Instance { command, json } => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            runtime.block_on(app_proxy_app::instance_cli::run(root, command, json))?;
+            let root = home()?;
+            block_on(app_proxy_app::instance_cli::run(root, command, json))??;
             Ok(())
         }
         Commands::Status { json } => {
-            let root = match cli.home {
-                Some(path) => path,
-                None => app_proxy_app::coordinator::default_home()?,
-            };
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?;
-            let status = runtime.block_on(app_proxy_app::coordinator::status(root))?;
+            let status = block_on(app_proxy_app::coordinator::status(home()?))??;
             if json {
                 print(&status)
             } else {
@@ -257,10 +210,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Discover {
             app: Discovery::SingBox,
         } => {
-            let root = cli
-                .home
-                .map(Ok)
-                .unwrap_or_else(app_proxy_app::coordinator::default_home)?;
+            let root = home()?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;

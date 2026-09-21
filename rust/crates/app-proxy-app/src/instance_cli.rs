@@ -11,7 +11,6 @@ use app_proxy_windows::{
     installation, package,
 };
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -117,19 +116,8 @@ pub enum Command {
 fn dependency(e: app_proxy_windows::Error) -> Failure {
     fail(exit::UNAVAILABLE, e.to_string())
 }
-fn print(value: &impl Serialize) -> Result<(), Failure> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value)
-            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-    );
-    Ok(())
-}
-fn display(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
+use crate::output::json as print;
+use crate::output::plain as display;
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
     if let Command::Settings { id } = command {

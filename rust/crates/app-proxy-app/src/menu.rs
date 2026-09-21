@@ -5,7 +5,7 @@ use crate::{
     exit::{self, Failure, fail},
     foreground::Foreground,
     guard_cli,
-    guard_control::{GuardPhase, GuardStatus},
+    guard_control::GuardStatus,
     instance_cli::{self, Adapter, Data, Network, Preset},
     launch_cli,
     launch_engine::GuardObservation,
@@ -21,11 +21,7 @@ use std::{
 };
 use uuid::Uuid;
 
-fn display(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
+use crate::output::plain as display;
 fn returned() -> Failure {
     fail(exit::ACTION_REQUIRED, "已返回，保留已保存的配置。")
 }
@@ -194,15 +190,7 @@ fn observation(status: Option<&GuardStatus>, revision: u64) -> (&'static str, &'
         Some(GuardObservation::Pending { .. }) => "启动请求待确认",
         _ => "未确认",
     };
-    let guard = match status.phase {
-        GuardPhase::Disabled => "已关闭",
-        GuardPhase::NeedsAuthorization => "待授权",
-        GuardPhase::Starting => "检查中",
-        GuardPhase::Active => "运行中",
-        GuardPhase::Degraded => "降级",
-        GuardPhase::Blocked => "受阻",
-    };
-    (running, guard)
+    (running, crate::instance_status::guard_label(status))
 }
 
 pub async fn run(root: PathBuf) -> Result<(), Failure> {
@@ -1186,6 +1174,7 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guard_control::GuardPhase;
 
     fn observed(observation: GuardObservation) -> GuardStatus {
         let id = Uuid::new_v4();

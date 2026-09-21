@@ -45,11 +45,7 @@ impl ProfileSummary {
         if self.auto_test_nodes > 1 {
             format!("自动测速 · {} 个候选节点", self.auto_test_nodes)
         } else {
-            let host: String = self
-                .host
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect();
+            let host = crate::output::plain(&self.host);
             format!("{} {}:{}", self.protocol.label(), host, self.port)
         }
     }

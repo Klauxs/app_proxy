@@ -51,11 +51,7 @@ pub(crate) fn output(
     json: bool,
 ) -> Result<(), Failure> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({"request_id": id, "result": status}))
-                .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-        );
+        crate::output::json(&serde_json::json!({"request_id": id, "result": status}))?;
     } else {
         println!(
             "请求 {id}：{}",
@@ -172,11 +168,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 .await
                 .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&snapshot)
-                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-                );
+                crate::output::json(&snapshot)?;
             } else {
                 println!(
                     "{}",

@@ -38,20 +38,8 @@ fn show_groups(nodes: &[&NodeSummary], selected: &[usize]) -> Vec<(&'static str,
     groups
 }
 
-fn print(value: &impl serde::Serialize) -> Result<(), Failure> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value)
-            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-    );
-    Ok(())
-}
-fn display(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
+use crate::output::json as print;
+use crate::output::plain as display;
 fn show_node(index: usize, node: &NodeSummary, selected: bool) {
     println!(
         "{}. {}{}  {:?} {}:{}",

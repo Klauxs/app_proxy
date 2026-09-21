@@ -124,7 +124,9 @@ pub(crate) async fn save(
     )
     .await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "request_id": request_id, "receipt": receipt, "takes_effect": "next_launch", "application_restarted": false })).map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?);
+        crate::output::json(
+            &serde_json::json!({ "request_id": request_id, "receipt": receipt, "takes_effect": "next_launch", "application_restarted": false }),
+        )?;
     } else {
         println!("高级设置已保存，下次启动生效。当前应用未重启。");
     }
@@ -146,11 +148,7 @@ pub async fn show(root: &Path, instance_id: Uuid, json: bool) -> std::result::Re
         .await
         .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&view)
-                .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-        );
+        crate::output::json(&view)?;
     } else {
         display(&view);
     }
@@ -160,11 +158,7 @@ pub(crate) fn display(view: &Summary) {
     let names = |values: &[String]| {
         values
             .iter()
-            .map(|s| {
-                s.chars()
-                    .map(|c| if c.is_control() { ' ' } else { c })
-                    .collect::<String>()
-            })
+            .map(|s| crate::output::plain(s))
             .collect::<Vec<_>>()
             .join(", ")
     };

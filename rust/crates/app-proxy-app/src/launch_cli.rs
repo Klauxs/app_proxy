@@ -77,11 +77,7 @@ impl Report {
             return Ok(());
         }
         if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(self)
-                    .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-            );
+            crate::output::json(self)?;
         } else {
             println!(
                 "启动请求 {}：{}",

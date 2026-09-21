@@ -231,18 +231,14 @@ pub(crate) async fn run_with_foreground(
             Ok(current) => status = current,
             Err(_) => {
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&Report {
-                            request_id,
-                            receipt,
-                            status: None,
-                            login: None,
-                            login_operation: None,
-                            requires_action: Some("query_guard_status"),
-                        })
-                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-                    );
+                    crate::output::json(&Report {
+                        request_id,
+                        receipt,
+                        status: None,
+                        login: None,
+                        login_operation: None,
+                        requires_action: Some("query_guard_status"),
+                    })?;
                 }
                 return Err(fail(
                     exit::UNCONFIRMED,
@@ -425,18 +421,14 @@ pub(crate) async fn run_with_foreground(
         })
     };
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Report {
-                request_id,
-                receipt,
-                status: Some(&status),
-                login: Some(login),
-                login_operation,
-                requires_action
-            })
-            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-        );
+        crate::output::json(&Report {
+            request_id,
+            receipt,
+            status: Some(&status),
+            login: Some(login),
+            login_operation,
+            requires_action,
+        })?;
     } else {
         if let Some(outcome) = &login_operation {
             if let Some(code) = &outcome.error {
@@ -463,13 +455,7 @@ pub(crate) async fn run_with_foreground(
                     .into_iter()
                     .find(|instance| instance.id == id)
             })
-            .map(|instance| {
-                instance
-                    .name
-                    .chars()
-                    .map(|c| if c.is_control() { ' ' } else { c })
-                    .collect::<String>()
-            })
+            .map(|instance| crate::output::plain(&instance.name))
             .unwrap_or_else(|| "当前实例".into());
         println!(
             "{name}：{}。\n进程监听：{}。",

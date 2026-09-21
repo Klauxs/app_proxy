@@ -59,22 +59,14 @@ pub async fn inspect(root: &Path, id: Uuid, json: bool) -> Result<(), Failure> {
         ));
     }
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "instance": instance, "application": application, "runtime": runtime,
-                "protection": guard,
-                "protection_diagnostic": if guard.is_none() { Some("GUARD_STATUS_UNCONFIRMED") } else { None },
-                "target_traffic_evidence": "not_observed"
-            }))
-            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-        );
+        crate::output::json(&serde_json::json!({
+            "instance": instance, "application": application, "runtime": runtime,
+            "protection": guard,
+            "protection_diagnostic": if guard.is_none() { Some("GUARD_STATUS_UNCONFIRMED") } else { None },
+            "target_traffic_evidence": "not_observed"
+        }))?;
     } else {
-        let display = |text: &str| {
-            text.chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect::<String>()
-        };
+        let display = crate::output::plain;
         println!(
             "{} · {} · {}\n实例编号 {id}",
             display(&instance.name),

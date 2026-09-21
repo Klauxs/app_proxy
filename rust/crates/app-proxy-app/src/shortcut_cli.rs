@@ -38,11 +38,7 @@ struct Report<'a> {
     error: Option<&'a str>,
 }
 fn clean(value: &Path) -> String {
-    value
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
+    crate::output::plain(&value.to_string_lossy())
 }
 fn print(
     id: Uuid,
@@ -51,15 +47,11 @@ fn print(
     json: bool,
 ) -> Result<(), Failure> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Report {
-                request_id: id,
-                status,
-                error
-            })
-            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
-        );
+        crate::output::json(&Report {
+            request_id: id,
+            status,
+            error,
+        })?;
     } else {
         match status {
             Some(Status::Created { path, .. }) => {
@@ -258,11 +250,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 .await
                 .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&view)
-                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
-                );
+                crate::output::json(&view)?;
             } else {
                 print_check(&view);
             }
@@ -273,11 +261,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
                 .await
                 .map_err(|e| fail(exit::UNAVAILABLE, e.to_string()))?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&view)
-                        .map_err(|_| fail(exit::INTERNAL, "OUTPUT_SERIALIZE_FAILED"))?
-                );
+                crate::output::json(&view)?;
             } else {
                 print_registration(&view);
             }

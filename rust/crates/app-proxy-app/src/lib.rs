@@ -21,6 +21,7 @@ pub mod launch_engine;
 pub mod login_cli;
 pub mod login_tasks;
 pub mod menu;
+mod output;
 pub mod probe;
 pub mod proxy_cli;
 pub mod proxy_health;

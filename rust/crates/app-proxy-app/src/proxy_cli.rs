@@ -156,19 +156,8 @@ impl Node {
     }
 }
 
-fn print(value: &impl serde::Serialize) -> Result<(), Failure> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value)
-            .map_err(|_| fail(exit::INTERNAL, "OUTPUT_ENCODING_FAILED"))?
-    );
-    Ok(())
-}
-fn display(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
+use crate::output::json as print;
+use crate::output::plain as display;
 
 pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Failure> {
     if matches!(
