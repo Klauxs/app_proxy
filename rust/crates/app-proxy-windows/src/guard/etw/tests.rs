@@ -154,7 +154,11 @@ fn native_process_start_session_observes_fixture_and_stops_without_adopting_coll
         Err(Error::Invalid("ETW_SESSION_CONFLICT"))
     ));
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "etw::tests::event_fixture_child"])
+        .args([
+            "--ignored",
+            "--exact",
+            "guard::etw::tests::event_fixture_child",
+        ])
         .spawn()
         .unwrap();
     let pid = child.id();

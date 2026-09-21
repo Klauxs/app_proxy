@@ -454,7 +454,7 @@ fn child_spec(root: &Path, mode: &str) -> process::SpawnSpec {
     );
     spec.args = [
         "--exact",
-        "instance_resource::tests::resource_child",
+        "launching::instance_resource::tests::resource_child",
         "--ignored",
     ]
     .map(Into::into)

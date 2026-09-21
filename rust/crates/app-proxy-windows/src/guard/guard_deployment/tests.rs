@@ -124,7 +124,11 @@ fn issuer_requires_same_user_session_exact_identity_and_live_process_handle() {
     wrong.user_sid.push_str("-1");
     assert!(verify_issuer(&current, &wrong).is_err());
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "etw::tests::event_fixture_child"])
+        .args([
+            "--ignored",
+            "--exact",
+            "guard::etw::tests::event_fixture_child",
+        ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

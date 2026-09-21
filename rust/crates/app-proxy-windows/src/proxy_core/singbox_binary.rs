@@ -306,7 +306,7 @@ mod tests {
             .args([
                 "--ignored",
                 "--exact",
-                "singbox_binary::tests::probe_child",
+                "proxy_core::singbox_binary::tests::probe_child",
                 "--nocapture",
             ])
             .env("APP_PROXY_BINARY_TEST_MODE", mode);

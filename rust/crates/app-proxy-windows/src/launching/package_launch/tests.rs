@@ -85,7 +85,7 @@ impl Fixture {
             expires_at: issued_at + TTL,
             args: vec![
                 "--exact".into(),
-                "package_launch::tests::application_child".into(),
+                "launching::package_launch::tests::application_child".into(),
                 "--ignored".into(),
             ],
             cwd: temp.path().to_owned(),

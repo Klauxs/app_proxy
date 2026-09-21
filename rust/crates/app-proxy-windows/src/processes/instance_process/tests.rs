@@ -323,7 +323,7 @@ async fn exact_native_child_is_classified_without_adoption_or_termination() {
             args: vec![
                 "--ignored".into(),
                 "--exact".into(),
-                "instance_process::tests::attribution_child".into(),
+                "processes::instance_process::tests::attribution_child".into(),
                 "--skip".into(),
                 format!("--user-data-dir={}", data.paths.user_data.display()).into(),
                 "--skip".into(),
@@ -430,7 +430,7 @@ fn attribution_child() {
                 args: words(&[
                     "--ignored",
                     "--exact",
-                    "instance_process::tests::attribution_child",
+                    "processes::instance_process::tests::attribution_child",
                     "--skip",
                     "--type=renderer",
                 ])[1..]
@@ -477,7 +477,7 @@ async fn auxiliary_inherits_only_live_exact_ancestry_and_keeps_its_role() {
         let mut args = words(&[
             "--ignored",
             "--exact",
-            "instance_process::tests::attribution_child",
+            "processes::instance_process::tests::attribution_child",
         ])[1..]
             .to_vec();
         if isolated {

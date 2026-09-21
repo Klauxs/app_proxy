@@ -147,7 +147,7 @@ async fn native_wmi_observation_is_bound_to_exact_child_and_never_stops_it() {
     let words = [
         "--ignored",
         "--exact",
-        "process_query::tests::query_child",
+        "processes::process_query::tests::query_child",
         "--nocapture",
         "--skip",
         "fixture private value \"引号\" C:\\folder\\",

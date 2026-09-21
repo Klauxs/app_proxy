@@ -21,9 +21,13 @@ impl Fixture {
             .insert("APP_PROXY_STOP_MODE".into(), mode.into());
         let mut child = process::spawn(SpawnSpec {
             exe: std::env::current_exe().unwrap(),
-            args: ["--ignored", "--exact", "process_stop::tests::window_child"]
-                .map(Into::into)
-                .to_vec(),
+            args: [
+                "--ignored",
+                "--exact",
+                "processes::process_stop::tests::window_child",
+            ]
+            .map(Into::into)
+            .to_vec(),
             cwd: root.path().into(),
             environment,
         })

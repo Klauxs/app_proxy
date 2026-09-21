@@ -468,9 +468,13 @@ fn confirmed_process_exit_releases_reservation_and_forged_identity_is_unknown() 
     store.dispatch_launch(request.request_id, epoch).unwrap();
     let mut child = process::spawn(process::SpawnSpec {
         exe: std::env::current_exe().unwrap(),
-        args: ["--exact", "launch_state::tests::holding_child", "--ignored"]
-            .map(Into::into)
-            .to_vec(),
+        args: [
+            "--exact",
+            "launching::launch_state::tests::holding_child",
+            "--ignored",
+        ]
+        .map(Into::into)
+        .to_vec(),
         cwd: temp.path().to_owned(),
 
         environment: app_proxy_core::EnvPatch {

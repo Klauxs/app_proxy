@@ -45,7 +45,7 @@ fn child(prepared: PreparedCore, cwd: &Path) -> CoreProcess {
         .spawn_words(
             &[
                 OsStr::new("--exact"),
-                OsStr::new("core_process::start::tests::sleeping_child"),
+                OsStr::new("proxy_core::core_process::start::tests::sleeping_child"),
                 OsStr::new("--ignored"),
                 OsStr::new("--test-threads=1"),
             ],
@@ -202,7 +202,7 @@ fn named_job_remains_recoverable_after_creator_process_exits() {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "core_process::start::tests::exiting_creator",
+            "proxy_core::core_process::start::tests::exiting_creator",
             "--ignored",
             "--test-threads=1",
         ])

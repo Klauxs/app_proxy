@@ -24,7 +24,7 @@ async fn native_arguments_match_wmi_and_stop_retains_exact_object() {
     let args = [
         "--ignored",
         "--exact",
-        "native_process::tests::child",
+        "processes::native_process::tests::child",
         "--skip",
         "--user-data-dir=C:\\space 中文\\profile",
         "--skip",

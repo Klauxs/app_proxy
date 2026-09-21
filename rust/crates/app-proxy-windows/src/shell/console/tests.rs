@@ -105,7 +105,7 @@ fn notification_contract() {
         .args([
             "--ignored",
             "--exact",
-            "console::tests::notification_child",
+            "shell::console::tests::notification_child",
             "--nocapture",
         ])
         .env("APP_PROXY_DIALOG_TEST_OUTPUT", &result)

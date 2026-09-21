@@ -82,7 +82,11 @@ fn upgrade_ticket_binds_exact_previous_generation() {
 #[test]
 fn installer_wait_distinguishes_live_process_and_retained_exit_without_termination() {
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "guard_install::tests::wait_child"])
+        .args([
+            "--ignored",
+            "--exact",
+            "guard::guard_install::tests::wait_child",
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
