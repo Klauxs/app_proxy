@@ -124,8 +124,9 @@ impl Job {
         self.execute_with(
             Registration::exists_verified,
             |registration| {
-                let prepared =
-                    prepared.ok_or(Error::Invalid("GUARD_LOGIN_AUTHORIZATION_REQUIRED"))?;
+                let prepared = prepared.ok_or(Error::Invalid(
+                    app_proxy_core::error_code::GUARD_LOGIN_AUTHORIZATION_REQUIRED,
+                ))?;
                 if prepared.registration() != registration {
                     return Err(Error::Invalid("GUARD_LOGIN_REGISTRATION_CHANGED"));
                 }
@@ -248,8 +249,9 @@ impl Store {
                 {
                     return Err(Error::Invalid("GUARD_LOGIN_NOT_NEEDED"));
                 }
-                let registration =
-                    plan.ok_or(Error::Invalid("GUARD_LOGIN_AUTHORIZATION_REQUIRED"))?;
+                let registration = plan.ok_or(Error::Invalid(
+                    app_proxy_core::error_code::GUARD_LOGIN_AUTHORIZATION_REQUIRED,
+                ))?;
                 registration.spec()?;
                 if registration.store_id != manifest.store_id
                     || std::fs::canonicalize(&registration.home)?

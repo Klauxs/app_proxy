@@ -516,7 +516,7 @@ pub(super) async fn client_operation(
     )
     .await
     {
-        Err(Error::Invalid("IPC_CONNECT_TIMEOUT")) => {}
+        Err(Error::Invalid(app_proxy_core::error_code::IPC_CONNECT_TIMEOUT)) => {}
         result => return result,
     }
     let owner = status(root).await?;
@@ -532,7 +532,7 @@ pub async fn status(root: PathBuf) -> Result<Status> {
     let policy = ipc::PeerPolicy::current(vec![identity::file_identity(&host)?])?;
     match query(descriptor.store_id, &policy, Duration::from_millis(40)).await {
         Ok(status) => return Ok(status),
-        Err(Error::Invalid("IPC_CONNECT_TIMEOUT")) => {}
+        Err(Error::Invalid(app_proxy_core::error_code::IPC_CONNECT_TIMEOUT)) => {}
         Err(error) => return Err(error),
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -547,7 +547,7 @@ pub async fn status(root: PathBuf) -> Result<Status> {
     };
     match query(descriptor.store_id, &policy, Duration::from_millis(40)).await {
         Ok(status) => return Ok(status),
-        Err(Error::Invalid("IPC_CONNECT_TIMEOUT")) => {}
+        Err(Error::Invalid(app_proxy_core::error_code::IPC_CONNECT_TIMEOUT)) => {}
         Err(error) => return Err(error),
     }
     // Validate configuration before creating a background process. A held owner lock
@@ -571,7 +571,10 @@ pub(super) async fn ensure_store(root: &Path) -> Result<()> {
                 return Ok(());
             }
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(Error::Invalid("STORE_NOT_EMPTY" | "STORE_ALREADY_OWNED")) => {}
+            Err(Error::Invalid(
+                app_proxy_core::error_code::STORE_NOT_EMPTY
+                | app_proxy_core::error_code::STORE_ALREADY_OWNED,
+            )) => {}
             Err(error) => return Err(error),
         }
     }

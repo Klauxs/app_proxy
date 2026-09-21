@@ -14,6 +14,38 @@
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
+/// Declares each code as a constant whose value is its own name.
+macro_rules! named {
+    ($($name:ident),* $(,)?) => {
+        $(pub const $name: &str = stringify!($name);)*
+        /// Every code declared above.
+        pub const NAMED: &[&str] = &[$($name),*];
+    };
+}
+
+// Codes that some caller branches on. Producers and callers both use these
+// constants, so renaming one is a compile error instead of a dead branch.
+// Codes that are only reported stay plain literals where they are raised.
+named! {
+    APP_NOT_INSTALLED,
+    GUARD_INSTALL_CANCELLED,
+    GUARD_LISTENER_MISSING,
+    GUARD_LOGIN_AUTHORIZATION_REQUIRED,
+    GUARD_STOPPED_RECORD_FAILED,
+    GUARD_TASK_MISSING,
+    INSTANCE_EXTERNALLY_RUNNING,
+    INSTANCE_RESOURCE_BUSY,
+    INVALID_INSTANCE_EDIT_FILE,
+    IPC_CONNECT_TIMEOUT,
+    PACKAGE_REQUEST_BUSY,
+    PACKAGE_RESULT_UNKNOWN,
+    PROCESS_QUERY_BUSY,
+    STORE_ALREADY_OWNED,
+    STORE_NOT_EMPTY,
+    SUBSCRIPTION_PREVIEW_EXPIRED,
+    SUBSCRIPTION_STAGE_PENDING,
+}
+
 /// Longest code accepted from the wire.
 pub const MAX_LEN: usize = 96;
 /// Bounds memory retained for codes first seen on the wire.
@@ -140,6 +172,18 @@ mod tests {
     }
 
     #[test]
+    fn named_codes_equal_their_names_and_follow_the_registry() {
+        assert!(NAMED.iter().all(|code| well_formed(code)));
+        assert_eq!(PACKAGE_RESULT_UNKNOWN, "PACKAGE_RESULT_UNKNOWN");
+        // The source scan below skips this file, so check named codes here.
+        for code in NAMED {
+            if MARKERS.iter().any(|marker| code.contains(marker)) {
+                assert_eq!(certainty(code), Certainty::Indeterminate, "{code}");
+            }
+        }
+    }
+
+    #[test]
     fn classification_is_by_registry_not_spelling() {
         assert_eq!(certainty("CORE_STOP_UNCONFIRMED"), Certainty::Indeterminate);
         assert_eq!(certainty("LAUNCH_INDETERMINATE"), Certainty::Indeterminate);
@@ -219,7 +263,7 @@ mod tests {
         );
         let stale: Vec<_> = INDETERMINATE
             .iter()
-            .filter(|code| !found.contains(**code))
+            .filter(|code| !found.contains(**code) && !NAMED.contains(code))
             .collect();
         assert!(stale.is_empty(), "no longer used anywhere: {stale:?}");
     }

@@ -337,7 +337,9 @@ impl PackageTicket {
         security::verify(file.as_raw_handle(), &self.request.owner_sid, false)?;
         match file.try_lock() {
             Ok(()) => Ok(file),
-            Err(fs::TryLockError::WouldBlock) => Err(Error::Invalid("PACKAGE_REQUEST_BUSY")),
+            Err(fs::TryLockError::WouldBlock) => Err(Error::Invalid(
+                app_proxy_core::error_code::PACKAGE_REQUEST_BUSY,
+            )),
             Err(fs::TryLockError::Error(error)) => Err(error.into()),
         }
     }

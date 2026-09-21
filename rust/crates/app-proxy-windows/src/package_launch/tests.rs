@@ -138,7 +138,10 @@ fn repeated_activation_helpers_race_on_one_ticket_without_duplicate_creation() {
     for thread in threads {
         match thread.join().unwrap() {
             Ok(()) => successes += 1,
-            Err(Error::Invalid("PACKAGE_REQUEST_BUSY" | "PACKAGE_REQUEST_ALREADY_CONSUMED")) => {}
+            Err(Error::Invalid(
+                app_proxy_core::error_code::PACKAGE_REQUEST_BUSY
+                | "PACKAGE_REQUEST_ALREADY_CONSUMED",
+            )) => {}
             other => panic!("unexpected helper result: {other:?}"),
         }
     }
@@ -230,11 +233,15 @@ fn gate_serializes_revocation_and_consumption_and_unknown_never_expires() {
     let other = PackageTicket::open(&fixture.ticket.root).unwrap();
     assert!(matches!(
         other.revoke(),
-        Err(Error::Invalid("PACKAGE_REQUEST_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::PACKAGE_REQUEST_BUSY
+        ))
     ));
     assert!(matches!(
         fixture.consume(),
-        Err(Error::Invalid("PACKAGE_REQUEST_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::PACKAGE_REQUEST_BUSY
+        ))
     ));
     // Fault injection: the helper died after publishing its creation intent.
     fixture.ticket.write(Phase::Consuming {}).unwrap();

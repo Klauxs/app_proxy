@@ -273,7 +273,9 @@ async fn continuation_revision_is_fixed_at_admission_and_rechecked_at_dispatch()
             .engine
             .submit_at_revision(guarded.clone(), Some(current))
             .await,
-        Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY
+        ))
     ));
     assert!(fixture.engine.status(guarded.request_id).unwrap().is_none());
     fixture.engine.cancel(plain.request_id).unwrap();
@@ -1956,7 +1958,9 @@ async fn guard_late_stop_worker_retains_resource_after_timeout_and_cannot_relaun
             .engine
             .resources
             .acquire(InstanceResource::resolve(&application, data.as_ref()).unwrap()),
-        Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY
+        ))
     ));
     release_tx.send(()).unwrap();
     let result = fixture.result(request.request_id).await;

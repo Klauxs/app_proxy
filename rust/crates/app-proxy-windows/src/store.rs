@@ -127,7 +127,7 @@ impl Store {
         let sid = identity::current()?.user_sid;
         security::verify_owner(handle.as_raw_handle(), &sid)?;
         if fs::read_dir(root)?.next().is_some() {
-            return Err(Error::Invalid("STORE_NOT_EMPTY"));
+            return Err(Error::Invalid(app_proxy_core::error_code::STORE_NOT_EMPTY));
         }
         // create_new claims initialization. A crash leaves a diagnosable partial store.
         let mut initializing = OpenOptions::new()
@@ -198,7 +198,7 @@ impl Store {
             .open(&lock_path)?;
         security::verify(lock.as_raw_handle(), &sid, false)?;
         lock.try_lock()
-            .map_err(|_| Error::Invalid("STORE_ALREADY_OWNED"))?;
+            .map_err(|_| Error::Invalid(app_proxy_core::error_code::STORE_ALREADY_OWNED))?;
         if expected_store.is_some_and(|expected| expected != owner.store_id) {
             return Err(Error::Invalid("STORE_ID_MISMATCH"));
         }

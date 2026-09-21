@@ -338,7 +338,7 @@ fn same_resolved(
         // A removed installation cannot be a currently matching file. Other
         // failures remain unknown and block the edit instead of guessing.
         Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(Error::Invalid("APP_NOT_INSTALLED")) => Ok(false),
+        Err(Error::Invalid(app_proxy_core::error_code::APP_NOT_INSTALLED)) => Ok(false),
         Err(error) => Err(installation_error(error)),
     }
 }
@@ -586,7 +586,9 @@ mod tests {
                     release_rx
                         .recv_timeout(std::time::Duration::from_secs(5))
                         .unwrap();
-                    Err(Error::Invalid("APP_NOT_INSTALLED"))
+                    Err(Error::Invalid(
+                        app_proxy_core::error_code::APP_NOT_INSTALLED,
+                    ))
                 })
                 .unwrap()
         });

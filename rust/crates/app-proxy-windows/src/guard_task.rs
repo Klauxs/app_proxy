@@ -108,9 +108,9 @@ pub fn verify_registered(deployment: &Deployment) -> Result<()> {
     let spec = Spec::deployment(deployment)?;
     let session = Session::connect()?;
     verify(
-        &session
-            .find(&spec)?
-            .ok_or(Error::Invalid("GUARD_TASK_MISSING"))?,
+        &session.find(&spec)?.ok_or(Error::Invalid(
+            app_proxy_core::error_code::GUARD_TASK_MISSING,
+        ))?,
         &spec,
     )
 }
@@ -126,9 +126,9 @@ pub fn run(deployment: &Deployment) -> Result<RunReceipt> {
     }
     let spec = Spec::deployment(deployment)?;
     let session = Session::connect()?;
-    let task = session
-        .find(&spec)?
-        .ok_or(Error::Invalid("GUARD_TASK_MISSING"))?;
+    let task = session.find(&spec)?.ok_or(Error::Invalid(
+        app_proxy_core::error_code::GUARD_TASK_MISSING,
+    ))?;
     verify(&task, &spec)?;
     let session_id =
         i32::try_from(current.session_id).map_err(|_| Error::Invalid("GUARD_TASK_SESSION"))?;

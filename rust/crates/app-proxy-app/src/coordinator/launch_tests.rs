@@ -642,7 +642,9 @@ async fn subscription_rpc_keeps_preview_alive_and_preserves_failed_stage_reason(
                 Operation::SubscriptionPreviewPage { id, offset: 0 }
             )
             .await,
-        Err(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::SUBSCRIPTION_PREVIEW_EXPIRED
+        ))
     ));
     server.await.unwrap().unwrap();
 }

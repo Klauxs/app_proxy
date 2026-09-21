@@ -68,7 +68,9 @@ fn metadata_cache_rechecks_registration_manifest_and_missing_executable() {
             || Ok(fp.clone()),
             || panic!("must not parse cached missing executable")
         ),
-        Err(Error::Invalid("APP_NOT_INSTALLED"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::APP_NOT_INSTALLED
+        ))
     ));
 }
 

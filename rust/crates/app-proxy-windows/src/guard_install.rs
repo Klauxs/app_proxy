@@ -86,12 +86,12 @@ fn authorize(store: Uuid, update: bool) -> Result<Uuid> {
             } else {
                 match guard_task::verify_registered(&deployment) {
                     Ok(()) => return Ok(deployment.generation()),
-                    Err(Error::Invalid("GUARD_TASK_MISSING")) => {}
+                    Err(Error::Invalid(app_proxy_core::error_code::GUARD_TASK_MISSING)) => {}
                     Err(error) => return Err(error),
                 }
             }
         }
-        Err(Error::Invalid("GUARD_LISTENER_MISSING")) => {}
+        Err(Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING)) => {}
         Err(error) => return Err(error),
     }
     let ticket = Ticket {
@@ -235,7 +235,9 @@ fn launch(source: &InstallerSource, encoded: &str) -> Result<OwnedHandle> {
             Error::Windows {
                 code: ERROR_CANCELLED,
                 ..
-            } => Err(Error::Invalid("GUARD_INSTALL_CANCELLED")),
+            } => Err(Error::Invalid(
+                app_proxy_core::error_code::GUARD_INSTALL_CANCELLED,
+            )),
             other => Err(other),
         };
     }

@@ -181,7 +181,9 @@ impl EventReceiver {
                 }
                 Err(error) if matches!(error.raw_os_error(), Some(2 | 231)) => {
                     if tokio::time::Instant::now() >= deadline {
-                        return Err(Error::Invalid("IPC_CONNECT_TIMEOUT"));
+                        return Err(Error::Invalid(
+                            app_proxy_core::error_code::IPC_CONNECT_TIMEOUT,
+                        ));
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }

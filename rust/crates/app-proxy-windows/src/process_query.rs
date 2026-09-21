@@ -243,7 +243,9 @@ async fn query_with<T: Send + 'static>(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return Err(Error::Invalid("PROCESS_QUERY_BUSY"));
+        return Err(Error::Invalid(
+            app_proxy_core::error_code::PROCESS_QUERY_BUSY,
+        ));
     }
     struct Slot(&'static AtomicBool);
     impl Drop for Slot {

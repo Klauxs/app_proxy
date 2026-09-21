@@ -29,7 +29,7 @@ pub fn prepare(home: PathBuf) -> Result<()> {
         .any(|i| i.guard.desired == Desired::Enabled);
     let installed = match Deployment::listener(manifest.store_id) {
         Ok(_) => true,
-        Err(Error::Invalid("GUARD_LISTENER_MISSING")) => false,
+        Err(Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING)) => false,
         Err(e) => return Err(e),
     };
     if guarded || installed {

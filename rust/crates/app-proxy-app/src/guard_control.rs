@@ -163,9 +163,10 @@ async fn listener_component(store: Uuid) -> (ComponentState, Option<String>) {
             ComponentState::Unverified,
             Some("GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED".into()),
         ),
-        Ok(Err(Error::Invalid("GUARD_LISTENER_MISSING" | "GUARD_TASK_MISSING"))) => {
-            (ComponentState::NeedsAuthorization, None)
-        }
+        Ok(Err(Error::Invalid(
+            app_proxy_core::error_code::GUARD_LISTENER_MISSING
+            | app_proxy_core::error_code::GUARD_TASK_MISSING,
+        ))) => (ComponentState::NeedsAuthorization, None),
         Ok(Err(error)) => (ComponentState::Unverified, Some(error.to_string())),
         _ => (
             ComponentState::Unverified,

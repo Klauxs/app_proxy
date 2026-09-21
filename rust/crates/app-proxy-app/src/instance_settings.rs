@@ -87,8 +87,8 @@ fn decode(bytes: &[u8]) -> Result<InstanceEdit> {
     if bytes.len() > INPUT_LIMIT {
         return Err(Error::Invalid("INSTANCE_EDIT_TOO_LARGE"));
     }
-    let input: Input =
-        serde_json::from_slice(bytes).map_err(|_| Error::Invalid("INVALID_INSTANCE_EDIT_FILE"))?;
+    let input: Input = serde_json::from_slice(bytes)
+        .map_err(|_| Error::Invalid(app_proxy_core::error_code::INVALID_INSTANCE_EDIT_FILE))?;
     Ok(InstanceEdit {
         args: input.args,
         cwd: input.cwd,

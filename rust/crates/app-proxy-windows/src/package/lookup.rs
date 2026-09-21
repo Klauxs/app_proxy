@@ -61,7 +61,9 @@ fn resolve_with(
     };
     if let Some(package) = cached {
         if !package.exe.is_file() {
-            return Err(Error::Invalid("APP_NOT_INSTALLED"));
+            return Err(Error::Invalid(
+                app_proxy_core::error_code::APP_NOT_INSTALLED,
+            ));
         }
         return Ok(package);
     }
@@ -144,7 +146,9 @@ fn registered(family: &str) -> Result<String> {
         return Err(native_error(code, "FindRegisteredPackage"));
     }
     if count == 0 {
-        return Err(Error::Invalid("APP_NOT_INSTALLED"));
+        return Err(Error::Invalid(
+            app_proxy_core::error_code::APP_NOT_INSTALLED,
+        ));
     }
     if count != 1 {
         return Err(Error::Invalid("AMBIGUOUS_PACKAGE"));

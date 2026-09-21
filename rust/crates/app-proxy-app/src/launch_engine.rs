@@ -267,7 +267,7 @@ impl LaunchEngine {
                 app_proxy_windows::diagnostic_timing::mark("event.post_stop_record_failed", || {
                     format!("{}:{error}", request.request_id)
                 });
-                Error::Invalid("GUARD_STOPPED_RECORD_FAILED")
+                Error::Invalid(app_proxy_core::error_code::GUARD_STOPPED_RECORD_FAILED)
             } else {
                 error
             }
@@ -372,7 +372,10 @@ impl LaunchEngine {
         {
             match self.resources.reconcile_launch(store, attempt.id) {
                 // A timed-out worker may still hold the lock and finish its write.
-                Err(Error::Invalid("INSTANCE_RESOURCE_BUSY" | "PACKAGE_REQUEST_BUSY")) => Ok(()),
+                Err(Error::Invalid(
+                    app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY
+                    | app_proxy_core::error_code::PACKAGE_REQUEST_BUSY,
+                )) => Ok(()),
                 other => other,
             }
         } else {
@@ -604,8 +607,12 @@ impl LaunchEngine {
                 loop {
                     match check_occupancy(&application, data.as_ref(), app.template_ref).await {
                         Ok(()) => return Ok(()),
-                        Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING")) => {
-                            return Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING"));
+                        Err(Error::Invalid(
+                            app_proxy_core::error_code::INSTANCE_EXTERNALLY_RUNNING,
+                        )) => {
+                            return Err(Error::Invalid(
+                                app_proxy_core::error_code::INSTANCE_EXTERNALLY_RUNNING,
+                            ));
                         }
                         Err(_) => tokio::time::sleep(Duration::from_millis(30)).await,
                     }
@@ -705,8 +712,12 @@ impl LaunchEngine {
                 loop {
                     match check_occupancy(&application, data.as_ref(), app.template_ref).await {
                         Ok(()) => return Ok(()),
-                        Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING")) => {
-                            return Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING"));
+                        Err(Error::Invalid(
+                            app_proxy_core::error_code::INSTANCE_EXTERNALLY_RUNNING,
+                        )) => {
+                            return Err(Error::Invalid(
+                                app_proxy_core::error_code::INSTANCE_EXTERNALLY_RUNNING,
+                            ));
                         }
                         Err(_) => tokio::time::sleep(Duration::from_millis(30)).await,
                     }
@@ -982,10 +993,13 @@ fn spawn_package(
                     last_activation = std::time::Instant::now();
                 }
             }
-            Ok(PackageOutcome::Indeterminate) | Err(Error::Invalid("PACKAGE_REQUEST_BUSY"))
+            Ok(PackageOutcome::Indeterminate)
+            | Err(Error::Invalid(app_proxy_core::error_code::PACKAGE_REQUEST_BUSY))
                 if !ending => {}
-            Ok(_) | Err(Error::Invalid("PACKAGE_REQUEST_BUSY")) => {
-                return Err(unknown(Error::Invalid("PACKAGE_RESULT_UNKNOWN")));
+            Ok(_) | Err(Error::Invalid(app_proxy_core::error_code::PACKAGE_REQUEST_BUSY)) => {
+                return Err(unknown(Error::Invalid(
+                    app_proxy_core::error_code::PACKAGE_RESULT_UNKNOWN,
+                )));
             }
             Err(error) => return Err(unknown(error)),
         }
@@ -1149,7 +1163,7 @@ where
 {
     loop {
         match query().await {
-            Err(Error::Invalid("PROCESS_QUERY_BUSY")) => {
+            Err(Error::Invalid(app_proxy_core::error_code::PROCESS_QUERY_BUSY)) => {
                 tokio::time::sleep(Duration::from_millis(10)).await
             }
             result => return result,
@@ -1169,7 +1183,9 @@ async fn check_occupancy_inner(
         match (observed.role, observed.relation) {
             (_, InstanceRelation::Other) => {}
             (ProcessRole::Main, InstanceRelation::Target) => {
-                return Err(Error::Invalid("INSTANCE_EXTERNALLY_RUNNING"));
+                return Err(Error::Invalid(
+                    app_proxy_core::error_code::INSTANCE_EXTERNALLY_RUNNING,
+                ));
             }
             (ProcessRole::Auxiliary, InstanceRelation::Target) => {
                 return Err(Error::Invalid("INSTANCE_AUXILIARY_RUNNING"));

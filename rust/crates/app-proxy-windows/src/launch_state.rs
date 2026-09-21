@@ -211,7 +211,9 @@ impl Store {
             .find(|a| a.instance_id == request.instance_id && a.reserves_instance());
         let is_new = existing.is_none();
         if guard_target.is_some() && existing.is_some() {
-            return Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"));
+            return Err(Error::Invalid(
+                app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY,
+            ));
         }
         if expected_revision.is_some()
             && existing.is_some_and(|a| {
@@ -219,7 +221,9 @@ impl Store {
                     && a.expected_revision != expected_revision
             })
         {
-            return Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"));
+            return Err(Error::Invalid(
+                app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY,
+            ));
         }
         let attempt = existing.cloned().unwrap_or(LaunchAttempt {
             guard_correction: guard_target.clone().map(|target| {
@@ -426,7 +430,9 @@ impl Store {
                     .as_ref()
                     .is_some_and(|b| b.resource_key == binding.resource_key)
         }) {
-            return Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"));
+            return Err(Error::Invalid(
+                app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY,
+            ));
         }
         let attempt = attempt_mut(&mut journal, id, epoch, &LaunchPhase::PreparingData {})?;
         if attempt.cancel_requested {

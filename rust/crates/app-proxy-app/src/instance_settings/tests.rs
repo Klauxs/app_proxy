@@ -17,7 +17,7 @@ fn private_input_keeps_empty_arguments_and_values_and_never_exposes_parse_conten
         br#"{"env":{"set":[{"name":"TOKEN","value":"private-sensitive-value","secret_id":"caller-id"}]}}"#.as_slice(),
         br#"{"args":[],"args":["private-sensitive-argument"]}"#.as_slice(),
     ] {
-        assert!(matches!(decode(invalid), Err(Error::Invalid("INVALID_INSTANCE_EDIT_FILE"))));
+        assert!(matches!(decode(invalid), Err(Error::Invalid(app_proxy_core::error_code::INVALID_INSTANCE_EDIT_FILE))));
     }
     assert!(matches!(
         decode(&vec![b' '; INPUT_LIMIT + 1]),

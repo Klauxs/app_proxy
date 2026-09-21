@@ -242,7 +242,9 @@ impl PreviewService {
         prune(&mut entries);
         if let Some(entry) = entries.get(&id) {
             if entry.closing || entry.expires <= Instant::now() {
-                return Err(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED"));
+                return Err(Error::Invalid(
+                    app_proxy_core::error_code::SUBSCRIPTION_PREVIEW_EXPIRED,
+                ));
             }
             return if entry.digest == digest {
                 Ok(entry.status())
@@ -366,7 +368,9 @@ impl PreviewService {
         let entry = entries
             .get(&id)
             .filter(|e| !e.closing && e.expires > Instant::now())
-            .ok_or(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED"))?;
+            .ok_or(Error::Invalid(
+                app_proxy_core::error_code::SUBSCRIPTION_PREVIEW_EXPIRED,
+            ))?;
         let end = offset
             .checked_add(64)
             .ok_or(Error::Invalid("INVALID_PREVIEW_OFFSET"))?;
@@ -431,7 +435,9 @@ impl PreviewService {
             let entry = entries
                 .get_mut(&preview_id)
                 .filter(|e| !e.closing && e.expires > Instant::now())
-                .ok_or(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED"))?;
+                .ok_or(Error::Invalid(
+                    app_proxy_core::error_code::SUBSCRIPTION_PREVIEW_EXPIRED,
+                ))?;
             if let Some(stage) = &entry.stage {
                 if stage.id != request_id || stage.digest != digest {
                     return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
@@ -439,7 +445,9 @@ impl PreviewService {
                 return match &stage.result {
                     Some(Ok(bytes)) => Ok(serde_json::from_slice(bytes)?),
                     Some(Err(code)) => Err(Error::Invalid(code)),
-                    None => Err(Error::Invalid("SUBSCRIPTION_STAGE_PENDING")),
+                    None => Err(Error::Invalid(
+                        app_proxy_core::error_code::SUBSCRIPTION_STAGE_PENDING,
+                    )),
                 };
             }
             let State::Ready(ready) = &entry.state else {

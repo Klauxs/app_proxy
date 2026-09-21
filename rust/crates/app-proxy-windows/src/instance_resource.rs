@@ -265,7 +265,9 @@ impl ResourceRegistry {
         match lock.try_lock() {
             Ok(()) => {}
             Err(fs::TryLockError::WouldBlock) => {
-                return Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"));
+                return Err(Error::Invalid(
+                    app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY,
+                ));
             }
             Err(fs::TryLockError::Error(error)) => return Err(error.into()),
         }

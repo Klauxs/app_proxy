@@ -134,7 +134,9 @@ fn guard_intent_is_one_use_and_recovery_or_aliases_cannot_upgrade_stop_authority
     alias.request_id = Uuid::new_v4();
     assert!(matches!(
         store.begin_guard_launch(&alias, owner.epoch, store.load().unwrap().revision, target),
-        Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY
+        ))
     ));
     let path = store.root().join("state/launch.json");
     let held = OpenOptions::new()
@@ -537,7 +539,9 @@ fn concurrent_registry_initialization_and_moving_lock_between_threads() {
     first.reserve(owner).unwrap();
     assert!(matches!(
         registries[1].acquire(current_resource()),
-        Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY
+        ))
     ));
     let first = std::thread::spawn(move || {
         first.release_before_spawn(owner).unwrap();
@@ -710,7 +714,9 @@ fn permission_retains_store_ownership_and_authorization_failure_proves_no_creati
     drop(store);
     assert!(matches!(
         Store::open(&root),
-        Err(Error::Invalid("STORE_ALREADY_OWNED"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::STORE_ALREADY_OWNED
+        ))
     ));
     // Change the claim's owner behind the held lock; publication refuses to
     // overwrite it, and the consumed dispatch can only return no-creation proof.
@@ -885,7 +891,9 @@ fn native_owner_death_releases_kernel_lock_but_keeps_unknown_claim() {
     wait_ready(&root, &mut child);
     assert!(matches!(
         registry.acquire(current_resource()),
-        Err(Error::Invalid("INSTANCE_RESOURCE_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::INSTANCE_RESOURCE_BUSY
+        ))
     ));
     child.0.terminate().unwrap();
     let mut reservation = registry.acquire(current_resource()).unwrap();

@@ -30,7 +30,7 @@ pub struct Integration {
 pub fn apply(configuration: &Configuration, root: &Path, request: &Request) -> Result<Status> {
     let admission = configuration.lock()?.begin_login(request, None);
     let admission = match admission {
-        Err(Error::Invalid("GUARD_LOGIN_AUTHORIZATION_REQUIRED")) => {
+        Err(Error::Invalid(app_proxy_core::error_code::GUARD_LOGIN_AUTHORIZATION_REQUIRED)) => {
             // Admission already checked the request, revision and enabled intent.
             // It is repeated after native preparation to catch concurrent edits.
             let deployment = Deployment::listener(configuration.snapshot()?.store_id)?;

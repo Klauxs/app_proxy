@@ -341,7 +341,9 @@ async fn exact_native_child_is_classified_without_adoption_or_termination() {
     }
     let found = loop {
         match target.inspect(&child.0.identity).await {
-            Err(Error::Invalid("PROCESS_QUERY_BUSY")) if Instant::now() < until => {
+            Err(Error::Invalid(app_proxy_core::error_code::PROCESS_QUERY_BUSY))
+                if Instant::now() < until =>
+            {
                 tokio::task::yield_now().await
             }
             result => break result.unwrap(),
@@ -404,7 +406,9 @@ async fn exact_native_child_is_classified_without_adoption_or_termination() {
     let alias_target = InstanceTarget::new(&alias_app, Some(&data), Template::Claude).unwrap();
     let found = loop {
         match alias_target.inspect(&child.0.identity).await {
-            Err(Error::Invalid("PROCESS_QUERY_BUSY")) if Instant::now() < until => {
+            Err(Error::Invalid(app_proxy_core::error_code::PROCESS_QUERY_BUSY))
+                if Instant::now() < until =>
+            {
                 tokio::task::yield_now().await
             }
             result => break result.unwrap(),

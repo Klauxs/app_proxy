@@ -366,7 +366,7 @@ impl Monitor {
                                 Ok(Err(error)) => error,
                                 _ => Error::Invalid("GUARD_LISTENER_WORKER_FAILED"),
                             };
-                            let phase = if matches!(error, Error::Invalid("GUARD_LISTENER_MISSING" | "GUARD_TASK_MISSING")) { Phase::NeedsAuthorization } else { Phase::Blocked };
+                            let phase = if matches!(error, Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING | app_proxy_core::error_code::GUARD_TASK_MISSING)) { Phase::NeedsAuthorization } else { Phase::Blocked };
                             self.publish(owner_epoch, phase, None, Some(error.to_string()));
                         }
                     }

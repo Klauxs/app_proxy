@@ -311,7 +311,9 @@ pub(crate) async fn run_with_foreground(
                     installed_now = true;
                     println!("监听组件已安装，正在连接…")
                 }
-                Err(app_proxy_windows::Error::Invalid("GUARD_INSTALL_CANCELLED")) => {
+                Err(app_proxy_windows::Error::Invalid(
+                    app_proxy_core::error_code::GUARD_INSTALL_CANCELLED,
+                )) => {
                     return Err(fail(
                         exit::ACTION_REQUIRED,
                         "已取消 Windows 授权，实例配置保留。",

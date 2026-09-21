@@ -269,7 +269,9 @@ async fn cancelling_pending_downloads_releases_bounded_slots_without_configurati
         fixture.service.close(*id).unwrap();
         assert!(matches!(
             fixture.service.page(*id, 0),
-            Err(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED"))
+            Err(Error::Invalid(
+                app_proxy_core::error_code::SUBSCRIPTION_PREVIEW_EXPIRED
+            ))
         ));
     }
     until(|| !fixture.service.keeps_alive().unwrap()).await;
@@ -300,7 +302,9 @@ async fn expired_or_previous_epoch_previews_cannot_stage_configuration() {
     );
     assert!(matches!(
         replacement.page(id, 0),
-        Err(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::SUBSCRIPTION_PREVIEW_EXPIRED
+        ))
     ));
     fixture
         .service
@@ -313,7 +317,9 @@ async fn expired_or_previous_epoch_previews_cannot_stage_configuration() {
         fixture
             .service
             .stage(id, Uuid::new_v4(), import(Uuid::new_v4(), "Node0")),
-        Err(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::SUBSCRIPTION_PREVIEW_EXPIRED
+        ))
     ));
     assert!(!fixture.service.keeps_alive().unwrap());
     assert_eq!(fixture.secrets(), 0);

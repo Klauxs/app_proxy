@@ -142,7 +142,9 @@ fn bridge_script<T: serde::de::DeserializeOwned>(
             )
         });
         return Err(Error::Invalid(match code {
-            "APP_NOT_INSTALLED" => "APP_NOT_INSTALLED",
+            app_proxy_core::error_code::APP_NOT_INSTALLED => {
+                app_proxy_core::error_code::APP_NOT_INSTALLED
+            }
             "AMBIGUOUS_PACKAGE" => "AMBIGUOUS_PACKAGE",
             "PACKAGE_CHANGED" => "PACKAGE_CHANGED",
             "PACKAGE_NOT_FULL_TRUST" => "PACKAGE_NOT_FULL_TRUST",

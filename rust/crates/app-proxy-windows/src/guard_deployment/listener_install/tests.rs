@@ -49,7 +49,7 @@ fn only_missing_installation_objects_are_classified_as_absent() {
     for code in [2, 3] {
         assert!(matches!(
             missing(Error::Io(std::io::Error::from_raw_os_error(code))),
-            Error::Invalid("GUARD_LISTENER_MISSING")
+            Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING)
         ));
     }
     assert!(matches!(
@@ -61,7 +61,7 @@ fn only_missing_installation_objects_are_classified_as_absent() {
             operation: "fixture",
             code: 2
         }),
-        Error::Invalid("GUARD_LISTENER_MISSING")
+        Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING)
     ));
     assert!(matches!(
         missing(Error::Windows {
@@ -76,6 +76,8 @@ fn only_missing_installation_objects_are_classified_as_absent() {
     ));
     assert!(matches!(
         Deployment::listener(Uuid::new_v4()),
-        Err(Error::Invalid("GUARD_LISTENER_MISSING"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::GUARD_LISTENER_MISSING
+        ))
     ));
 }

@@ -393,7 +393,7 @@ async fn preview(
                 }
                 PreviewStatus::Pending {} => {}
             },
-            Err(Error::Invalid("SUBSCRIPTION_PREVIEW_EXPIRED")) => {
+            Err(Error::Invalid(app_proxy_core::error_code::SUBSCRIPTION_PREVIEW_EXPIRED)) => {
                 return Err(fail(exit::UNAVAILABLE, "订阅预览已失效，请重新读取。"));
             }
             Err(error) if retryable(&error) => {}
@@ -421,7 +421,7 @@ async fn stage(
         foreground.check()?;
         match coordinator::subscription_stage(root.into(), preview_id, id, request.clone()).await {
             Ok(staged) => return Ok(staged),
-            Err(Error::Invalid("SUBSCRIPTION_STAGE_PENDING")) => {}
+            Err(Error::Invalid(app_proxy_core::error_code::SUBSCRIPTION_STAGE_PENDING)) => {}
             Err(error) if retryable(&error) => {}
             Err(error) => return Err(rpc_failure(error)),
         }
@@ -442,7 +442,11 @@ fn retryable(error: &Error) -> bool {
     matches!(
         error,
         Error::Io(_)
-            | Error::Invalid("IPC_CONNECT_TIMEOUT" | "IPC_FRAME_TIMEOUT" | "IPC_CONNECTION_CLOSED")
+            | Error::Invalid(
+                app_proxy_core::error_code::IPC_CONNECT_TIMEOUT
+                    | "IPC_FRAME_TIMEOUT"
+                    | "IPC_CONNECTION_CLOSED"
+            )
     )
 }
 fn rpc_failure(error: Error) -> Failure {

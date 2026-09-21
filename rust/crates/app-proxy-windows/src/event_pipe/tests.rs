@@ -140,7 +140,9 @@ async fn native_pipe_is_read_only_and_normal_tokens_cannot_create_privileged_lis
             Duration::from_millis(20)
         )
         .await,
-        Err(Error::Invalid("IPC_CONNECT_TIMEOUT"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::IPC_CONNECT_TIMEOUT
+        ))
     ));
 }
 

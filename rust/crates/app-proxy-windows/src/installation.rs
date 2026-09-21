@@ -244,8 +244,12 @@ mod tests {
         ));
         first.verify_with(|_, _| Ok(package(&old, "1"))).unwrap();
         assert!(matches!(
-            first.verify_with(|_, _| Err(Error::Invalid("APP_NOT_INSTALLED"))),
-            Err(Error::Invalid("APP_NOT_INSTALLED"))
+            first.verify_with(|_, _| Err(Error::Invalid(
+                app_proxy_core::error_code::APP_NOT_INSTALLED
+            ))),
+            Err(Error::Invalid(
+                app_proxy_core::error_code::APP_NOT_INSTALLED
+            ))
         ));
         assert!(
             resolve_with(&locator(), |_, _| {

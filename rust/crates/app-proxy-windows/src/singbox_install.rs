@@ -460,7 +460,9 @@ mod tests {
         drop(store);
         assert!(matches!(
             Store::open(&root),
-            Err(Error::Invalid("STORE_ALREADY_OWNED"))
+            Err(Error::Invalid(
+                app_proxy_core::error_code::STORE_ALREADY_OWNED
+            ))
         ));
         assert!(!installer.core_is_installed().unwrap());
         drop(installer);

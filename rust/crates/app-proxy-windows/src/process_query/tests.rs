@@ -61,7 +61,9 @@ async fn timeout_and_cancel_keep_native_work_bounded_until_it_actually_finishes(
     ));
     assert!(matches!(
         query_with(&SLOT, QUERY_BUDGET, |_| Ok(())).await,
-        Err(Error::Invalid("PROCESS_QUERY_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::PROCESS_QUERY_BUSY
+        ))
     ));
     release.send(()).unwrap();
     wait_free(&SLOT).await;
@@ -77,7 +79,9 @@ async fn timeout_and_cancel_keep_native_work_bounded_until_it_actually_finishes(
     let _ = task.await;
     assert!(matches!(
         query_with(&SLOT, QUERY_BUDGET, |_| Ok(())).await,
-        Err(Error::Invalid("PROCESS_QUERY_BUSY"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::PROCESS_QUERY_BUSY
+        ))
     ));
     release.send(()).unwrap();
     wait_free(&SLOT).await;

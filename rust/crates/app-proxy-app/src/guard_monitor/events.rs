@@ -87,7 +87,12 @@ impl Monitor {
                                 );
                             }
                             Err(error) => {
-                                if matches!(error, Error::Invalid("GUARD_STOPPED_RECORD_FAILED")) {
+                                if matches!(
+                                    error,
+                                    Error::Invalid(
+                                        app_proxy_core::error_code::GUARD_STOPPED_RECORD_FAILED
+                                    )
+                                ) {
                                     let mut state =
                                         self.state.lock().unwrap_or_else(|p| p.into_inner());
                                     if state.owner == Some(owner) {

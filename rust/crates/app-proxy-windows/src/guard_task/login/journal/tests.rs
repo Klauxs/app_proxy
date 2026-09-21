@@ -203,7 +203,9 @@ fn login_completion_holds_operation_and_owner_leases_and_merges_unrelated_edits(
     drop(fixture.store);
     assert!(matches!(
         Store::open(&home),
-        Err(Error::Invalid("STORE_ALREADY_OWNED"))
+        Err(Error::Invalid(
+            app_proxy_core::error_code::STORE_ALREADY_OWNED
+        ))
     ));
     drop(completion);
     fixture.store = Store::open(&home).unwrap();

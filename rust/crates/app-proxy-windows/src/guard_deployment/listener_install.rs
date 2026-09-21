@@ -89,7 +89,7 @@ impl Deployment {
         let existing = match security::read_file(&root.join(LISTENER)) {
             Ok(mut file) => Some(read_record(&mut file, store, &current.user_sid)?),
             Err(error) => match missing(error) {
-                Error::Invalid("GUARD_LISTENER_MISSING") => None,
+                Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING) => None,
                 other => return Err(other),
             },
         };
@@ -161,7 +161,7 @@ fn read_upgrade(path: &Path) -> Result<Option<Upgrade>> {
     // upgrade, rather than a failed attempt to resume an existing one.
     let file = match security::read_file(path).map_err(missing) {
         Ok(file) => file,
-        Err(Error::Invalid("GUARD_LISTENER_MISSING")) => return Ok(None),
+        Err(Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING)) => return Ok(None),
         Err(error) => return Err(error),
     };
     let mut bytes = Vec::new();
@@ -240,9 +240,11 @@ fn upgrade_listener(
 
 fn missing(error: Error) -> Error {
     match error {
-        Error::Windows { code: 2 | 3, .. } => Error::Invalid("GUARD_LISTENER_MISSING"),
+        Error::Windows { code: 2 | 3, .. } => {
+            Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING)
+        }
         Error::Io(ref io) if matches!(io.raw_os_error(), Some(2 | 3)) => {
-            Error::Invalid("GUARD_LISTENER_MISSING")
+            Error::Invalid(app_proxy_core::error_code::GUARD_LISTENER_MISSING)
         }
         other => other,
     }
