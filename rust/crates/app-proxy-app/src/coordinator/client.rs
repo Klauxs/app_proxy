@@ -25,6 +25,17 @@ pub(super) async fn rpc(
     wait: Duration,
     request: Request,
 ) -> Result<Reply> {
+    send(store_id, policy, wait, &request).await
+}
+
+/// `IPC_CONNECT_TIMEOUT` is the only failure that proves the request was never
+/// sent; every other error leaves the outcome to be queried by request ID.
+async fn send(
+    store_id: Uuid,
+    policy: &ipc::PeerPolicy,
+    wait: Duration,
+    request: &Request,
+) -> Result<Reply> {
     let mut connection = ipc::connect(store_id, policy, wait).await?;
     connection
         .send(&hello(store_id, policy.session_id, None))
@@ -51,7 +62,7 @@ pub(super) async fn rpc(
         return Err(Error::Invalid("IPC_SERVER_HELLO_MISMATCH"));
     }
     let request_id = request.request_id;
-    connection.send(&request).await?;
+    connection.send(request).await?;
     let response: Response = connection.receive().await?;
     if response.request_id != request_id || Some(response.epoch) != server.epoch {
         return Err(Error::Invalid("IPC_RESPONSE_MISMATCH"));
@@ -484,20 +495,32 @@ pub(super) async fn client_operation(
     request_id: Uuid,
     operation: Operation,
 ) -> Result<Reply> {
-    let owner = status(root).await?;
+    identity::assert_ordinary_user()?;
+    ensure_store(&root).await?;
+    let descriptor = store::describe(&root)?;
     let (_, host) = binaries()?;
     let policy = ipc::PeerPolicy::current(vec![identity::file_identity(&host)?])?;
-    rpc(
-        owner.store_id,
+    let request = Request {
+        protocol_major: PROTOCOL_MAJOR,
+        request_id,
+        operation,
+    };
+    // A running coordinator answers on the first connection. Only when nobody
+    // is listening does the client go through discovery and startup, after
+    // which the same, still unsent request is delivered.
+    match send(
+        descriptor.store_id,
         &policy,
-        Duration::from_secs(1),
-        Request {
-            protocol_major: PROTOCOL_MAJOR,
-            request_id,
-            operation,
-        },
+        Duration::from_millis(40),
+        &request,
     )
     .await
+    {
+        Err(Error::Invalid("IPC_CONNECT_TIMEOUT")) => {}
+        result => return result,
+    }
+    let owner = status(root).await?;
+    send(owner.store_id, &policy, Duration::from_secs(1), &request).await
 }
 
 /// Launch-on-demand status flow; no arbitrary commands or target processes are accepted.
