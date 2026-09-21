@@ -2,6 +2,8 @@
 use crate::{Error, Result, identity, storage_security as security, wide};
 use app_proxy_core::model::{FORMAT, MANIFEST_LIMIT, Manifest, SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
@@ -90,6 +92,15 @@ pub struct Store {
     owner: Owner,
     _directories: Vec<OwnedHandle>,
     _lock: std::sync::Arc<File>,
+    validated_secrets: RefCell<Option<ValidatedSecrets>>,
+}
+
+// Secret IDs are immutable. Retained read-only handles deny writes/deletion,
+// so a successfully validated snapshot need not reopen every subscription node
+// on each Guard/configuration read. No secret values are kept in this cache.
+struct ValidatedSecrets {
+    manifest_digest: [u8; 32],
+    _pins: Vec<File>,
 }
 
 impl Store {
@@ -193,6 +204,7 @@ impl Store {
             owner,
             _directories: directories,
             _lock: std::sync::Arc::new(lock),
+            validated_secrets: RefCell::new(None),
         };
         store.load()?;
         store.recover_config_requests()?;
@@ -200,6 +212,7 @@ impl Store {
     }
 
     pub fn load(&self) -> Result<Manifest> {
+        let _timing = crate::diagnostic_timing::Span::new("store.load", String::new);
         let manifest: Manifest = decode(&read_protected(
             &self.root.join("manifest.json"),
             &self.owner.owner_sid,
@@ -299,6 +312,34 @@ impl Store {
         if manifest.store_id != self.owner.store_id || manifest.owner_sid != self.owner.owner_sid {
             return Err(Error::Invalid("MANIFEST_OWNER_MISMATCH"));
         }
+        // Hash the complete contents, not just revision: even an out-of-band
+        // same-revision edit must undergo full credential validation again.
+        let manifest_digest: [u8; 32] = Sha256::digest(encode(manifest, MANIFEST_LIMIT)?).into();
+        if self
+            .validated_secrets
+            .borrow()
+            .as_ref()
+            .is_some_and(|cached| cached.manifest_digest == manifest_digest)
+        {
+            return Ok(());
+        }
+        let _timing = crate::diagnostic_timing::Span::new("store.validate_secrets", || {
+            manifest.secret_ids().len().to_string()
+        });
+        let mut pins = Vec::new();
+        let mut read_secret = |id: Uuid| -> Result<String> {
+            let (bytes, file) = read_protected_pinned(
+                &self.root.join(format!("secrets/{id}.json")),
+                &self.owner.owner_sid,
+                SECRET_LIMIT,
+            )?;
+            let secret: Secret = decode(&bytes)?;
+            if secret.value.contains('\0') {
+                return Err(Error::Invalid("INVALID_SECRET_VALUE"));
+            }
+            pins.push(file);
+            Ok(secret.value)
+        };
         let mut checked = std::collections::HashSet::new();
         for profile in &manifest.profiles {
             if let app_proxy_core::model::ProxySource::Subscription {
@@ -307,19 +348,23 @@ impl Store {
                 ..
             } = &profile.source
             {
-                app_proxy_core::subscription::source_url(&self.read_secret(*url_secret_id)?)
+                app_proxy_core::subscription::source_url(&read_secret(*url_secret_id)?)
                     .map_err(|_| Error::Invalid("SUBSCRIPTION_URL_INVALID"))?;
                 checked.insert(*url_secret_id);
                 for node in nodes {
-                    node.resolve(&self.read_secret(node.secret_id)?)
+                    node.resolve(&read_secret(node.secret_id)?)
                         .map_err(|_| Error::Invalid("INVALID_SUBSCRIPTION_SECRET"))?;
                     checked.insert(node.secret_id);
                 }
             }
         }
         for id in manifest.secret_ids().difference(&checked) {
-            self.read_secret(*id)?;
+            read_secret(*id)?;
         }
+        *self.validated_secrets.borrow_mut() = Some(ValidatedSecrets {
+            manifest_digest,
+            _pins: pins,
+        });
         Ok(())
     }
 
@@ -429,6 +474,10 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8], sid: &str) -> Result<()> {
     Ok(())
 }
 pub(crate) fn read_protected(path: &Path, sid: &str, limit: usize) -> Result<Vec<u8>> {
+    read_protected_pinned(path, sid, limit).map(|(bytes, _)| bytes)
+}
+
+fn read_protected_pinned(path: &Path, sid: &str, limit: usize) -> Result<(Vec<u8>, File)> {
     security::no_reparse(path)?;
     let file = OpenOptions::new()
         .read(true)
@@ -440,11 +489,11 @@ pub(crate) fn read_protected(path: &Path, sid: &str, limit: usize) -> Result<Vec
     }
     security::verify(file.as_raw_handle(), sid, false)?;
     let mut bytes = Vec::new();
-    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    (&file).take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(Error::Invalid("STORE_FILE_TOO_LARGE"));
     }
-    Ok(bytes)
+    Ok((bytes, file))
 }
 
 /// User-selected advanced input may contain credentials. Read a bounded file

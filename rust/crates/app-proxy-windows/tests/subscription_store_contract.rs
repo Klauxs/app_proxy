@@ -140,10 +140,62 @@ fn bad_subscription_secrets_reject_commit_and_existing_corruption_is_preserved()
     store.commit(1, manifest).unwrap();
     let before = fs::read(root.join("manifest.json")).unwrap();
     let path = root.join(format!("secrets/{secret_id}.json"));
-    fs::write(&path, br#"{"value":"{broken-secret"}"#).unwrap();
-    assert!(store.load().is_err());
+    // Live validated snapshots pin even unselected credentials against edits.
+    assert!(fs::write(&path, br#"{"value":"{broken-secret"}"#).is_err());
+    assert!(fs::remove_file(&path).is_err());
+    assert!(store.load().is_ok());
     drop(store);
+    fs::write(&path, br#"{"value":"{broken-secret"}"#).unwrap();
     assert!(Store::open(&root).is_err());
     assert_eq!(fs::read(root.join("manifest.json")).unwrap(), before);
     assert_eq!(fs::read(path).unwrap(), br#"{"value":"{broken-secret"}"#);
+}
+
+#[test]
+fn same_revision_edit_cannot_reuse_validated_subscription_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let mut store = Store::create(&root).unwrap();
+    let profile = stage(&store);
+    let mut manifest = store.load().unwrap();
+    manifest.profiles.push(profile);
+    store.commit(1, manifest).unwrap();
+    store.load().unwrap();
+    let path = root.join("manifest.json");
+    let original = fs::read(&path).unwrap();
+    let mut edited: Manifest = serde_json::from_slice(&original).unwrap();
+    let ProxySource::Subscription { nodes, .. } = &mut edited.profiles[0].source else {
+        panic!()
+    };
+    // Still structurally valid, but its credential belongs to a different node.
+    nodes[1].secret_id = nodes[0].secret_id;
+    fs::write(&path, serde_json::to_vec(&edited).unwrap()).unwrap();
+    assert!(store.load().is_err());
+    fs::write(&path, original).unwrap();
+    assert!(store.load().is_ok());
+}
+
+#[test]
+fn replacing_subscription_releases_old_pins_and_validates_new_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let mut store = Store::create(&root).unwrap();
+    let first = stage(&store);
+    let mut manifest = store.load().unwrap();
+    manifest.profiles.push(first);
+    store.commit(1, manifest).unwrap();
+    let old = store.load().unwrap().secret_ids();
+    let next = stage(&store);
+    let mut manifest = store.load().unwrap();
+    manifest.profiles = vec![next];
+    store.commit(2, manifest).unwrap();
+    let current = store.load().unwrap();
+    for id in old {
+        assert!(!current.secret_ids().contains(&id));
+        fs::remove_file(root.join(format!("secrets/{id}.json"))).unwrap();
+    }
+    for id in current.secret_ids() {
+        assert!(fs::remove_file(root.join(format!("secrets/{id}.json"))).is_err());
+    }
+    assert!(store.load().is_ok());
 }
