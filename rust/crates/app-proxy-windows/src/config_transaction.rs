@@ -1,6 +1,6 @@
 //! Configuration-only intent → manifest → receipt protocol. No external process,
 //! shortcut or registry side effects are allowed inside these transactions.
-use crate::journal::{RETENTION, now};
+use crate::journal::{RETENTION, RequestJournal, now};
 use crate::{
     Error, Result, storage_security as security,
     store::{self, Store},
@@ -72,13 +72,7 @@ impl Store {
         if request.request_id.is_nil() {
             return Err(Error::Invalid("INVALID_REQUEST_ID"));
         }
-        if self.core_request_status(request.request_id)?.is_some()
-            || self.launch_request(request.request_id)?.is_some()
-            || self.shortcut_request_status(request.request_id)?.is_some()
-            || self.login_request_status(request.request_id)?.is_some()
-        {
-            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
-        }
+        self.ensure_request_id_unused_elsewhere(request.request_id, RequestJournal::Config)?;
         let digest = digest_bytes(&store::encode(request, REQUEST_LIMIT)?);
         self.recover_config_requests()?;
         let header = self.load()?;
@@ -102,13 +96,7 @@ impl Store {
         request: &ConfigRequest,
         rejection: Option<&'static str>,
     ) -> Result<ConfigOutcome> {
-        if self.core_request_status(request.request_id)?.is_some()
-            || self.launch_request(request.request_id)?.is_some()
-            || self.shortcut_request_status(request.request_id)?.is_some()
-            || self.login_request_status(request.request_id)?.is_some()
-        {
-            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
-        }
+        self.ensure_request_id_unused_elsewhere(request.request_id, RequestJournal::Config)?;
         if rejection.is_some_and(|code| {
             code.is_empty()
                 || code.len() > 96

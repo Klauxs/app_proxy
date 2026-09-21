@@ -1,7 +1,7 @@
 //! Intent and ownership survive lost replies. Native work executes outside the
 //! configuration mutex; an operation lease serializes it until completion.
 use super::*;
-use crate::journal::{RETENTION, now};
+use crate::journal::{RETENTION, RequestJournal, now};
 use crate::{storage_security, store::Store};
 use app_proxy_core::model::{Desired, LoginTask};
 use std::{
@@ -220,13 +220,7 @@ impl Store {
             }
             return self.login_preparation(&journal, request.id, lease);
         }
-        if self.config_request_status(request.id)?.is_some()
-            || self.core_request_status(request.id)?.is_some()
-            || self.launch_request(request.id)?.is_some()
-            || self.shortcut_request_status(request.id)?.is_some()
-        {
-            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
-        }
+        self.ensure_request_id_unused_elsewhere(request.id, RequestJournal::Login)?;
         self.ensure_core_update_idle()?;
         let manifest = self.load()?;
         if manifest.revision != request.expected_revision {

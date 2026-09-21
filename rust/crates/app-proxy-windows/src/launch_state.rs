@@ -1,6 +1,6 @@
 //! One bounded atomic journal keeps request aliases, attempts and confirmed
 //! sessions consistent. Opening or reading it never replays process creation.
-use crate::journal::{RETENTION, now};
+use crate::journal::{RETENTION, RequestJournal, now};
 use crate::{
     Error, Result, process,
     store::{self, Store},
@@ -151,13 +151,7 @@ impl Store {
         if request.request_id.is_nil() || request.instance_id.is_nil() || epoch.is_nil() {
             return Err(Error::Invalid("INVALID_LAUNCH_REQUEST"));
         }
-        if self.core_request_status(request.request_id)?.is_some()
-            || self.config_request_status(request.request_id)?.is_some()
-            || self.shortcut_request_status(request.request_id)?.is_some()
-            || self.login_request_status(request.request_id)?.is_some()
-        {
-            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
-        }
+        self.ensure_request_id_unused_elsewhere(request.request_id, RequestJournal::Launch)?;
         let mut journal = self.read_launch_journal()?;
         if let Some(entry) = journal
             .requests

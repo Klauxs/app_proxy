@@ -1,7 +1,7 @@
 //! Persistent shortcut ownership and explicit recovery. Completed creation
 //! records remain for as long as the integration exists, not just request TTL.
 use super::*;
-use crate::journal::{RETENTION, now};
+use crate::journal::{RETENTION, RequestJournal, now};
 use crate::store::{self, Store};
 use app_proxy_core::{
     model::{Manifest, Shortcut},
@@ -242,13 +242,7 @@ impl Store {
                 Err(Error::Invalid("REQUEST_ID_CONFLICT"))
             };
         }
-        if self.config_request_status(request.id)?.is_some()
-            || self.core_request_status(request.id)?.is_some()
-            || self.launch_request(request.id)?.is_some()
-            || self.login_request_status(request.id)?.is_some()
-        {
-            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
-        }
+        self.ensure_request_id_unused_elsewhere(request.id, RequestJournal::Shortcut)?;
         self.ensure_core_update_idle()?;
         let manifest = self.load()?;
         if manifest.revision != request.expected_revision {

@@ -1,6 +1,6 @@
 //! Request identity is durable before core side effects. Pending requests are
 //! never replayed automatically: an interrupted launch can have already spawned.
-use crate::journal::{RETENTION, now};
+use crate::journal::{RETENTION, RequestJournal, now};
 use crate::{
     Error, Result, storage_security as security,
     store::{self, Store},
@@ -47,13 +47,7 @@ impl Store {
             return Err(Error::Invalid("INVALID_REQUEST_ID"));
         }
         self.prune_core_requests()?;
-        if self.config_request_status(id)?.is_some()
-            || self.launch_request(id)?.is_some()
-            || self.shortcut_request_status(id)?.is_some()
-            || self.login_request_status(id)?.is_some()
-        {
-            return Err(Error::Invalid("REQUEST_ID_CONFLICT"));
-        }
+        self.ensure_request_id_unused_elsewhere(id, RequestJournal::Core)?;
         let mut action = action.clone();
         action.normalize().map_err(|e| Error::Invalid(e.0))?;
         let digest: [u8; 32] = Sha256::digest(store::encode(&action, LIMIT)?).into();
