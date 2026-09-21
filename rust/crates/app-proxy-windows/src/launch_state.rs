@@ -1,10 +1,7 @@
 //! One bounded atomic journal keeps request aliases, attempts and confirmed
 //! sessions consistent. Opening or reading it never replays process creation.
 use crate::journal::{RETENTION, RequestJournal, now};
-use crate::{
-    Error, Result, process,
-    store::{self, Store},
-};
+use crate::{Error, Result, process, store::Store};
 use app_proxy_core::launch::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -629,26 +626,21 @@ impl Store {
 
     fn read_launch_journal(&self) -> Result<Journal> {
         let header = self.load()?;
-        if !self.root().join(PATH).try_exists()? {
+        let Some(journal) = self.read_journal::<Journal>(PATH, &header.owner_sid, LIMIT)? else {
             return Ok(Journal {
                 schema_version: 1,
                 store_id: header.store_id,
                 requests: vec![],
                 attempts: vec![],
             });
-        }
-        let journal = store::decode(&store::read_protected(
-            &self.root().join(PATH),
-            &header.owner_sid,
-            LIMIT,
-        )?)?;
+        };
         self.validate_launch_journal(&journal)?;
         Ok(journal)
     }
 
     fn write_launch_journal(&self, journal: &Journal) -> Result<()> {
         self.validate_launch_journal(journal)?;
-        self.replace_bounded(PATH, &store::encode(journal, LIMIT)?, LIMIT)
+        self.write_journal(PATH, journal, LIMIT)
     }
 
     fn validate_launch_journal(&self, journal: &Journal) -> Result<()> {

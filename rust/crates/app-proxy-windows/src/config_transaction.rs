@@ -259,23 +259,9 @@ impl Store {
         };
         let mut pending = None;
         let now = now()?;
-        for entry in std::fs::read_dir(self.root().join("state/requests"))? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let text = name
-                .to_str()
-                .ok_or(Error::Invalid("UNKNOWN_REQUEST_FILE"))?;
-            // Incomplete same-directory temporary writes were never committed.
-            if text.starts_with(".tmp") {
-                continue;
-            }
-            let id = text
-                .strip_suffix(".json")
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or(Error::Invalid("UNKNOWN_REQUEST_FILE"))?;
-            if text != format!("{id}.json") {
-                return Err(Error::Invalid("UNKNOWN_REQUEST_FILE"));
-            }
+        for id in
+            crate::journal::record_ids(&self.root().join("state/requests"), "UNKNOWN_REQUEST_FILE")?
+        {
             let record = self
                 .read_record(id, &header)?
                 .ok_or(Error::Invalid("REQUEST_RECORD_DISAPPEARED"))?;

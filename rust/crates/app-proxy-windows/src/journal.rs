@@ -2,7 +2,9 @@
 //!
 //! Each journal keeps its own record types and rules; what they have in common
 //! lives here so that one journal cannot drift from the others.
-use crate::{Error, Result, store::Store};
+use crate::{Error, Result, store, store::Store};
+use serde::{Serialize, de::DeserializeOwned};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -16,6 +18,59 @@ pub(crate) fn now() -> Result<u64> {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .map_err(|_| Error::Invalid("SYSTEM_CLOCK_INVALID"))
+}
+
+/// IDs of the `<uuid>.json` records in a one-file-per-request directory.
+///
+/// Interrupted same-directory temporary writes (`.tmp*`) were never committed
+/// and are skipped. Any other name is reported with the journal's own code and
+/// nothing is touched: the listing completes before a caller acts on any record.
+pub(crate) fn record_ids(directory: &Path, unknown: &'static str) -> Result<Vec<Uuid>> {
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let name = entry?.file_name();
+        let text = name.to_str().ok_or(Error::Invalid(unknown))?;
+        if text.starts_with(".tmp") {
+            continue;
+        }
+        let id = text
+            .strip_suffix(".json")
+            .and_then(|stem| Uuid::parse_str(stem).ok())
+            .ok_or(Error::Invalid(unknown))?;
+        // Reject alternative spellings of the same UUID.
+        if text != format!("{id}.json") {
+            return Err(Error::Invalid(unknown));
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+impl Store {
+    /// Reads a single-file journal. `None` means it was never written, which
+    /// every journal treats as empty. The caller validates the content.
+    pub(crate) fn read_journal<T: DeserializeOwned>(
+        &self,
+        relative: &str,
+        owner_sid: &str,
+        limit: usize,
+    ) -> Result<Option<T>> {
+        match store::read_protected(&self.root().join(relative), owner_sid, limit) {
+            Ok(bytes) => store::decode(&bytes).map(Some),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Replaces a single-file journal that the caller has already validated.
+    pub(crate) fn write_journal<T: Serialize>(
+        &self,
+        relative: &str,
+        journal: &T,
+        limit: usize,
+    ) -> Result<()> {
+        self.replace_bounded(relative, &store::encode(journal, limit)?, limit)
+    }
 }
 
 /// Every journal that accepts caller-chosen request IDs.

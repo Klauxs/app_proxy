@@ -414,18 +414,13 @@ impl Store {
     }
     fn read_login(&self) -> Result<Journal> {
         let owner = store::describe(self.root())?;
-        let bytes = match store::read_protected(&self.root().join(PATH), &owner.owner_sid, LIMIT) {
-            Ok(b) => b,
-            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Journal {
-                    version: 1,
-                    store_id: owner.store_id,
-                    entries: vec![],
-                });
-            }
-            Err(e) => return Err(e),
+        let Some(journal) = self.read_journal::<Journal>(PATH, &owner.owner_sid, LIMIT)? else {
+            return Ok(Journal {
+                version: 1,
+                store_id: owner.store_id,
+                entries: vec![],
+            });
         };
-        let journal: Journal = store::decode(&bytes)?;
         validate(&journal, owner.store_id, self.load()?.revision)?;
         Ok(journal)
     }
@@ -435,7 +430,7 @@ impl Store {
             store::describe(self.root())?.store_id,
             self.load()?.revision,
         )?;
-        self.replace_bounded(PATH, &store::encode(journal, LIMIT)?, LIMIT)
+        self.write_journal(PATH, journal, LIMIT)
     }
 }
 fn same_metadata(a: &LoginTask, b: &LoginTask) -> bool {

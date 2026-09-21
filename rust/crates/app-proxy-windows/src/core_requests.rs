@@ -325,25 +325,10 @@ impl Store {
         let Some(_pin) = self.core_request_directory(false)? else {
             return Ok(Vec::new());
         };
-        let mut ids = Vec::new();
-        for entry in std::fs::read_dir(self.root().join("state/core-requests"))? {
-            let name = entry?.file_name();
-            let text = name
-                .to_str()
-                .ok_or(Error::Invalid("UNKNOWN_CORE_REQUEST_FILE"))?;
-            if text.starts_with(".tmp") {
-                continue;
-            }
-            let id = text
-                .strip_suffix(".json")
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or(Error::Invalid("UNKNOWN_CORE_REQUEST_FILE"))?;
-            if text != format!("{id}.json") {
-                return Err(Error::Invalid("UNKNOWN_CORE_REQUEST_FILE"));
-            }
-            ids.push(id);
-        }
-        Ok(ids)
+        crate::journal::record_ids(
+            &self.root().join("state/core-requests"),
+            "UNKNOWN_CORE_REQUEST_FILE",
+        )
     }
 
     fn prune_core_requests(&self) -> Result<()> {

@@ -464,19 +464,14 @@ impl Store {
 
     fn read_shortcuts(&self) -> Result<Journal> {
         let owner = store::describe(self.root())?;
-        let bytes =
-            match store::read_protected(&self.root().join(PATH), &owner.owner_sid, JOURNAL_LIMIT) {
-                Ok(bytes) => bytes,
-                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(Journal {
-                        version: 1,
-                        store_id: owner.store_id,
-                        entries: vec![],
-                    });
-                }
-                Err(e) => return Err(e),
-            };
-        let journal: Journal = store::decode(&bytes)?;
+        let Some(journal) = self.read_journal::<Journal>(PATH, &owner.owner_sid, JOURNAL_LIMIT)?
+        else {
+            return Ok(Journal {
+                version: 1,
+                store_id: owner.store_id,
+                entries: vec![],
+            });
+        };
         validate(&journal, owner.store_id)?;
         validate_revisions(&journal, self.load()?.revision)?;
         Ok(journal)
@@ -484,7 +479,7 @@ impl Store {
     fn write_shortcuts(&self, journal: &Journal) -> Result<()> {
         validate(journal, store::describe(self.root())?.store_id)?;
         validate_revisions(journal, self.load()?.revision)?;
-        self.replace_bounded(PATH, &store::encode(journal, JOURNAL_LIMIT)?, JOURNAL_LIMIT)
+        self.write_journal(PATH, journal, JOURNAL_LIMIT)
     }
 }
 
