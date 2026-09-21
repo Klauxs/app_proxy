@@ -176,6 +176,18 @@ fn real_cli_queries_removes_and_replays_owned_link_without_installation() {
     assert_eq!(report["status"]["status"], "pending");
     assert_eq!(fs::read(&path).unwrap(), b"user modification fixture");
     let remove_id = report["request_id"].as_str().unwrap();
+    let text_failure = fixture.cli(&["shortcut", "resume", remove_id]);
+    assert_eq!(text_failure.status.code(), Some(4));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&text_failure.stdout),
+        String::from_utf8_lossy(&text_failure.stderr)
+    );
+    assert!(text.contains("尚未完成删除"));
+    assert!(text.contains("已被修改"));
+    assert!(text.contains("继续处理"));
+    assert!(!text.contains(remove_id));
+    assert!(!text.contains("COORDINATOR_OPERATION_FAILED"));
     let view = fixture.ok(&["shortcut", "status", &instance, "--json"]);
     assert_eq!(view["integration"]["request"]["id"], remove_id);
     assert_eq!(

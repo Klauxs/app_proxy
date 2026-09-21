@@ -109,17 +109,39 @@ pub fn filename(name: &str, instance: Uuid) -> Result<String> {
     if instance.is_nil() {
         return Err(Error::Invalid("SHORTCUT_INSTANCE_REQUIRED"));
     }
+    Ok(format!(
+        "{} - {}.lnk",
+        filename_stem(name),
+        &instance.to_string()[..8]
+    ))
+}
+
+pub fn original_filename(application_name: &str) -> Result<String> {
+    let name = filename_stem(application_name);
+    let device = name.split('.').next().unwrap().to_ascii_uppercase();
+    if matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            device.strip_prefix(prefix).is_some_and(|n| {
+                matches!(
+                    n,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        })
+    {
+        return Err(Error::Invalid("SHORTCUT_PATH_INVALID"));
+    }
+    Ok(format!("{name}.lnk"))
+}
+
+fn filename_stem(name: &str) -> String {
     let name: String = name
         .chars()
         .filter(|c| !c.is_control() && !"<>:\"/\\|?*".contains(*c))
         .take(64)
         .collect();
     let name = name.trim_matches([' ', '.']);
-    Ok(format!(
-        "{} - {}.lnk",
-        if name.is_empty() { "实例" } else { name },
-        &instance.to_string()[..8]
-    ))
+    if name.is_empty() { "实例" } else { name }.into()
 }
 
 /// Read only; creating links on the real desktop is a separate foreground action.
@@ -148,21 +170,33 @@ fn absolute(path: &Path) -> Result<()> {
     Ok(())
 }
 
+// Rust's current_exe/canonicalize can return a verbatim drive path. Shell Link
+// setters reject that spelling with E_INVALIDARG. Normalize only at the Shell
+// boundary; keep the journal's original spec for ownership and crash recovery.
+fn shell_path(path: &Path) -> Result<PathBuf> {
+    absolute(path)?;
+    let text = path
+        .to_str()
+        .ok_or(Error::Invalid("SHORTCUT_PATH_INVALID"))?;
+    Ok(PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text)))
+}
+
 /// Encode before external publication, so the caller can persist recovery evidence.
 pub fn encode(spec: &Spec) -> Result<Vec<u8>> {
     identity::assert_ordinary_user()?;
     spec.validate()?;
     let session = Session::new()?;
-    let target = wide(spec.host.as_os_str())?;
+    let host = shell_path(&spec.host)?;
+    let icon_path = shell_path(&spec.icon)?;
+    let target = wide(host.as_os_str())?;
     let cwd = wide(
-        spec.host
-            .parent()
+        host.parent()
             .ok_or(Error::Invalid("SHORTCUT_PATH_INVALID"))?
             .as_os_str(),
     )?;
     let args = wide(std::ffi::OsStr::new(&spec.arguments()?))?;
     let description = wide(std::ffi::OsStr::new(&spec.description()))?;
-    let icon = wide(spec.icon.as_os_str())?;
+    let icon = wide(icon_path.as_os_str())?;
     // SAFETY: all buffers are terminated; COM interfaces remain on this thread
     // and are released before Session's apartment. No Resolve or execution call.
     let bytes = unsafe {
@@ -444,11 +478,12 @@ fn inspect_bytes(spec: &Spec, bytes: &[u8]) -> Result<()> {
         let icon = get_text(|buf| session.link.GetIconLocation(buf, &mut index))?;
         let data: IShellLinkDataList = session.link.cast().map_err(com_error)?;
         let flags = data.GetFlags().map_err(com_error)?;
-        if Path::new(&path) != spec.host
+        let host = shell_path(&spec.host)?;
+        if Path::new(&path) != host
             || args != spec.arguments()?
-            || Path::new(&cwd) != spec.host.parent().unwrap()
+            || Path::new(&cwd) != host.parent().unwrap()
             || description != spec.description()
-            || Path::new(&icon) != spec.icon
+            || Path::new(&icon) != shell_path(&spec.icon)?
             || index != 0
             || flags & !ALLOWED_FLAGS != 0
             || flags & TRACKING_DISABLED != TRACKING_DISABLED

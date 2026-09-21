@@ -442,6 +442,10 @@ impl Shared {
 fn safe_error(error: Error) -> String {
     match error {
         Error::Invalid(code) => code.into(),
+        Error::Windows {
+            operation: "ShortcutCom",
+            code,
+        } => format!("SHORTCUT_COM_ERROR:{code}"),
         _ => "COORDINATOR_OPERATION_FAILED".into(),
     }
 }
@@ -1089,6 +1093,14 @@ async fn rpc(
         return Err(Error::Invalid("IPC_RESPONSE_MISMATCH"));
     }
     if let Reply::Error { code } = &response.result {
+        if let Some(value) = code.strip_prefix("SHORTCUT_COM_ERROR:")
+            && let Ok(code) = value.parse::<u32>()
+        {
+            return Err(Error::Windows {
+                operation: "ShortcutCom",
+                code,
+            });
+        }
         return Err(Error::Invalid(match code.as_str() {
             "GUARD_LOGIN_BUSY" => "GUARD_LOGIN_BUSY",
             "GUARD_LOGIN_CHECK_TIMEOUT" => "GUARD_LOGIN_CHECK_TIMEOUT",
@@ -1115,6 +1127,9 @@ async fn rpc(
             "SHORTCUT_REQUEST_NOT_FOUND" => "SHORTCUT_REQUEST_NOT_FOUND",
             "SHORTCUT_PATH_OCCUPIED" => "SHORTCUT_PATH_OCCUPIED",
             "SHORTCUT_CHANGED" => "SHORTCUT_CHANGED",
+            "SHORTCUT_FILE_BUSY" => "SHORTCUT_FILE_BUSY",
+            "SHORTCUT_CONTENT_CONFLICT" => "SHORTCUT_CONTENT_CONFLICT",
+            "SHORTCUT_PATH_INVALID" => "SHORTCUT_PATH_INVALID",
             "SHORTCUT_METADATA_CONFLICT" => "SHORTCUT_METADATA_CONFLICT",
             "SHORTCUT_LOCATIONS_CONFLICT" => "SHORTCUT_LOCATIONS_CONFLICT",
             "SHORTCUT_JOURNAL_INVALID" => "SHORTCUT_JOURNAL_INVALID",

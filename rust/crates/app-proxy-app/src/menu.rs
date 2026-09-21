@@ -776,16 +776,18 @@ async fn manage_shortcut(
     crate::shortcut_cli::print_registration(&view);
     match view.integration {
         None => {
-            confirm("在当前用户桌面创建此实例的快捷方式？", foreground).await?;
+            fixed("在桌面创建此实例的快捷方式", &["创建"], None, foreground)
+                .await?
+                .ok_or_else(returned)?;
             crate::shortcut_cli::change(root, id, view.revision, Action::Create, None, foreground)
                 .await
         }
         Some(entry) => {
             if let Status::Pending { action, .. } = entry.status {
                 let options = match action {
-                    Action::Create => vec!["继续原创建请求", "取消此创建并清理已创建的入口"],
-                    Action::Remove => vec!["继续原删除请求"],
-                    Action::Repair => vec!["继续原恢复请求"],
+                    Action::Create => vec!["继续处理（重试创建）", "取消创建"],
+                    Action::Remove => vec!["继续处理（重试移除）"],
+                    Action::Repair => vec!["继续处理（重试恢复）"],
                 };
                 let choice = fixed("未完成的快捷方式操作", &options, None, foreground)
                     .await?

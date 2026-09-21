@@ -91,13 +91,7 @@ fn service_derives_fixed_fields_and_replays_without_resolving_removed_applicatio
     let Status::Created { path, .. } = fixture.create().unwrap() else {
         panic!("create missing")
     };
-    assert_eq!(
-        path,
-        fixture
-            .assets()
-            .desktop
-            .join(native::filename("分身 : fixture", fixture.request.instance_id).unwrap())
-    );
+    assert_eq!(path, fixture.assets().desktop.join("app.lnk"));
     let manifest = fixture.configuration.snapshot().unwrap();
     let icon = fixture.root.join("state").join(format!(
         "icon-{:x}.ico",

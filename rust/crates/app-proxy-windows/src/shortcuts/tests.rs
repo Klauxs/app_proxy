@@ -39,6 +39,18 @@ pub(super) fn setup() -> (tempfile::TempDir, Spec, PathBuf) {
 }
 
 #[test]
+fn canonical_host_path_roundtrips_through_shell_link() {
+    let (_root, mut spec, path) = setup();
+    spec.host = std::fs::canonicalize(&spec.host).unwrap();
+    spec.icon = std::fs::canonicalize(&spec.icon).unwrap();
+    let bytes = encode(&spec).unwrap();
+    let staged = staging::prepare(&path, &spec, &bytes).unwrap();
+    staging::publish(&staged, &path, &spec).unwrap();
+    verify(&path, &spec, &staged.receipt).unwrap();
+    remove(&path, &spec, &staged.receipt).unwrap();
+}
+
+#[test]
 fn shell_link_roundtrip_uses_fixed_hidden_host_and_exact_owned_deletion() {
     let (_root, spec, path) = setup();
     let bytes = encode(&spec).unwrap();

@@ -1,6 +1,6 @@
 //! Desktop paths and launch targets are derived here, never supplied by RPC.
 use crate::configuration::Configuration;
-use app_proxy_core::model::ApplicationLocator;
+use app_proxy_core::model::{ApplicationLocator, InstanceData};
 use app_proxy_windows::{
     Error, Result, installation,
     shortcuts::{
@@ -106,9 +106,11 @@ fn apply_with(
         .ok_or(Error::Invalid("APPLICATION_NOT_FOUND"))?;
     // OS/package/resource queries hold no configuration lock.
     let assets = prepare(&application.locator)?;
-    let path = assets
-        .desktop
-        .join(native::filename(&instance.name, instance.id)?);
+    let name = match instance.data {
+        InstanceData::Original {} => native::original_filename(&application.name)?,
+        InstanceData::Isolated { .. } => native::filename(&instance.name, instance.id)?,
+    };
+    let path = assets.desktop.join(name);
     let mut store = configuration.lock()?;
     // A simultaneous identical request may have completed during preparation.
     if store.shortcut_request_status(request.id)?.is_some() {

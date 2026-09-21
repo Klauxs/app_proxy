@@ -61,18 +61,19 @@ fn print(
             .map_err(|_| fail(10, "OUTPUT_SERIALIZE_FAILED"))?
         );
     } else {
-        println!("快捷方式请求：{id}");
         match status {
             Some(Status::Created { path, .. }) => {
-                println!("创建已完成：{}（历史结果，当前文件未核验）。", clean(path))
+                println!("已有桌面快捷方式创建记录。\n位置：{}", clean(path))
             }
-            Some(Status::Removed { path, .. }) => println!("入口登记已解除：{}。", clean(path)),
+            Some(Status::Removed { path, .. }) => {
+                println!("已移除桌面快捷方式登记。\n位置：{}", clean(path))
+            }
             Some(Status::Repaired { path, .. }) => {
-                println!("入口恢复已完成：{}（历史结果）。", clean(path))
+                println!("已有桌面快捷方式恢复记录。\n位置：{}", clean(path))
             }
             Some(Status::Cancelled { .. }) => println!("原创建已取消。"),
             Some(Status::Pending { action, path }) => println!(
-                "{}待核对：{}。",
+                "桌面快捷方式尚未完成{}。\n位置：{}",
                 match action {
                     Action::Create => "创建",
                     Action::Remove => "删除",
@@ -80,10 +81,10 @@ fn print(
                 },
                 clean(path)
             ),
-            None => println!("尚未查到持久结果；不据此推断仍在准备的操作已取消。"),
+            None => println!("暂时无法确认快捷方式的处理结果。"),
         }
         if let Some(code) = error {
-            println!("操作诊断：{code}");
+            println!("原因：{}", friendly_error(code));
         }
     }
     Ok(())
@@ -97,7 +98,7 @@ pub(crate) fn print_registration(view: &InstanceStatus) {
             false,
         );
     } else {
-        println!("尚未登记桌面快捷方式。");
+        println!("尚未创建桌面快捷方式。");
     }
 }
 pub(crate) fn print_check(view: &app_proxy_windows::shortcuts::journal::Check) {
@@ -105,34 +106,52 @@ pub(crate) fn print_check(view: &app_proxy_windows::shortcuts::journal::Check) {
     println!(
         "桌面入口：{}。",
         match view.state {
-            CheckState::Unregistered => "未登记",
-            CheckState::Pending => "有未完成操作，请查询或继续原请求",
-            CheckState::Verified => "链接、启动器文件及图标已核验；未启动应用",
+            CheckState::Unregistered => "尚未创建",
+            CheckState::Pending => "处理未完成，可以继续处理",
+            CheckState::Verified => "可用，双击即可启动此实例",
             CheckState::Missing => "链接丢失，可在原位置恢复",
             CheckState::Blocked => "核验受阻，保留现有文件",
         }
     );
-    if let Some(id) = view.request_id {
-        println!("关联请求：{id}");
-    }
     if let Some(code) = &view.diagnostic {
-        println!("入口诊断：{code}");
+        println!("原因：{}", friendly_error(code));
     }
 }
-fn diagnostic(error: Error) -> &'static str {
+fn diagnostic(error: Error) -> String {
     match error {
-        Error::Invalid(code) => code,
-        _ => "SHORTCUT_OPERATION_FAILED",
+        Error::Invalid(code) => code.into(),
+        Error::Windows {
+            operation: "ShortcutCom",
+            code,
+        } => format!("SHORTCUT_COM_ERROR:{code}"),
+        _ => "SHORTCUT_OPERATION_FAILED".into(),
     }
 }
-fn unresolved(id: Uuid, root: &Path) -> Failure {
-    fail(
-        4,
-        format!(
-            "快捷方式操作尚未确认。请求：{id}；数据目录：{}。请用 shortcut request {id} 查询，或在管理实例的桌面快捷方式菜单中核对后继续。",
-            clean(root)
-        ),
-    )
+fn friendly_error(code: &str) -> String {
+    match code {
+        "SHORTCUT_COM_ERROR:2147942487" => "Windows 无法接受快捷方式的路径或参数。".into(),
+        "SHORTCUT_FILE_BUSY" => "快捷方式正在被其他程序占用，请稍后重试。".into(),
+        "SHORTCUT_PATH_OCCUPIED" => "目标位置已有同名文件，未覆盖；请先移动或改名该文件。".into(),
+        "SHORTCUT_CHANGED" | "SHORTCUT_CONTENT_CONFLICT" => {
+            "快捷方式已被修改，已保留现有文件。".into()
+        }
+        "SHORTCUT_OPERATION_BUSY" => "另一项快捷方式操作正在进行，请稍后重试。".into(),
+        "SHORTCUT_WAIT_CANCELLED" => "已停止等待，后台操作可能仍在进行。".into(),
+        "COORDINATOR_OPERATION_FAILED" | "SHORTCUT_OPERATION_FAILED" => "后台未能完成操作。".into(),
+        _ => {
+            if let Some(value) = code
+                .strip_prefix("SHORTCUT_COM_ERROR:")
+                .and_then(|v| v.parse::<u32>().ok())
+            {
+                format!("Windows 快捷方式接口失败（错误码 0x{value:08X}）。")
+            } else {
+                format!("操作受阻（{code}）。")
+            }
+        }
+    }
+}
+fn unresolved() -> Failure {
+    fail(4, "请进入“管理实例 → 桌面快捷方式”，选择“继续处理”重试。")
 }
 async fn perform(
     root: &Path,
@@ -143,7 +162,7 @@ async fn perform(
 ) -> Result<(), Failure> {
     foreground.check()?;
     if !json {
-        println!("正在处理快捷方式，请求：{id}");
+        println!("正在处理桌面快捷方式…");
     }
     let operation = async {
         match request {
@@ -155,7 +174,7 @@ async fn perform(
         biased;
         _ = foreground.cancelled() => {
             print(id, None, Some("SHORTCUT_WAIT_CANCELLED"), json)?;
-            return Err(unresolved(id, root));
+            return Err(unresolved());
         },
         result = operation => result,
     };
@@ -172,7 +191,7 @@ async fn perform(
                     biased;
                     _ = foreground.cancelled() => {
                         print(id, None, Some("SHORTCUT_WAIT_CANCELLED"), json)?;
-                        return Err(unresolved(id, root));
+                        return Err(unresolved());
                     },
                     status = coordinator::shortcut_request(root.into(), id) => status.ok().flatten(),
                 }
@@ -180,7 +199,11 @@ async fn perform(
             (status, Some(error))
         }
     };
-    print(id, status.as_ref(), error, json)?;
+    if !json && let Some(Status::Created { path, .. } | Status::Repaired { path, .. }) = &status {
+        println!("桌面快捷方式已保存。\n位置：{}", clean(path));
+    } else {
+        print(id, status.as_ref(), error.as_deref(), json)?;
+    }
     match status {
         Some(
             Status::Created { .. }
@@ -188,7 +211,7 @@ async fn perform(
             | Status::Cancelled { .. }
             | Status::Repaired { .. },
         ) => Ok(()),
-        _ => Err(unresolved(id, root)),
+        _ => Err(unresolved()),
     }
 }
 pub(crate) async fn change(
