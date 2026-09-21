@@ -209,17 +209,14 @@ impl Shared {
             Operation::CoreRequestStatus { request_id } => Ok(Reply::CoreRequestStatus {
                 status: self.core.request_status(request_id)?,
             }),
-            Operation::ControlCore { .. } => Err(Error::Invalid("CORE_CONTROL_REQUIRES_ADMISSION")),
             Operation::CoreStatus {} => Ok(Reply::CoreStatus {
                 snapshot: self.core.snapshot()?,
             }),
-            Operation::Launch { .. } => Err(Error::Invalid("LAUNCH_REQUIRES_ADMISSION")),
-            Operation::GuardStatus { .. } => {
-                Err(Error::Invalid("GUARD_STATUS_REQUIRES_ASYNC_QUERY"))
-            }
-            Operation::RuntimeStatus { .. } => {
-                Err(Error::Invalid("RUNTIME_STATUS_REQUIRES_ASYNC_QUERY"))
-            }
+            // `handle` routes these four before any blocking work is scheduled.
+            Operation::ControlCore { .. }
+            | Operation::Launch { .. }
+            | Operation::GuardStatus { .. }
+            | Operation::RuntimeStatus { .. } => Err(Error::Invalid("OPERATION_NOT_ROUTED")),
             Operation::LaunchStatus { request_id } => Ok(Reply::LaunchStatus {
                 attempt: self.launch.status(request_id)?,
             }),
@@ -336,10 +333,75 @@ pub(super) async fn serve_connections(
     Ok(())
 }
 
+/// One request per connection. Every operation belongs to one class:
+/// a bounded observation, durable work admitted before the reply, or a blocking
+/// store operation. Work that outlives the reply starts only after it is sent.
 pub(super) async fn handle(
     mut connection: ipc::Connection<NamedPipeServer>,
     shared: Arc<Shared>,
 ) -> Result<()> {
+    let Some(request) = handshake(&mut connection, &shared).await? else {
+        return Ok(());
+    };
+    let request_id = request.request_id;
+    let epoch = shared.identity.epoch;
+    let (result, admitted) = match request.operation {
+        Operation::RuntimeStatus { instance_id } => {
+            (observe_runtime(&shared, instance_id).await?, None)
+        }
+        Operation::GuardStatus { instance_id } => {
+            (observe_guard(&shared, instance_id).await?, None)
+        }
+        Operation::Launch {
+            instance_id,
+            origin,
+            expected_revision,
+        } => {
+            let launch = LaunchRequest {
+                request_id,
+                instance_id,
+                origin,
+            };
+            (
+                admit_launch(&shared, launch, expected_revision).await?,
+                None,
+            )
+        }
+        Operation::ControlCore { action } => admit_core(&shared, request_id, action).await?,
+        operation => {
+            let request = Request {
+                operation,
+                ..request
+            };
+            (run_blocking(&shared, request).await?, None)
+        }
+    };
+    let sent = connection
+        .send(&Response {
+            request_id,
+            epoch,
+            result,
+        })
+        .await;
+    // Long work has its own lifetime, not an IPC slot: queries and cancellation
+    // must remain available while all admitted installers are waiting.
+    if let Some(job) = admitted {
+        shared.jobs.fetch_add(1, Ordering::SeqCst);
+        let completed = JobCompletion(shared.clone());
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let _completed = completed;
+            let _ = runtime.block_on(shared.core.execute(job));
+        });
+    }
+    sent
+}
+
+/// `None` means the peer was told why it was rejected and nothing else follows.
+async fn handshake(
+    connection: &mut ipc::Connection<NamedPipeServer>,
+    shared: &Shared,
+) -> Result<Option<Request>> {
     let status = &shared.identity;
     let request: Hello = connection.receive().await?;
     let rejection = if request.protocol_major != PROTOCOL_MAJOR {
@@ -357,7 +419,7 @@ pub(super) async fn handle(
         connection
             .send(&Welcome::Rejected { code: code.into() })
             .await?;
-        return Ok(());
+        return Ok(None);
     }
     connection
         .send(&Welcome::Ready {
@@ -369,147 +431,109 @@ pub(super) async fn handle(
     if request.protocol_major != PROTOCOL_MAJOR || request.request_id.is_nil() {
         return Err(Error::Invalid("INVALID_RPC_REQUEST"));
     }
+    Ok(Some(request))
+}
+
+fn reply(result: Result<Reply>) -> Reply {
+    result.unwrap_or_else(|error| Reply::Error {
+        code: safe_error(error),
+    })
+}
+
+fn busy(code: &str) -> Reply {
+    Reply::Error { code: code.into() }
+}
+
+/// Bounded observation. Without the single query permit the engine answers
+/// from what it already knows instead of queueing another native scan.
+async fn observe_runtime(shared: &Arc<Shared>, instance_id: Uuid) -> Result<Reply> {
+    let permit = shared.guard_queries.clone().try_acquire_owned().ok();
+    let shared = shared.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let result = tokio::task::spawn_blocking(move || {
+        let allowed = permit.is_some();
+        let _permit = permit;
+        runtime.block_on(shared.launch.observe_instance(instance_id, allowed))
+    })
+    .await
+    .map_err(|_| Error::Invalid("RUNTIME_STATUS_WORKER_FAILED"))?;
+    Ok(reply(result.map(|status| Reply::RuntimeStatus {
+        status: Box::new(status),
+    })))
+}
+
+async fn observe_guard(shared: &Arc<Shared>, instance_id: Uuid) -> Result<Reply> {
+    let permit = shared.guard_queries.clone().try_acquire_owned().ok();
+    let shared = shared.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let result = tokio::task::spawn_blocking(move || {
+        let scan_allowed = permit.is_some();
+        let _permit = permit;
+        let mut status = runtime.block_on(crate::guard_control::status(
+            &shared.configuration,
+            &shared.launch,
+            instance_id,
+            scan_allowed,
+        ))?;
+        shared.guard_monitor.update_status(&mut status);
+        Ok::<_, Error>(status)
+    })
+    .await
+    .map_err(|_| Error::Invalid("GUARD_STATUS_WORKER_FAILED"))?;
+    Ok(reply(result.map(|status| Reply::GuardStatus {
+        status: Box::new(status),
+    })))
+}
+
+/// The engine owns accepted work before the reply is sent; a failed send cannot
+/// discard it or consume a connection slot during proxy preparation.
+async fn admit_launch(
+    shared: &Arc<Shared>,
+    request: LaunchRequest,
+    expected_revision: Option<u64>,
+) -> Result<Reply> {
+    let engine = shared.launch.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let admitted = tokio::task::spawn_blocking(move || {
+        runtime.block_on(engine.submit_at_revision(request, expected_revision))
+    })
+    .await
+    .map_err(|_| Error::Invalid("LAUNCH_WORKER_FAILED"))?;
+    Ok(reply(admitted.map(|attempt| Reply::LaunchStatus {
+        attempt: Some(attempt),
+    })))
+}
+
+async fn admit_core(
+    shared: &Arc<Shared>,
+    request_id: Uuid,
+    action: CoreAction,
+) -> Result<(Reply, Option<crate::core_control::CoreJob>)> {
+    let worker = shared.clone();
+    let admitted = tokio::task::spawn_blocking(move || worker.core.accept(request_id, &action))
+        .await
+        .map_err(|_| Error::Invalid("CORE_CONTROL_WORKER_FAILED"))?;
+    Ok(match admitted {
+        Ok((status, job)) => (
+            Reply::CoreRequestStatus {
+                status: Some(status),
+            },
+            job,
+        ),
+        Err(error) => (reply(Err(error)), None),
+    })
+}
+
+/// Store operations run on a blocking thread and are never cancelled when the
+/// client disconnects: the job stays registered until it completes, which also
+/// prevents an idle exit.
+async fn run_blocking(shared: &Arc<Shared>, request: Request) -> Result<Reply> {
     let request_id = request.request_id;
-    let epoch = status.epoch;
-    if let Operation::RuntimeStatus { instance_id } = request.operation {
-        let permit = shared.guard_queries.clone().try_acquire_owned().ok();
-        let runtime = tokio::runtime::Handle::current();
-        let result = tokio::task::spawn_blocking(move || {
-            let allowed = permit.is_some();
-            let _permit = permit;
-            runtime.block_on(shared.launch.observe_instance(instance_id, allowed))
-        })
-        .await
-        .map_err(|_| Error::Invalid("RUNTIME_STATUS_WORKER_FAILED"))?;
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: match result {
-                    Ok(status) => Reply::RuntimeStatus {
-                        status: Box::new(status),
-                    },
-                    Err(error) => Reply::Error {
-                        code: safe_error(error),
-                    },
-                },
-            })
-            .await;
-    }
-    if let Operation::GuardStatus { instance_id } = request.operation {
-        let permit = shared.guard_queries.clone().try_acquire_owned().ok();
-        let runtime = tokio::runtime::Handle::current();
-        let result = tokio::task::spawn_blocking(move || {
-            let scan_allowed = permit.is_some();
-            let _permit = permit;
-            let mut status = runtime.block_on(crate::guard_control::status(
-                &shared.configuration,
-                &shared.launch,
-                instance_id,
-                scan_allowed,
-            ))?;
-            shared.guard_monitor.update_status(&mut status);
-            Ok::<_, Error>(status)
-        })
-        .await
-        .map_err(|_| Error::Invalid("GUARD_STATUS_WORKER_FAILED"))?;
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: match result {
-                    Ok(status) => Reply::GuardStatus {
-                        status: Box::new(status),
-                    },
-                    Err(error) => Reply::Error {
-                        code: safe_error(error),
-                    },
-                },
-            })
-            .await;
-    }
-    if let Operation::Launch {
-        instance_id,
-        origin,
-        expected_revision,
-    } = request.operation
-    {
-        let engine = shared.launch.clone();
-        let runtime = tokio::runtime::Handle::current();
-        let admitted = tokio::task::spawn_blocking(move || {
-            runtime.block_on(engine.submit_at_revision(
-                LaunchRequest {
-                    request_id,
-                    instance_id,
-                    origin,
-                },
-                expected_revision,
-            ))
-        })
-        .await
-        .map_err(|_| Error::Invalid("LAUNCH_WORKER_FAILED"))?;
-        // The engine owns accepted work before this ACK; a failed send cannot
-        // discard it or consume a connection slot during proxy preparation.
-        return connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: match admitted {
-                    Ok(attempt) => Reply::LaunchStatus {
-                        attempt: Some(attempt),
-                    },
-                    Err(error) => Reply::Error {
-                        code: safe_error(error),
-                    },
-                },
-            })
-            .await;
-    }
-    if let Operation::ControlCore { action } = request.operation {
-        let worker = shared.clone();
-        let admitted = tokio::task::spawn_blocking(move || worker.core.accept(request_id, &action))
-            .await
-            .map_err(|_| Error::Invalid("CORE_CONTROL_WORKER_FAILED"))?;
-        let (reply, execute) = match admitted {
-            Ok((status, execute)) => (
-                Reply::CoreRequestStatus {
-                    status: Some(status),
-                },
-                execute,
-            ),
-            Err(error) => (
-                Reply::Error {
-                    code: safe_error(error),
-                },
-                None,
-            ),
-        };
-        let sent = connection
-            .send(&Response {
-                request_id,
-                epoch,
-                result: reply,
-            })
-            .await;
-        // Long work has its own lifetime, not an IPC slot: queries and cancellation
-        // must remain available while all admitted installers are waiting.
-        if let Some(job) = execute {
-            shared.jobs.fetch_add(1, Ordering::SeqCst);
-            let completed = JobCompletion(shared.clone());
-            let runtime = tokio::runtime::Handle::current();
-            tokio::task::spawn_blocking(move || {
-                let _completed = completed;
-                let _ = runtime.block_on(shared.core.execute(job));
-            });
-        }
-        return sent;
-    }
-    // Do not cancel accepted work when the client disconnects. The handler stays
-    // registered until blocking preparation/commit completes, preventing idle exit.
-    if matches!(
+    let login_mutation = matches!(
         &request.operation,
         Operation::LoginApply { .. } | Operation::LoginResume { .. }
-    ) {
+    );
+    if login_mutation {
         let shared = shared.clone();
         let replay_request = match &request.operation {
             Operation::LoginApply { request } => Some(request.clone()),
@@ -530,29 +554,13 @@ pub(super) async fn handle(
         .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?;
         match replay {
             Ok(None) => {}
-            other => {
-                return connection
-                    .send(&Response {
-                        request_id,
-                        epoch,
-                        result: match other {
-                            Ok(status) => Reply::LoginRequest { status },
-                            Err(error) => Reply::Error {
-                                code: safe_error(error),
-                            },
-                        },
-                    })
-                    .await;
-            }
+            other => return Ok(reply(other.map(|status| Reply::LoginRequest { status }))),
         }
     }
     let login_status = matches!(&request.operation, Operation::LoginStatus {});
     let login_slot = if login_status {
         Some(shared.login_queries.clone())
-    } else if matches!(
-        &request.operation,
-        Operation::LoginApply { .. } | Operation::LoginResume { .. }
-    ) {
+    } else if login_mutation {
         Some(shared.login_jobs.clone())
     } else {
         None
@@ -560,17 +568,7 @@ pub(super) async fn handle(
     let login_permit = match login_slot {
         Some(slot) => match slot.try_acquire_owned() {
             Ok(permit) => Some(permit),
-            Err(_) => {
-                return connection
-                    .send(&Response {
-                        request_id,
-                        epoch,
-                        result: Reply::Error {
-                            code: "GUARD_LOGIN_BUSY".into(),
-                        },
-                    })
-                    .await;
-            }
+            Err(_) => return Ok(busy("GUARD_LOGIN_BUSY")),
         },
         None => None,
     };
@@ -580,28 +578,19 @@ pub(super) async fn handle(
     ) {
         match shared.shortcut_jobs.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
-            Err(_) => {
-                return connection
-                    .send(&Response {
-                        request_id,
-                        epoch,
-                        result: Reply::Error {
-                            code: "SHORTCUT_OPERATION_BUSY".into(),
-                        },
-                    })
-                    .await;
-            }
+            Err(_) => return Ok(busy("SHORTCUT_OPERATION_BUSY")),
         }
     } else {
         None
     };
     shared.jobs.fetch_add(1, Ordering::SeqCst);
     let completed = JobCompletion(shared.clone());
+    let owner = shared.clone();
     let worker = tokio::task::spawn_blocking(move || {
         let _completed = completed;
         let _login_permit = login_permit;
         let _permit = shortcut_permit;
-        shared.execute(request)
+        owner.execute(request)
     });
     let result = if login_status {
         match tokio::time::timeout(Duration::from_secs(3), worker).await {
@@ -613,15 +602,7 @@ pub(super) async fn handle(
             .await
             .map_err(|_| Error::Invalid("CONFIGURATION_WORKER_FAILED"))?
     };
-    connection
-        .send(&Response {
-            request_id,
-            epoch,
-            result: result.unwrap_or_else(|e| Reply::Error {
-                code: safe_error(e),
-            }),
-        })
-        .await
+    Ok(reply(result))
 }
 
 pub(super) struct JobCompletion(pub(super) Arc<Shared>);
