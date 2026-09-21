@@ -29,8 +29,24 @@ fn run_probe() {
     assert!(report["identity"]["creation_time"].as_u64().unwrap() > 0);
 }
 
+/// Children of a packaged desktop app inherit its package identity, so a run
+/// started from such a host cannot exercise the unpackaged probe child.
+fn packaged_host() -> bool {
+    let packaged = matches!(
+        app_proxy_windows::identity::package_full_name(),
+        Ok(Some(_))
+    );
+    if packaged {
+        eprintln!("skipped: the test host has an MSIX package identity");
+    }
+    packaged
+}
+
 #[test]
 fn normal_spawn_roundtrips_real_windows_args_environment_and_identity() {
+    if packaged_host() {
+        return;
+    }
     run_probe();
 }
 
@@ -95,6 +111,9 @@ fn package_identity_mismatch_is_rejected_before_writing() {
 
 #[test]
 fn helper_replay_is_rejected_without_replacing_receipt() {
+    if packaged_host() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let id = uuid::Uuid::new_v4();
     std::fs::write(

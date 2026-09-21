@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - name: Toolchain
+        run: rustup show
+      - name: Format, lint and default tests
+        run: ./scripts/verify.ps1

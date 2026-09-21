@@ -292,8 +292,21 @@ fn receipt_is_bound_to_nonce_request_and_physical_directory() {
     ));
 }
 
+/// Children of a packaged desktop app inherit its package identity, so a run
+/// started from such a host cannot observe an unpackaged fixture child.
+fn packaged_host() -> bool {
+    let packaged = matches!(identity::package_full_name(), Ok(Some(_)));
+    if packaged {
+        eprintln!("skipped: the test host has an MSIX package identity");
+    }
+    packaged
+}
+
 #[test]
 fn successful_creation_is_once_only_and_late_cancel_preserves_exact_child() {
+    if packaged_host() {
+        return;
+    }
     let fixture = Fixture::new(0);
     fixture.consume().unwrap();
     let PackageOutcome::Created(child) = fixture.ticket.outcome().unwrap() else {
