@@ -1,5 +1,6 @@
 //! One-use package helper requests. The request gate, not a timeout or the
 //! bridge's exit code, determines whether creation can still happen.
+use crate::journal::now;
 use crate::{
     Error, Result, identity,
     installation::ResolvedApplication,
@@ -20,7 +21,7 @@ use std::{
         io::{AsRawHandle, OwnedHandle},
     },
     path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -535,13 +536,6 @@ fn check_clock(request: &Request, now: u64, tick: u64, elapsed: Duration) -> Res
 fn tick() -> u64 {
     // SAFETY: no pointers; Windows uptime includes sleep/hibernation and is not UTC.
     unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() }
-}
-
-fn now() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| Error::Invalid("SYSTEM_TIME_INVALID"))
 }
 
 fn directory_identity(handle: &OwnedHandle) -> Result<FileIdentity> {

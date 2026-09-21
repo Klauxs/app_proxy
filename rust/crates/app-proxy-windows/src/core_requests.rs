@@ -1,5 +1,6 @@
 //! Request identity is durable before core side effects. Pending requests are
 //! never replayed automatically: an interrupted launch can have already spawned.
+use crate::journal::{RETENTION, now};
 use crate::{
     Error, Result, storage_security as security,
     store::{self, Store},
@@ -7,14 +8,10 @@ use crate::{
 use app_proxy_core::core_control::{CoreAction, CoreOutcome};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    os::windows::io::{AsRawHandle, OwnedHandle},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use uuid::Uuid;
 
 const LIMIT: usize = 1024 * 1024;
-const RETENTION: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
@@ -378,12 +375,6 @@ impl Store {
     }
 }
 
-fn now() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| Error::Invalid("SYSTEM_CLOCK_INVALID"))
-}
 fn validate_outcome(outcome: &CoreOutcome, owner: &str) -> Result<()> {
     match outcome {
         CoreOutcome::Prepared { impact }

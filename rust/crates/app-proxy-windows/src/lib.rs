@@ -20,6 +20,7 @@ pub mod instance_data;
 pub mod instance_process;
 pub mod instance_resource;
 pub mod ipc;
+mod journal;
 pub mod launch_state;
 pub mod layout;
 pub mod local_time;

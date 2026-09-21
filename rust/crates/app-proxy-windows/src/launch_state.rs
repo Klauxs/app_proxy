@@ -1,21 +1,18 @@
 //! One bounded atomic journal keeps request aliases, attempts and confirmed
 //! sessions consistent. Opening or reading it never replays process creation.
+use crate::journal::{RETENTION, now};
 use crate::{
     Error, Result, process,
     store::{self, Store},
 };
 use app_proxy_core::launch::*;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashSet,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 const PATH: &str = "state/launch.json";
 const LIMIT: usize = 8 * 1024 * 1024;
 const REQUEST_LIMIT: usize = 4096;
-const RETENTION: u64 = 7 * 24 * 60 * 60;
 
 mod guard;
 #[cfg(test)]
@@ -810,10 +807,4 @@ fn attempt_mut<'a>(
         return Err(Error::Invalid("LAUNCH_STATE_CHANGED"));
     }
     Ok(attempt)
-}
-fn now() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| Error::Invalid("CLOCK_BEFORE_EPOCH"))
 }

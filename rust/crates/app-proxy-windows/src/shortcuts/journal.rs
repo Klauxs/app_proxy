@@ -1,20 +1,17 @@
 //! Persistent shortcut ownership and explicit recovery. Completed creation
 //! records remain for as long as the integration exists, not just request TTL.
 use super::*;
+use crate::journal::{RETENTION, now};
 use crate::store::{self, Store};
 use app_proxy_core::{
     model::{Manifest, Shortcut},
     registry::ConfigAction,
 };
-use std::{
-    collections::HashSet,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashSet;
 
 const PATH: &str = "state/shortcuts.json";
 const JOURNAL_LIMIT: usize = 8 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 1024;
-const RETENTION: u64 = 7 * 24 * 60 * 60;
 
 mod repair;
 pub use repair::{Check, CheckState};
@@ -645,12 +642,6 @@ fn reserve_completion_capacity(journal: &Journal) -> Result<()> {
     }
     store::encode(&complete, JOURNAL_LIMIT).map_err(|_| Error::Invalid("SHORTCUT_RECORD_LIMIT"))?;
     Ok(())
-}
-fn now() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| Error::Invalid("SYSTEM_CLOCK_INVALID"))
 }
 
 #[cfg(test)]

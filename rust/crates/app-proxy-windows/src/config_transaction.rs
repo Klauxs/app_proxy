@@ -1,5 +1,6 @@
 //! Configuration-only intent → manifest → receipt protocol. No external process,
 //! shortcut or registry side effects are allowed inside these transactions.
+use crate::journal::{RETENTION, now};
 use crate::{
     Error, Result, storage_security as security,
     store::{self, Store},
@@ -12,12 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 pub(crate) const REQUEST_LIMIT: usize = 1024 * 1024;
 const RECORD_LIMIT: usize = 2 * MANIFEST_LIMIT + 16384;
-const RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -302,7 +301,7 @@ impl Store {
                 Phase::Complete { completed_at, .. }
                     if now
                         .checked_sub(*completed_at)
-                        .is_some_and(|age| age > RETENTION_SECONDS) =>
+                        .is_some_and(|age| age > RETENTION) =>
                 {
                     // Only our verified UUID file; pending records never expire.
                     std::fs::remove_file(self.record_path(id))?;
@@ -450,12 +449,6 @@ impl Store {
     }
 }
 
-fn now() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|time| time.as_secs())
-        .map_err(|_| Error::Invalid("SYSTEM_CLOCK_INVALID"))
-}
 fn digest_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -1206,7 +1199,7 @@ mod tests {
         let Phase::Complete { completed_at, .. } = &mut record.phase else {
             panic!()
         };
-        *completed_at = now().unwrap() - RETENTION_SECONDS - 1;
+        *completed_at = now().unwrap() - RETENTION - 1;
         store.write_record(&record).unwrap();
         let pending = add(2);
         let mut record = stage(&store, &pending);

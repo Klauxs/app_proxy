@@ -1,6 +1,7 @@
 //! Intent and ownership survive lost replies. Native work executes outside the
 //! configuration mutex; an operation lease serializes it until completion.
 use super::*;
+use crate::journal::{RETENTION, now};
 use crate::{storage_security, store::Store};
 use app_proxy_core::model::{Desired, LoginTask};
 use std::{
@@ -8,7 +9,6 @@ use std::{
     fs::{File, OpenOptions},
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -17,7 +17,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 const PATH: &str = "state/login-task.json";
 const LIMIT: usize = 2 * 1024 * 1024;
 const ENTRIES: usize = 256;
-const RETENTION: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -520,12 +519,6 @@ fn reserve_capacity(journal: &Journal) -> Result<()> {
     }
     store::encode(&complete, LIMIT).map_err(|_| Error::Invalid("GUARD_LOGIN_RECORD_LIMIT"))?;
     Ok(())
-}
-fn now() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|t| t.as_secs())
-        .map_err(|_| Error::Invalid("SYSTEM_CLOCK_INVALID"))
 }
 
 #[cfg(test)]
