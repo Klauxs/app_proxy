@@ -494,7 +494,7 @@ async fn finish_instance(
         .find(|i| i.id == id)
         .ok_or_else(|| fail(4, "实例已变化。"))?;
     println!("已保存：{}。", display(&instance.name));
-    if instance.guard == Desired::Enabled {
+    let protection = if instance.guard == Desired::Enabled {
         guard_cli::run_with_foreground(
             root.into(),
             guard_cli::Command::Enable { id },
@@ -502,11 +502,45 @@ async fn finish_instance(
             foreground,
             Some(snapshot.revision),
         )
-        .await?;
-    }
+        .await?
+    } else {
+        None
+    };
     foreground.check()?;
     let current = catalog(root).await?;
+    if let Some(status) = protection
+        && let Some(message) = post_guard_launch_message(&status, id, current.revision)?
+    {
+        println!("{message}");
+        return Ok(());
+    }
     launch_confirmed(root, &current, id, foreground).await
+}
+
+// Reuse the observation already obtained by guard enable. Do not add a process
+// scan to the normal launch path or interpret an active listener as a running app.
+fn post_guard_launch_message(
+    status: &GuardStatus,
+    id: Uuid,
+    revision: u64,
+) -> Result<Option<&'static str>, Failure> {
+    if status.instance_id != id || status.revision != revision {
+        return Err(fail(4, "实例已保存，但配置随后发生变化；请重新选择实例。"));
+    }
+    let scan = status.scan.as_ref().filter(|scan| {
+        scan.instance_id == id && scan.revision == revision && status.desired == Desired::Enabled
+    });
+    Ok(match scan.map(|scan| &scan.observation) {
+        Some(GuardObservation::Session { .. } | GuardObservation::Compliant { .. }) => {
+            Some("实例已在运行，返回主菜单。")
+        }
+        Some(GuardObservation::Pending { .. }) => Some("实例正在启动，无需重复启动，返回主菜单。"),
+        Some(GuardObservation::Correction { .. }) => {
+            Some("保护正在处理代理纠正，无需手动启动，返回主菜单。")
+        }
+        Some(GuardObservation::Absent {}) => None,
+        _ => Some("实例已保存，运行状态暂未确认；可在管理实例中查看。"),
+    })
 }
 
 async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(), Failure> {
@@ -658,6 +692,7 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
                 Some(snapshot.revision),
             )
             .await
+            .map(|_| ())
         }
         7 => {
             confirm("移除此实例登记？保留应用及数据，不关闭应用。", foreground).await?;
@@ -1052,6 +1087,91 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn observed(observation: GuardObservation) -> GuardStatus {
+        let id = Uuid::new_v4();
+        GuardStatus {
+            instance_id: id,
+            revision: 7,
+            desired: Desired::Enabled,
+            phase: GuardPhase::Active,
+            listener: crate::guard_control::ComponentState::ActiveEtw,
+            diagnostic: None,
+            scan: Some(crate::launch_engine::GuardScan {
+                instance_id: id,
+                revision: 7,
+                observation,
+            }),
+        }
+    }
+
+    #[test]
+    fn finished_guard_launch_skips_confirmation_but_absent_application_keeps_it() {
+        let process = app_proxy_windows::identity::current().unwrap();
+        for observation in [
+            GuardObservation::Session {
+                process: process.clone(),
+                network: app_proxy_core::launch::LaunchNetwork::Direct {},
+            },
+            GuardObservation::Compliant { process },
+        ] {
+            let status = observed(observation);
+            assert_eq!(
+                post_guard_launch_message(&status, status.instance_id, 7).unwrap(),
+                Some("实例已在运行，返回主菜单。")
+            );
+        }
+        let absent = observed(GuardObservation::Absent {});
+        assert!(
+            post_guard_launch_message(&absent, absent.instance_id, 7)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pending_guard_work_never_offers_a_second_launch() {
+        let correction = serde_json::from_value(serde_json::json!({
+            "state":"correction",
+            "target":{
+                "process": app_proxy_windows::identity::current().unwrap(),
+                "endpoint":{"host":"127.0.0.1", "port":18099}
+            }
+        }))
+        .unwrap();
+        for observation in [
+            GuardObservation::Pending {
+                attempt_id: Uuid::new_v4(),
+            },
+            correction,
+        ] {
+            let status = observed(observation);
+            assert!(
+                post_guard_launch_message(&status, status.instance_id, 7)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn listener_readiness_and_stale_observations_are_not_running_evidence() {
+        let mut status = observed(GuardObservation::Absent {});
+        assert!(post_guard_launch_message(&status, Uuid::new_v4(), 7).is_err());
+        assert!(post_guard_launch_message(&status, status.instance_id, 8).is_err());
+        status.scan.as_mut().unwrap().revision = 6;
+        let unknown = "实例已保存，运行状态暂未确认；可在管理实例中查看。";
+        assert_eq!(
+            post_guard_launch_message(&status, status.instance_id, 7).unwrap(),
+            Some(unknown)
+        );
+        status.scan = None;
+        assert_eq!(
+            post_guard_launch_message(&status, status.instance_id, 7).unwrap(),
+            Some(unknown)
+        );
+    }
+
     #[test]
     fn defaults_require_a_line_and_never_convert_eof_into_a_choice() {
         assert_eq!(selection(None, 2, Some(1)), Ok(None));

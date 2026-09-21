@@ -111,10 +111,10 @@ pub enum Command {
 }
 
 #[derive(Serialize)]
-struct Report {
+struct Report<'a> {
     request_id: Option<Uuid>,
     receipt: Option<app_proxy_core::registry::ConfigReceipt>,
-    status: Option<GuardStatus>,
+    status: Option<&'a GuardStatus>,
     login: Option<crate::login_tasks::View>,
     login_operation: Option<crate::login_cli::Outcome>,
     requires_action: Option<&'static str>,
@@ -156,6 +156,7 @@ pub async fn run(root: PathBuf, command: Command, json: bool) -> Result<(), Fail
         None,
     )
     .await
+    .map(|_| ())
 }
 
 pub(crate) async fn run_with_foreground(
@@ -164,10 +165,12 @@ pub(crate) async fn run_with_foreground(
     json: bool,
     foreground: &mut crate::foreground::Foreground,
     expected_revision: Option<u64>,
-) -> Result<(), Failure> {
+) -> Result<Option<GuardStatus>, Failure> {
     foreground.check()?;
     if let Command::Login { command } = command {
-        return crate::login_cli::run(root, command, json).await;
+        return crate::login_cli::run(root, command, json)
+            .await
+            .map(|_| None);
     }
     let (id, desired) = match command {
         Command::Status { id } => (id, None),
@@ -415,7 +418,7 @@ pub(crate) async fn run_with_foreground(
             serde_json::to_string_pretty(&Report {
                 request_id,
                 receipt,
-                status: Some(status),
+                status: Some(&status),
                 login: Some(login),
                 login_operation,
                 requires_action
@@ -469,15 +472,15 @@ pub(crate) async fn run_with_foreground(
             component(status.listener)
         );
         crate::login_cli::print_view(&login);
-        if let Some(scan) = status.scan {
+        if let Some(scan) = &status.scan {
             use crate::launch_engine::GuardObservation;
-            match scan.observation {
+            match &scan.observation {
                 GuardObservation::Disabled {} => {}
                 GuardObservation::Pending { .. } => {
                     println!("应用正在启动，稍后继续检查。")
                 }
                 GuardObservation::Session { process, .. } => {
-                    println!("已确认会话 PID {} 仍按启动时的配置保留。", process.pid)
+                    println!("应用已在运行（PID {}）。", process.pid)
                 }
                 GuardObservation::Absent {} => println!("应用尚未启动。"),
                 GuardObservation::Compliant { process } => println!(
@@ -491,7 +494,7 @@ pub(crate) async fn run_with_foreground(
                 GuardObservation::Blocked { code } => println!("无法确认进程状态：{code}。"),
             }
         }
-        if let Some(code) = status.diagnostic {
+        if let Some(code) = &status.diagnostic {
             if matches!(
                 code.as_str(),
                 "GUARD_LISTENER_REGISTERED_LIVENESS_UNVERIFIED" | "GUARD_LISTENER_START_PENDING"
@@ -530,7 +533,7 @@ pub(crate) async fn run_with_foreground(
     if desired.is_some() && requires_action.is_some() {
         return Err(fail(5, "保护尚未完全就绪，请按状态提示处理。"));
     }
-    Ok(())
+    Ok(Some(status))
 }
 
 #[cfg(test)]

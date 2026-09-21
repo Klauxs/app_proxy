@@ -1,3 +1,8 @@
+**2026-09-21：添加实例后复用 Guard 观测，避免重复启动确认**
+
+添加/复制实例的收尾流程复用 `guard enable` 返回的最终状态，不增加进程扫描，也不改变用户主动“启动实例”的路径。已确认会话或代理参数匹配的进程直接返回主菜单；启动中/待纠正不再弹第二次启动确认；Absent 保留询问；无观测或过期观测不冒充已运行。Session 提示简化为“应用已在运行”。CLI JSON 格式和退出码保持不变。
+
+菜单回归 4 项、Guard CLI 回归 4 项通过；全目标编译检查和 Clippy（警告视为错误）通过。该验证使用状态回归，没有重新关闭或启动用户的 Claude，也没有在已安装版本上重新走一次添加流程；修复通过新版 Setup 交付。
 **2026-09-21：确认 AppData 映射，统一用户目录布局**
 
 - 通过 `CreateFileW` 打开三个旧目录，再用 `GetFinalPathNameByHandleW` 和 `GetFileInformationByHandle` 查询实际目标。`%LOCALAPPDATA%\AppProxy`、`AppProxyResources`、`AppProxyRustResources` 均指向 `%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local` 下的对应目录；别名和实际路径的卷号、文件 ID 分别相同。Explorer 在真实 Local 目录中看不到这些条目并非隐藏属性或刷新问题。工具进程的 `GetCurrentPackageFullName` 返回 15700（没有包身份），但文件句柄已经明确证明其文件访问发生重定向，不能只靠包身份 API 排除映射。
