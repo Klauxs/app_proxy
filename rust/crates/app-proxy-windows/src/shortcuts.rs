@@ -175,10 +175,15 @@ pub fn install_menu_entry(frontend: &Path) -> Result<()> {
         CoTaskMemFree(Some(folder.0.cast()));
         path?.join("AppProxy.lnk")
     };
-    menu_entry_at(frontend, &path)
+    frontend_entry_at(frontend, &path)
 }
 
-fn menu_entry_at(frontend: &Path, path: &Path) -> Result<()> {
+/// Desktop entry opens the product menu, independently of application-instance links.
+pub fn install_desktop_entry(frontend: &Path) -> Result<()> {
+    frontend_entry_at(frontend, &desktop()?.join("AppProxy.lnk"))
+}
+
+fn frontend_entry_at(frontend: &Path, path: &Path) -> Result<()> {
     identity::assert_ordinary_user()?;
     let frontend = shell_path(frontend)?;
     let target = wide(frontend.as_os_str())?;
@@ -233,7 +238,7 @@ fn menu_entry_at(frontend: &Path, path: &Path) -> Result<()> {
                 || flags & !ALLOWED_FLAGS != 0
                 || flags & TRACKING_DISABLED != TRACKING_DISABLED
             {
-                return Err(Error::Invalid("SETUP_START_MENU_CONFLICT"));
+                return Err(Error::Invalid("SETUP_SHORTCUT_CONFLICT"));
             }
             return Ok(());
         }
@@ -284,8 +289,9 @@ fn menu_entry_at(frontend: &Path, path: &Path) -> Result<()> {
         temporary.as_file().sync_all()?;
         temporary
             .persist_noclobber(path)
-            .map_err(|_| Error::Invalid("SETUP_START_MENU_CONFLICT"))?;
+            .map_err(|_| Error::Invalid("SETUP_SHORTCUT_CONFLICT"))?;
     }
+    notify(path);
     Ok(())
 }
 

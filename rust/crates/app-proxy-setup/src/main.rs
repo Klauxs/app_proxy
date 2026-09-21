@@ -138,6 +138,7 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
     log.sync_all()?;
     run_frontend(&root, "setup-prepare", log)?;
     app_proxy_windows::shortcuts::install_menu_entry(&root.join("app-proxy.exe"))?;
+    app_proxy_windows::shortcuts::install_desktop_entry(&root.join("app-proxy.exe"))?;
     transaction.release_for_verification();
     if let Some(p) = &progress {
         p.stage("正在核验安装结果…")?;
@@ -151,7 +152,7 @@ fn run(args: &[String], log: &mut std::fs::File) -> Result<()> {
     if !quiet {
         let launch = setup::dialog(
             &format!(
-                "AppProxy 安装完成。\n位置：{}\n开始菜单入口：AppProxy\n\n打开 AppProxy？",
+                "AppProxy 安装完成。\n位置：{}\n桌面和开始菜单入口：AppProxy\n\n打开 AppProxy？",
                 root.display()
             ),
             true,
