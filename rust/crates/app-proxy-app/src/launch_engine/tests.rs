@@ -777,6 +777,8 @@ impl Fixture {
         self.result(request.request_id).await
     }
     fn new(valid: bool) -> Self {
+        // The invalid fixture below must fail with an error code, not a dialog.
+        process::fail_silently_on_bad_executables();
         let root = tempfile::tempdir().unwrap();
         let exe = root
             .path()

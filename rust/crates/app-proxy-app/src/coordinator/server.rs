@@ -235,6 +235,7 @@ pub async fn serve(root: PathBuf) -> Result<()> {
 pub async fn serve_expected(root: PathBuf, expected_store: Option<Uuid>) -> Result<()> {
     identity::assert_ordinary_user()?;
     app_proxy_windows::setup::ensure_available()?;
+    process::fail_silently_on_bad_executables();
     let owned = store::Store::open_expected(&root, expected_store)?;
     let manifest = owned.load()?;
     let current = identity::current()?;

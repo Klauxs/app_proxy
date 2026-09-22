@@ -7,7 +7,24 @@ use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetErrorMode,
+};
 use windows_sys::Win32::System::Threading::*;
+
+/// Makes process creation report a damaged or incompatible executable as an
+/// error instead of showing the operating system's modal dialog.
+///
+/// The dialog is governed by the caller's error mode, so a hidden coordinator
+/// that launches a broken registered EXE would otherwise block a worker thread
+/// until someone clicks it. Call once per process before the first spawn.
+pub fn fail_silently_on_bad_executables() {
+    // SAFETY: no pointers; the call only changes this process's error mode and
+    // returns the previous one, which is not needed.
+    unsafe {
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+    }
+}
 
 // No Debug: arguments and environment may contain secrets.
 pub struct SpawnSpec {
