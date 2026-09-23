@@ -295,6 +295,47 @@ impl PackageTicket {
         self.outcome_for(self.read()?)
     }
 
+    /// Only the launch engine's explicit container-conflict path calls this.
+    /// Hold the one-use gate throughout cleanup so no delayed helper can start
+    /// consuming this ticket while the engine prepares its single retry.
+    pub fn recover_container_conflict(&self, package: &crate::package::Package) -> Result<bool> {
+        let _gate = self.gate()?;
+        if !matches!(self.read()?, Phase::Pending {}) {
+            return Ok(false);
+        }
+        if package.family_name != self.request.family || package.full_name != self.request.full_name
+        {
+            return Err(Error::Invalid("PACKAGE_RECOVERY_BINDING_MISMATCH"));
+        }
+        let started = Instant::now();
+        check_deadline(&self.request, started)?;
+        let mut report = crate::package::recovery::Report {
+            current_package: package.full_name.clone(),
+            ..Default::default()
+        };
+        let persist = |report: &crate::package::recovery::Report| {
+            store::replace_protected(
+                &self.root,
+                &self.request.owner_sid,
+                "recovery.json",
+                &store::encode(report, LIMIT)?,
+                LIMIT,
+            )
+        };
+        let result = crate::package::recovery::recover(
+            package,
+            started + Duration::from_secs(3),
+            &mut report,
+            persist,
+        );
+        report.status = match &result {
+            Ok(_) => "completed".into(),
+            Err(error) => error.to_string(),
+        };
+        persist(&report)?;
+        result.map(|_| true)
+    }
+
     fn outcome_for(&self, phase: Phase) -> Result<PackageOutcome> {
         match phase {
             Phase::Pending {} => Ok(PackageOutcome::Pending),

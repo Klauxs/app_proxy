@@ -3,6 +3,33 @@ use crate::instance_resource::ResourceOwner;
 use app_proxy_core::launch::LaunchNetwork;
 use uuid::Uuid;
 
+#[test]
+fn container_recovery_never_runs_for_busy_consumed_or_mismatched_tickets() {
+    let fixture = Fixture::new(0);
+    let package = crate::package::Package {
+        family_name: "Claude_pzs8sxrjxfjjc".into(),
+        full_name: "Claude_2.2553.13.0_x64__pzs8sxrjxfjjc".into(),
+        app_id: "Claude".into(),
+        exe: fixture.ticket.request.binding.executable.clone(),
+        isolated_storage: false,
+    };
+    let gate = fixture.ticket.gate().unwrap();
+    assert!(matches!(
+        fixture.ticket.recover_container_conflict(&package),
+        Err(Error::Invalid("PACKAGE_REQUEST_BUSY"))
+    ));
+    drop(gate);
+    assert!(matches!(
+        fixture.ticket.recover_container_conflict(&package),
+        Err(Error::Invalid("PACKAGE_RECOVERY_BINDING_MISMATCH"))
+    ));
+    fixture.ticket.write(Phase::Consuming {}).unwrap();
+    assert!(!fixture.ticket.recover_container_conflict(&package).unwrap());
+    fixture.ticket.write(Phase::NotCreated {}).unwrap();
+    assert!(!fixture.ticket.recover_container_conflict(&package).unwrap());
+    assert!(!fixture.ticket.root.join("recovery.json").exists());
+}
+
 pub(crate) fn publish_for_dispatch(store: &Store, permit: AuthorizedSpawn<'_>) -> PackageTicket {
     let fixture = Fixture::new(0);
     let mut request: Request = store::decode(

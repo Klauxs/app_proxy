@@ -864,6 +864,8 @@ fn spawn_package(
     };
     let already_cancelled = cancelled().map_err(unknown)?;
     let mut activations = 0;
+    let mut container_conflict = false;
+    let mut recovery_attempted = false;
     let mut last_activation = std::time::Instant::now();
     if !already_cancelled {
         configuration
@@ -882,6 +884,10 @@ fn spawn_package(
             application.package().unwrap(),
             &helper,
             &ticket.request_path(),
+        );
+        container_conflict = matches!(
+            activation,
+            Err(Error::Invalid("PACKAGE_CONTAINER_CONFLICT"))
         );
         app_proxy_windows::diagnostic_timing::mark("package.activation", || {
             format!(
@@ -911,6 +917,57 @@ fn spawn_package(
                 });
             }
             Ok(PackageOutcome::Pending) if !ending => {
+                // Recovery is failure-only and bounded to one attempt. The
+                // ticket holds its consumption gate while checking/cleaning
+                // obsolete package descendants; retries reuse that same gate.
+                if container_conflict && !recovery_attempted {
+                    recovery_attempted = true;
+                    let recovered =
+                        ticket.recover_container_conflict(application.package().unwrap());
+                    app_proxy_windows::diagnostic_timing::mark(
+                        "package.container_recovery",
+                        || {
+                            format!(
+                                "{id}:{}",
+                                recovered
+                                    .as_ref()
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|error| error.to_string())
+                            )
+                        },
+                    );
+                    if !matches!(recovered, Ok(true)) {
+                        // Resolve no-creation using the gate, never the HRESULT.
+                        if let Ok(PackageOutcome::NotCreated(evidence)) = ticket.revoke() {
+                            return Err(SpawnFailure::NotCreated {
+                                evidence,
+                                error: Error::Invalid("PACKAGE_CONTAINER_CONFLICT"),
+                            });
+                        }
+                    } else if !cancelled().map_err(unknown)?
+                        && started.elapsed() < Duration::from_secs(16)
+                    {
+                        let activation = app_proxy_windows::package::activate_launch(
+                            application.package().unwrap(),
+                            &helper,
+                            &ticket.request_path(),
+                        );
+                        app_proxy_windows::diagnostic_timing::mark(
+                            "package.activation_after_recovery",
+                            || {
+                                format!(
+                                    "{id}:{}",
+                                    activation
+                                        .as_ref()
+                                        .map(|_| "accepted".to_owned())
+                                        .unwrap_or_else(|error| error.to_string())
+                                )
+                            },
+                        );
+                    }
+                    // No repeated cleanup or extra activation after this retry.
+                    activations = 3;
+                }
                 // Desktop-package activation can fail transiently, including
                 // while the package is updating. Retry the SAME one-use
                 // ticket, never a fresh launch; its gate prevents duplication.
@@ -923,6 +980,10 @@ fn spawn_package(
                         application.package().unwrap(),
                         &helper,
                         &ticket.request_path(),
+                    );
+                    container_conflict = matches!(
+                        activation,
+                        Err(Error::Invalid("PACKAGE_CONTAINER_CONFLICT"))
                     );
                     app_proxy_windows::diagnostic_timing::mark("package.activation_retry", || {
                         format!(

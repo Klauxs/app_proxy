@@ -9,6 +9,7 @@ use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const BRIDGE: &str = include_str!("../../../../assets/msix-bridge.ps1");
 mod lookup;
+pub(crate) mod recovery;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,11 +59,40 @@ fn activate(package: &Package, helper: &Path, request: &Path, operation: &str) -
     let request = request
         .to_str()
         .ok_or(Error::Invalid("NON_UNICODE_REQUEST"))?;
-    let _: serde_json::Value = bridge(&serde_json::json!({
+    let started_ms = unix_millis();
+    let activation: Result<serde_json::Value> = bridge(&serde_json::json!({
         "operation":operation, "family_name":package.family_name, "app_id":package.app_id,
         "expected_full_name":package.full_name, "helper":helper, "request":request,
-    }))?;
-    Ok(())
+    }));
+    if matches!(
+        activation,
+        Err(Error::Invalid(
+            "PACKAGE_OPERATION_TIMEOUT_RESULT_UNKNOWN"
+                | "PACKAGE_BRIDGE_FAILED"
+                | "PACKAGE_ACTIVATION_SHARING_VIOLATION"
+        ))
+    ) && let (Some(started_ms), Some(finished_ms)) = (started_ms, unix_millis())
+    {
+        let evidence: Result<serde_json::Value> = bridge(&serde_json::json!({
+            "operation":"conflict", "family_name":package.family_name, "app_id":package.app_id,
+            "expected_full_name":package.full_name, "started_ms":started_ms, "finished_ms":finished_ms,
+        }));
+        if evidence
+            .ok()
+            .and_then(|v| v.get("confirmed").and_then(|v| v.as_bool()))
+            == Some(true)
+        {
+            return Err(Error::Invalid("PACKAGE_CONTAINER_CONFLICT"));
+        }
+    }
+    activation.map(|_| ())
+}
+
+fn unix_millis() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 fn bridge<T: serde::de::DeserializeOwned>(request: &impl Serialize) -> Result<T> {
@@ -141,17 +171,33 @@ fn bridge_script<T: serde::de::DeserializeOwned>(
                     .unwrap_or(0)
             )
         });
-        return Err(Error::Invalid(match code {
-            app_proxy_core::error_code::APP_NOT_INSTALLED => {
-                app_proxy_core::error_code::APP_NOT_INSTALLED
-            }
-            "AMBIGUOUS_PACKAGE" => "AMBIGUOUS_PACKAGE",
-            "PACKAGE_CHANGED" => "PACKAGE_CHANGED",
-            "PACKAGE_NOT_FULL_TRUST" => "PACKAGE_NOT_FULL_TRUST",
-            _ => "PACKAGE_BRIDGE_FAILED",
-        }));
+        return Err(Error::Invalid(bridge_error(code, &value)));
     }
     Ok(serde_json::from_value(value)?)
+}
+
+fn bridge_error(code: &str, value: &serde_json::Value) -> &'static str {
+    // Neither a generic I/O error nor a timeout proves a container collision.
+    if code == "PACKAGE_BRIDGE_FAILED"
+        && value.get("stage").and_then(|v| v.as_str()) == Some("activation")
+        && value
+            .get("system_code")
+            .and_then(|v| v.as_i64())
+            .is_some_and(|code| code == -2147024864 || code == 2147942432)
+    {
+        // This HRESULT alone could also describe an ordinary file lock. The
+        // activation wrapper still requires the paired container event proof.
+        return "PACKAGE_ACTIVATION_SHARING_VIOLATION";
+    }
+    match code {
+        app_proxy_core::error_code::APP_NOT_INSTALLED => {
+            app_proxy_core::error_code::APP_NOT_INSTALLED
+        }
+        "AMBIGUOUS_PACKAGE" => "AMBIGUOUS_PACKAGE",
+        "PACKAGE_CHANGED" => "PACKAGE_CHANGED",
+        "PACKAGE_NOT_FULL_TRUST" => "PACKAGE_NOT_FULL_TRUST",
+        _ => "PACKAGE_BRIDGE_FAILED",
+    }
 }
 
 fn system_powershell() -> Result<std::path::PathBuf> {
@@ -177,6 +223,145 @@ fn system_powershell() -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_sharing_violation_alone_is_not_container_recovery_evidence() {
+        for system_code in [-2147024864i64, 2147942432i64] {
+            let value = serde_json::json!({"stage":"activation", "system_code":system_code});
+            assert_eq!(
+                bridge_error("PACKAGE_BRIDGE_FAILED", &value),
+                "PACKAGE_ACTIVATION_SHARING_VIOLATION"
+            );
+            assert_eq!(bridge_error("PACKAGE_CHANGED", &value), "PACKAGE_CHANGED");
+        }
+        for value in [
+            serde_json::json!({"stage":"manifest", "system_code":-2147024864i64}),
+            serde_json::json!({"stage":"activation", "system_code":-2147024891i64}),
+            serde_json::json!({"stage":"activation"}),
+            serde_json::json!({"stage":"activation", "system_code":32}),
+        ] {
+            assert_eq!(
+                bridge_error("PACKAGE_BRIDGE_FAILED", &value),
+                "PACKAGE_BRIDGE_FAILED"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_extracts_wrapped_activation_hresult() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("claude.exe"), b"fixture").unwrap();
+        let folder = temp.path().display().to_string().replace('\'', "''");
+        let source = format!(
+            r#"
+function Get-AppxPackage {{ param($Name) [pscustomobject]@{{PackageFamilyName='Claude_pzs8sxrjxfjjc'; PackageFullName='Claude_2.0.0.0_x64__pzs8sxrjxfjjc'; InstallLocation='{folder}'}} }}
+function Get-AppxPackageManifest {{ param($Package) [xml]'<Package><Properties/><Applications><Application Id="Claude" EntryPoint="Windows.FullTrustApplication" Executable="claude.exe" /></Applications></Package>' }}
+function Invoke-CommandInDesktopPackage {{
+    $inner = [System.Runtime.InteropServices.COMException]::new('fixture sharing conflict', -2147024864)
+    throw [System.InvalidOperationException]::new('fixture wrapper', $inner)
+}}
+{BRIDGE}
+"#
+        );
+        let result: Result<serde_json::Value> = bridge_script(
+            &serde_json::json!({
+                "operation":"launch", "family_name":"Claude_pzs8sxrjxfjjc", "app_id":"Claude",
+                "expected_full_name":"Claude_2.0.0.0_x64__pzs8sxrjxfjjc",
+                "helper":temp.path().join("app-proxy-host.exe"), "request":temp.path().join("request.json")
+            }),
+            &source,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Error::Invalid("PACKAGE_ACTIVATION_SHARING_VIOLATION"))
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn timeout_evidence_requires_paired_activity_package_helper_and_user() {
+        let full = "Claude_2.0.0.0_x64__pzs8sxrjxfjjc";
+        let sid = crate::identity::current().unwrap().user_sid;
+        for (activity, container_package, container_sid, image, code, confirmed) in [
+            (
+                "same",
+                full,
+                sid.as_str(),
+                "app-proxy-host.exe",
+                "2147942432",
+                true,
+            ),
+            (
+                "different",
+                full,
+                sid.as_str(),
+                "app-proxy-host.exe",
+                "2147942432",
+                false,
+            ),
+            (
+                "same",
+                "Claude_1.0.0.0_x64__pzs8sxrjxfjjc",
+                sid.as_str(),
+                "app-proxy-host.exe",
+                "2147942432",
+                false,
+            ),
+            (
+                "same",
+                full,
+                "S-1-5-21-other",
+                "app-proxy-host.exe",
+                "2147942432",
+                false,
+            ),
+            (
+                "same",
+                full,
+                sid.as_str(),
+                "claude.exe",
+                "2147942432",
+                false,
+            ),
+            (
+                "same",
+                full,
+                sid.as_str(),
+                "app-proxy-host.exe",
+                "2147942405",
+                false,
+            ),
+        ] {
+            let events = serde_json::json!([
+                {"Id":208, "Xml":format!(r#"<Event><System><Correlation ActivityID="same" /></System><EventData><Data Name="PackageName">{full}</Data><Data Name="ApplicationName">Claude_pzs8sxrjxfjjc!Claude</Data><Data Name="ImageName">{image}</Data><Data Name="ErrorCode">{code}</Data></EventData></Event>"#)},
+                {"Id":215, "Xml":format!(r#"<Event><System><Correlation ActivityID="{activity}" /></System><EventData><Data Name="PackageName">{container_package}</Data><Data Name="ContainerName">{container_package}-{container_sid}</Data><Data Name="ErrorCode">2147942432</Data></EventData></Event>"#)}
+            ]).to_string().replace('\'', "''");
+            let source = format!(
+                r#"
+$script:events = '{events}' | ConvertFrom-Json
+function Get-WinEvent {{ param($FilterHashtable, $MaxEvents, $ErrorAction)
+    if ($FilterHashtable.StartTime.Kind -ne 'Local' -or $FilterHashtable.EndTime.Kind -ne 'Local') {{ throw 'Expected Windows PowerShell local filter times' }}
+    foreach ($item in $script:events) {{ $item | Add-Member -MemberType ScriptMethod -Name ToXml -Value {{ $this.Xml }} -PassThru }}
+}}
+{BRIDGE}
+"#
+            );
+            let result: serde_json::Value = bridge_script(
+                &serde_json::json!({
+                    "operation":"conflict", "family_name":"Claude_pzs8sxrjxfjjc", "app_id":"Claude",
+                    "expected_full_name":full, "started_ms":100000, "finished_ms":110000,
+                }),
+                &source,
+            )
+            .unwrap();
+            assert_eq!(
+                result["confirmed"], confirmed,
+                "{activity} {container_package} {container_sid} {image} {code}"
+            );
+        }
+    }
 
     fn fixture_query(
         root: &Path,
