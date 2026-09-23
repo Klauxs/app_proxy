@@ -15,10 +15,11 @@ use windows_sys::Win32::System::Threading::*;
 /// Makes process creation report a damaged or incompatible executable as an
 /// error instead of showing the operating system's modal dialog.
 ///
-/// The dialog is governed by the caller's error mode, so a hidden coordinator
-/// that launches a broken registered EXE would otherwise block a worker thread
-/// until someone clicks it. Call once per process before the first spawn.
-pub fn fail_silently_on_bad_executables() {
+/// The dialog is governed by the creating process's error mode, so a hidden
+/// coordinator that launches a broken registered EXE would otherwise block a
+/// worker thread until someone clicks it. Every creation path in this crate
+/// calls this first; the setting is process-wide and idempotent.
+pub(crate) fn fail_silently_on_bad_executables() {
     // SAFETY: no pointers; the call only changes this process's error mode and
     // returns the previous one, which is not needed.
     unsafe {
@@ -95,6 +96,7 @@ impl StartedHost {
 /// Fixed coordinator entry. Inherit no handles: std::Command on stable Windows
 /// otherwise inherits the CLI's captured stdout, keeping its caller waiting for EOF.
 pub fn start_host(exe: &std::path::Path, home: &std::path::Path) -> Result<StartedHost> {
+    fail_silently_on_bad_executables();
     identity::assert_ordinary_user()?;
     if !exe.is_absolute() || !home.is_absolute() {
         return Err(Error::Invalid("ABSOLUTE_HOST_PATH_REQUIRED"));
@@ -428,6 +430,7 @@ pub(crate) fn spawn_checked(spec: SpawnSpec) -> std::result::Result<StartedProce
 }
 
 fn spawn_on_thread(spec: SpawnSpec, created: &mut bool) -> Result<StartedProcess> {
+    fail_silently_on_bad_executables();
     let expected_image = identity::file_identity(&spec.exe)?;
     let caller = identity::current()?;
     let mut command = Command::new(&spec.exe);

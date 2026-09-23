@@ -108,6 +108,7 @@ impl PreparedCore {
     }
 
     pub fn spawn(self, binary: &CoreBinary, generation: &CoreGeneration) -> Result<CoreProcess> {
+        crate::process::fail_silently_on_bad_executables();
         binary.verify_current()?;
         if generation.id() != self.witness.generation
             || binary.executable() != self.witness.executable
