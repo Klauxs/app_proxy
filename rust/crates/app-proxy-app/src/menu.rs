@@ -345,13 +345,61 @@ fn network_input(network: NetworkBinding) -> Network {
 async fn prepare_network(
     root: &Path,
     network: NetworkBinding,
+    confirmed: &CatalogPage,
     foreground: &mut Foreground,
-) -> Result<(), Failure> {
+) -> Result<u64, Failure> {
     if let NetworkBinding::Profile { profile_id } = network {
         println!("验证所选代理；失败会保留代理配置，暂不创建实例。");
         core_cli::ensure_instance_profile(root.into(), profile_id, foreground).await?;
+        foreground.check()?;
+        return revision_after_port_recovery(confirmed, catalog(root).await?);
     }
-    foreground.check()
+    foreground.check()?;
+    Ok(confirmed.revision)
+}
+
+/// Port recovery is one atomic manifest commit. Preserve the confirmation of
+/// the selected app/network, while rejecting any additional concurrent edit
+/// (including hidden instance arguments/settings that advance the revision).
+fn revision_after_port_recovery(
+    confirmed: &CatalogPage,
+    mut current: CatalogPage,
+) -> Result<u64, Failure> {
+    let changed = || fail(exit::CONFLICT, "配置已变化，请重新确认。");
+    if current.revision == confirmed.revision {
+        return Ok(current.revision);
+    }
+    if confirmed.revision.checked_add(1) != Some(current.revision) {
+        return Err(changed());
+    }
+    let revision = current.revision;
+    let mut rebound = false;
+    for profile in &mut current.profiles {
+        let old = confirmed
+            .profiles
+            .iter()
+            .find(|p| p.id == profile.id)
+            .ok_or_else(changed)?;
+        if profile.endpoint != old.endpoint {
+            if profile.endpoint.host != old.endpoint.host
+                || profile.endpoint.port == 0
+                || old.revision.checked_add(1) != Some(profile.revision)
+            {
+                return Err(changed());
+            }
+            profile.endpoint = old.endpoint.clone();
+            profile.revision = old.revision;
+            rebound = true;
+        }
+    }
+    current.revision = confirmed.revision;
+    let encode = |page: &CatalogPage| {
+        serde_json::to_value(page).map_err(|_| fail(exit::INTERNAL, "CATALOG_SERIALIZATION_FAILED"))
+    };
+    if !rebound || encode(&current)? != encode(confirmed)? {
+        return Err(changed());
+    }
+    Ok(revision)
 }
 
 fn automatic_instance_name(snapshot: &CatalogPage, title: &str, isolated: bool) -> String {
@@ -447,7 +495,7 @@ async fn add_instance(root: &Path, foreground: &mut Foreground) -> Result<(), Fa
         }
     }
     confirm("保存此实例？", foreground).await?;
-    prepare_network(root, network, foreground).await?;
+    let revision = prepare_network(root, network, &snapshot, foreground).await?;
     let (_, receipt, _) = instance_cli::save(
         root,
         instance_cli::Command::Create {
@@ -463,7 +511,7 @@ async fn add_instance(root: &Path, foreground: &mut Foreground) -> Result<(), Fa
             network: network_input(network),
         },
         false,
-        Some(snapshot.revision),
+        Some(revision),
         foreground,
     )
     .await?;
@@ -614,7 +662,7 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
                 );
             }
             confirm("创建空白分身？", foreground).await?;
-            prepare_network(root, instance.network, foreground).await?;
+            let revision = prepare_network(root, instance.network, &snapshot, foreground).await?;
             let (_, receipt, _) = instance_cli::save(
                 root,
                 instance_cli::Command::Clone {
@@ -624,7 +672,7 @@ async fn manage_instance(root: &Path, foreground: &mut Foreground) -> Result<(),
                     proxy: None,
                 },
                 false,
-                Some(snapshot.revision),
+                Some(revision),
                 foreground,
             )
             .await?;
@@ -1175,6 +1223,189 @@ async fn proxies(root: &Path, foreground: &mut Foreground) -> Result<(), Failure
 mod tests {
     use super::*;
     use crate::guard_control::GuardPhase;
+
+    #[test]
+    fn port_recovery_continues_confirmed_create_and_clone_with_durable_save() {
+        use app_proxy_core::{model::*, registry::*};
+        use app_proxy_windows::{config_transaction::ConfigOutcome, store::Store};
+        for cloning in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut store = Store::create(&temp.path().join("store")).unwrap();
+            let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let profile = Uuid::new_v4();
+            let application = Uuid::new_v4();
+            let source = Uuid::new_v4();
+            let mut manifest = store.load().unwrap();
+            manifest.applications.push(Application {
+                id: application,
+                name: "fixture".into(),
+                revision: 1,
+                locator: ApplicationLocator::Exe {
+                    path: std::env::current_exe().unwrap(),
+                },
+                template_ref: Template::Codex,
+            });
+            let node = Uuid::new_v4();
+            manifest.profiles.push(ProxyProfile {
+                id: profile,
+                name: "route".into(),
+                revision: 1,
+                kind: ProxyKind::Managed,
+                endpoint: Endpoint {
+                    host: "127.0.0.1".parse().unwrap(),
+                    port: blocker.local_addr().unwrap().port(),
+                },
+                selected_node_id: node,
+                source: ProxySource::Manual {
+                    nodes: vec![ManualNode {
+                        id: node,
+                        name: "node".into(),
+                        protocol: ManualProtocol::Http,
+                        host: "proxy.invalid".into(),
+                        port: 8080,
+                        credentials: None,
+                    }],
+                },
+            });
+            if cloning {
+                manifest.instances.push(Instance {
+                    id: source,
+                    application_id: application,
+                    name: "source".into(),
+                    revision: 1,
+                    data: InstanceData::Original {},
+                    args: vec!["--fixture".into()],
+                    env: SavedEnvironment::default(),
+                    cwd: WorkingDirectory::Application {},
+                    network: NetworkBinding::Profile {
+                        profile_id: profile,
+                    },
+                    guard: GuardConfig {
+                        desired: Desired::Disabled,
+                        policy: GuardPolicy::StopUnproxied,
+                    },
+                });
+            }
+            store.commit(manifest.revision, manifest).unwrap();
+            let before =
+                crate::configuration::catalog_page(store.load().unwrap(), 0, None).unwrap();
+            let mut manifest = store.load().unwrap();
+            let (_reservations, changed) =
+                crate::core_ports::reserve(&mut manifest, &[profile]).unwrap();
+            assert!(changed);
+            store.commit(manifest.revision, manifest).unwrap();
+            let after = crate::configuration::catalog_page(store.load().unwrap(), 0, None).unwrap();
+            let revision = revision_after_port_recovery(&before, after).unwrap();
+            let instance = Uuid::new_v4();
+            let action = if cloning {
+                ConfigAction::CloneInstance {
+                    source_id: source,
+                    instance_id: instance,
+                    name: "clone".into(),
+                    storage: NewStorage::Store,
+                    network: None,
+                    guard: Some(Desired::Disabled),
+                }
+            } else {
+                ConfigAction::CreateInstance {
+                    instance: NewInstance {
+                        id: instance,
+                        application_id: application,
+                        name: "created".into(),
+                        data: NewData::Original {},
+                        network: NetworkBinding::Profile {
+                            profile_id: profile,
+                        },
+                        guard: Some(Desired::Disabled),
+                        args: vec![],
+                        env: SavedEnvironment::default(),
+                        cwd: WorkingDirectory::Application {},
+                    },
+                }
+            };
+            let mut request = ConfigRequest {
+                request_id: Uuid::new_v4(),
+                expected_revision: before.revision,
+                action,
+            };
+            assert!(matches!(
+                store.apply_config(&request).unwrap(),
+                ConfigOutcome::Rejected { .. }
+            ));
+            request.request_id = Uuid::new_v4();
+            request.expected_revision = revision;
+            assert!(matches!(
+                store.apply_config(&request).unwrap(),
+                ConfigOutcome::Applied { .. }
+            ));
+            drop(store);
+            let saved = Store::open(&temp.path().join("store"))
+                .unwrap()
+                .load()
+                .unwrap();
+            let created = saved.instances.iter().find(|i| i.id == instance).unwrap();
+            assert!(
+                created.network
+                    == NetworkBinding::Profile {
+                        profile_id: profile
+                    }
+            );
+            assert_ne!(
+                saved.profiles[0].endpoint.port,
+                blocker.local_addr().unwrap().port()
+            );
+            if cloning {
+                assert_eq!(created.args, ["--fixture"]);
+                assert!(matches!(created.data, InstanceData::Isolated { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn port_recovery_does_not_absorb_concurrent_or_unrelated_catalog_edits() {
+        use crate::configuration::ProfileSummary;
+        let before = CatalogPage {
+            revision: 7,
+            next_offset: None,
+            applications: vec![],
+            instances: vec![],
+            profiles: vec![ProfileSummary {
+                id: Uuid::new_v4(),
+                name: "route".into(),
+                revision: 3,
+                endpoint: app_proxy_core::model::Endpoint {
+                    host: "127.0.0.1".parse().unwrap(),
+                    port: 57598,
+                },
+                protocol: ProfileProtocol::Manual(ManualProtocol::Http),
+                host: "proxy.invalid".into(),
+                port: 8080,
+                authenticated: false,
+                auto_test_nodes: 0,
+            }],
+        };
+        let copy = || {
+            serde_json::from_value::<CatalogPage>(serde_json::to_value(&before).unwrap()).unwrap()
+        };
+        assert_eq!(revision_after_port_recovery(&before, copy()).unwrap(), 7);
+        for case in 0..5 {
+            let mut after = copy();
+            after.revision += 1;
+            after.profiles[0].revision += 1;
+            after.profiles[0].endpoint.port = 60150;
+            match case {
+                0 => after.revision += 1, // another commit, including settings not in CatalogPage
+                1 => after.profiles[0].host = "different.invalid".into(),
+                2 => after.profiles[0].name = "renamed".into(),
+                3 => after.profiles[0].revision += 1,
+                _ => after.profiles[0].endpoint.host = "127.0.0.2".parse().unwrap(),
+            }
+            assert!(
+                revision_after_port_recovery(&before, after).is_err(),
+                "case {case}"
+            );
+        }
+    }
 
     fn observed(observation: GuardObservation) -> GuardStatus {
         let id = Uuid::new_v4();
