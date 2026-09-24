@@ -758,3 +758,10 @@ run 只供已核对普通 coordinator 使用，显式当前 session>0，空替�
 - 前台正常保存与代理验证不再提前打印请求 UUID；JSON 和失败/结果未确认时的查询编号保留。实例摘要使用名称，分别展示进程监听和登录自启动。
 - 已核验安装不再依赖后台第一条心跳才登记登录入口；前台区分旧的缺失缓存、真实组件缺失和其他故障，启用后最多等待 40 秒覆盖后台现有重试周期。等待可取消，已保存的实例和自启动登记保留。
 - 回归：4 项 Guard 前台状态测试通过；实例 CLI 合约 12 项通过、4 项环境专项忽略。实际用户实例补登记后已查询到 ETW active、login ready=true；本轮未启动真实应用做关闭测试，也未注销 Windows 测试登录触发。
+
+# 2026-09-24：旧桌面会话的已退出共享代理恢复
+
+- `CoreProcess::recover` 保留账户归属检查，将 Session 校验移到确认原进程仍存活之后。旧 PID 不存在、进程已结束或 PID 已复用时返回已退出，沿用现有 Running → Down → 启动及健康检查流程；存活进程仍要求当前 Session 和完整身份，访问失败仍不能当作已退出。
+- 两项新增原生回归在修复前均因 `IdentityMismatch` 失败，修复后通过，覆盖不同 Session 的缺失 PID、PID 复用、账户不符、存活进程的 Session/文件身份不符，以及正确存活进程的复用。
+- `proxy_core::core_process::` 专项 7 项通过、2 项子进程夹具 ignored。显式运行 `proxy_health::tests::managed_core_persists_reuses_recovers_and_preserves_runtime_failures` 通过：在隔离临时数据目录用真实 sing-box 构造已退出进程和旧 Session 记录，验证状态查询为 Down、原入口集合与端口冲突保护保留、重新启动后通过真实本地 TLS/HTTP 204 健康检查。
+- workspace/all-targets clippy（`-D warnings`）、fmt 和 `git diff --check` 通过。Session 差异使用测试记录模拟，未注销或创建实际 Windows 桌面会话；未修改用户数据、替换已安装程序或重启现有 Guard，不代表已安装应用端到端验收。

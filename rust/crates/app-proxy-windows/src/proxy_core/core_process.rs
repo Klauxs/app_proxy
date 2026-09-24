@@ -96,12 +96,13 @@ impl CoreProcess {
         })
     }
 
-    /// None only when the original process is confirmed gone. Access denied or
-    /// changed identity details are unknown; they never authorize a fresh spawn.
+    /// None only when the original process is confirmed gone, including records
+    /// from an earlier desktop session of the same user. A live process still
+    /// requires the current session and full identity; access denied is unknown.
     pub fn recover(expected: &ProcessIdentity) -> Result<Option<Self>> {
         identity::assert_ordinary_user()?;
         let caller = identity::current()?;
-        if expected.user_sid != caller.user_sid || expected.session_id != caller.session_id {
+        if expected.user_sid != caller.user_sid {
             return Err(Error::IdentityMismatch);
         }
         let handle = match identity::open(
@@ -127,7 +128,9 @@ impl CoreProcess {
             if actual.creation_time != expected.creation_time {
                 return Ok(None);
             }
-            if actual != *expected {
+            // Session mismatch must not hide evidence that the original process
+            // has exited. Only a surviving original process reaches this gate.
+            if expected.session_id != caller.session_id || actual != *expected {
                 return Err(Error::IdentityMismatch);
             }
         }
@@ -297,6 +300,49 @@ fn listeners(family: u32) -> Result<Vec<Listener>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_accepts_missing_process_from_previous_session_but_not_another_user() {
+        let mut previous = identity::current().unwrap();
+        previous.pid = u32::MAX;
+        previous.session_id = previous.session_id.wrapping_add(1);
+        assert!(CoreProcess::recover(&previous).unwrap().is_none());
+
+        previous.user_sid = "S-1-5-18".into();
+        assert!(matches!(
+            CoreProcess::recover(&previous),
+            Err(Error::IdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn recovery_checks_pid_reuse_before_session_but_rejects_live_identity_mismatch() {
+        let own = identity::current().unwrap();
+        assert!(
+            CoreProcess::recover(&own)
+                .unwrap()
+                .unwrap()
+                .is_running()
+                .unwrap()
+        );
+
+        let mut previous = own.clone();
+        previous.session_id = previous.session_id.wrapping_add(1);
+        assert!(matches!(
+            CoreProcess::recover(&previous),
+            Err(Error::IdentityMismatch)
+        ));
+        previous.creation_time = previous.creation_time.wrapping_add(1);
+        assert!(CoreProcess::recover(&previous).unwrap().is_none());
+
+        let mut changed_image = own;
+        changed_image.image_file.file_index ^= 1;
+        assert!(matches!(
+            CoreProcess::recover(&changed_image),
+            Err(Error::IdentityMismatch)
+        ));
+    }
+
     #[test]
     fn native_tables_verify_ipv4_ipv6_and_full_process_identity() {
         let own = identity::current().unwrap();

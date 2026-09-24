@@ -149,7 +149,7 @@ async fn managed_core_persists_reuses_recovers_and_preserves_runtime_failures() 
     let upstream = fixture_repeat(
         Reply::Https(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()),
         HOST,
-        3,
+        4,
     )
     .await;
     let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -301,14 +301,27 @@ async fn managed_core_persists_reuses_recovers_and_preserves_runtime_failures() 
     ));
     assert!(matches!(manager.state().unwrap(), CoreState::Down { .. }));
     change_port(upstream.endpoint.port);
-    // Controlled lifecycle-only health callbacks below isolate crash recovery
-    // from upstream availability; the earlier three requests used real TLS.
+    // Lifecycle-only callbacks isolate crash setup and port-conflict handling;
+    // the final recovered start must pass the real TLS health check again.
     let before_crash = manager
         .ensure_with(&[id, second_id], id, |_| async { Ok(()) })
         .await
         .unwrap();
     let crashed = CoreProcess::attach(&before_crash.process).unwrap();
     crashed.stop().unwrap();
+    // Model a persisted Running record left by a previous desktop session.
+    // Only this isolated fixture journal is changed; the exited native process
+    // handle remains open so recovery must also handle signaled process objects.
+    let runtime_path = root.join("state/core/runtime.json");
+    let mut previous: serde_json::Value =
+        serde_json::from_slice(&fs::read(&runtime_path).unwrap()).unwrap();
+    previous["state"]["process"]["session_id"] =
+        before_crash.process.session_id.wrapping_add(1).into();
+    fs::write(&runtime_path, serde_json::to_vec(&previous).unwrap()).unwrap();
+    assert!(matches!(
+        manager.snapshot().unwrap().observed,
+        crate::core_manager::CoreObserved::Down
+    ));
     let blocker =
         std::net::TcpListener::bind((second_endpoint.host, second_endpoint.port)).unwrap();
     assert!(matches!(
@@ -321,10 +334,7 @@ async fn managed_core_persists_reuses_recovers_and_preserves_runtime_failures() 
     drop(blocker);
     let configuration = Arc::new(Configuration::new(Store::open(&root).unwrap()));
     let manager = CoreManager::new(root, configuration);
-    let after_crash = manager
-        .ensure_with(&[id], id, |_| async { Ok(()) })
-        .await
-        .unwrap();
+    let after_crash = manager.ensure_with(&[id], id, &probe).await.unwrap();
     cleanup
         .0
         .push(CoreProcess::attach(&after_crash.process).unwrap());
