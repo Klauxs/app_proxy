@@ -372,6 +372,18 @@ pub(crate) async fn submit(
         return (id, None, true);
     }
     let installing = matches!(action, CoreAction::Install {});
+    let before = if !json
+        && !foreground.quiet()
+        && matches!(
+            action,
+            CoreAction::Start { .. }
+                | CoreAction::ApplyUpdate { .. }
+                | CoreAction::RecoverUpdate { .. }
+        ) {
+        coordinator::catalog(root.clone()).await.ok()
+    } else {
+        None
+    };
     foreground.remember_core(id);
     // The foreground retains recovery IDs; normal success needs no UUID banner.
     let initial = coordinator::control_core(root.clone(), id, action).await;
@@ -427,7 +439,30 @@ pub(crate) async fn submit(
             .ok()
             .flatten();
     }
+    if let Some(before) = before {
+        report_port_changes(&root, &before).await;
+    }
     (id, status, interrupted || foreground.is_cancelled())
+}
+
+pub(crate) async fn report_port_changes(
+    root: &std::path::Path,
+    before: &crate::configuration::CatalogPage,
+) {
+    if let Ok(after) = coordinator::catalog(root.to_owned()).await {
+        for old in &before.profiles {
+            if let Some(new) = after.profiles.iter().find(|p| p.id == old.id)
+                && old.endpoint != new.endpoint
+            {
+                eprintln!(
+                    "代理 {} 的本地端口已从 {} 自动调整为 {}；使用旧端口的应用请重启。",
+                    crate::output::plain(&new.name),
+                    old.endpoint.port,
+                    new.endpoint.port
+                );
+            }
+        }
+    }
 }
 
 pub(crate) async fn prepare_and_apply_with_foreground(

@@ -185,25 +185,38 @@ impl CoreManager {
         F: Fn(Endpoint) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let generation = if restoring {
-            plan.old_generation()?
+        let (candidate, reservations) = if restoring {
+            let candidate = self
+                .configuration
+                .lock()?
+                .open_core_generation(plan.old_generation()?)?;
+            let reservations = candidate
+                .profiles()
+                .iter()
+                .map(|p| std::net::TcpListener::bind((p.endpoint.host, p.endpoint.port)))
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(|_| Error::Invalid("CORE_PORT_OCCUPIED"))?;
+            (candidate, reservations)
         } else {
-            plan.candidate
+            let mut store = self.configuration.lock()?;
+            let mut current = store.require_core_update(plan.plan_id)?;
+            let candidate = store.open_core_generation(current.candidate)?;
+            let ids: Vec<_> = candidate.profiles().iter().map(|p| p.id).collect();
+            let (reservations, changed) = crate::core_ports::reserve(&mut current.after, &ids)?;
+            let candidate = if changed {
+                store.rebind_core_update_ports(plan.plan_id, current.candidate, current.after)?
+            } else {
+                candidate
+            };
+            (candidate, reservations)
         };
-        let candidate = self
-            .configuration
-            .lock()?
-            .open_core_generation(generation)?;
+        let generation = candidate.id();
+        binary.check_config(candidate.config_path()).await?;
         let endpoints: Vec<_> = candidate
             .profiles()
             .iter()
             .map(|p| p.endpoint.clone())
             .collect();
-        let reservations: Vec<_> = endpoints
-            .iter()
-            .map(|e| std::net::TcpListener::bind((e.host, e.port)))
-            .collect::<std::io::Result<_>>()
-            .map_err(|_| Error::Invalid("CORE_PORT_OCCUPIED"))?;
         let starting = CoreState::Starting { generation };
         let prepared = {
             let mut store = self.configuration.lock()?;
@@ -354,10 +367,46 @@ impl CoreManager {
                 _ => return Err(Error::Invalid("CORE_RESTORE_STATE_UNKNOWN")),
             }
         }
-        let core_down = restored.is_err();
+        let mut core_down = restored.is_err();
+        let repair_ports = matches!(restored, Err(Error::Invalid("CORE_PORT_OCCUPIED")));
         self.configuration
             .lock()?
             .finish_core_restore(plan.plan_id, core_down)?;
+        if repair_ports {
+            // Finish the old-config rollback before its independent endpoint
+            // repair. A crash keeps the historical failed rollback and the
+            // normal start journal, so neither process creation is replayed.
+            let ids: Vec<_> = original.profiles().iter().map(|p| p.id).collect();
+            let recovered = self
+                .ensure_locked(None, &ids, ids[0], |_| async {
+                    let manifest = self.configuration.snapshot()?;
+                    let endpoints: Vec<_> = manifest
+                        .profiles
+                        .iter()
+                        .filter(|p| ids.contains(&p.id))
+                        .map(|p| p.endpoint.clone())
+                        .collect();
+                    if any_old_route_healthy(&endpoints, probe).await {
+                        Ok(())
+                    } else {
+                        Err(Error::Invalid("CORE_PROXY_HEALTH_FAILED"))
+                    }
+                })
+                .await;
+            if recovered.is_ok() {
+                self.configuration
+                    .lock()?
+                    .finish_core_port_recovery(plan.plan_id)?;
+                core_down = false;
+            } else if matches!(
+                self.state()?,
+                CoreState::Starting { .. } | CoreState::Running { .. }
+            ) {
+                // An uncertain replacement must not be reported as definitely
+                // down. Its durable start witness remains the recovery authority.
+                return Err(Error::Invalid("CORE_UPDATE_START_UNKNOWN"));
+            }
+        }
         Ok(CoreOutcome::Restored { core_down })
     }
 }

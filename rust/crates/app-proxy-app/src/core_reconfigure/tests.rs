@@ -1192,6 +1192,9 @@ async fn real_shared_core_expansion_preserves_routes_reuses_subsets_and_rolls_ba
         .prepare_expand(Uuid::new_v4(), revision, &profiles[1..], profiles[1])
         .await
         .unwrap();
+    // The new entry can become occupied after confirmation. Keep the blocker
+    // alive: expansion must commit a replacement without moving the old route.
+    let blocker = std::net::TcpListener::bind((endpoints[1].host, endpoints[1].port)).unwrap();
     let expanded = manager
         .apply_update(
             impact.plan_id,
@@ -1208,7 +1211,18 @@ async fn real_shared_core_expansion_preserves_routes_reuses_subsets_and_rolls_ba
     else {
         panic!("not expanded")
     };
-    assert_eq!(committed_revision, revision);
+    assert_eq!(committed_revision, revision + 1);
+    let saved = configuration.snapshot().unwrap();
+    let new_endpoint = saved
+        .profiles
+        .iter()
+        .find(|p| p.id == profiles[1])
+        .unwrap()
+        .endpoint
+        .clone();
+    assert!(new_endpoint != endpoints[1]);
+    assert!(std::net::TcpStream::connect(blocker.local_addr().unwrap()).is_ok());
+    endpoints[1] = new_endpoint;
     for endpoint in &endpoints {
         assert_eq!(via(endpoint.clone()).await.unwrap(), "first");
     }
@@ -1226,6 +1240,72 @@ async fn real_shared_core_expansion_preserves_routes_reuses_subsets_and_rolls_ba
         .await
         .unwrap();
     assert_eq!(reused.process, process);
-    assert_eq!(configuration.snapshot().unwrap().revision, revision);
+    assert_eq!(configuration.snapshot().unwrap().revision, revision + 1);
+
+    // A failed candidate can lose an old port before rollback. Recovery still
+    // restores the old route on a fresh port, even with a bound instance.
+    let impact = manager
+        .prepare_update(&edit(&configuration, profiles[0], first.port))
+        .await
+        .unwrap();
+    let first_probe = std::sync::atomic::AtomicBool::new(true);
+    let rollback_blocker = std::sync::Mutex::new(None);
+    let outcome = manager
+        .apply_update(
+            impact.plan_id,
+            admit(&configuration, impact.plan_id),
+            |e| async {
+                if first_probe.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    let CoreState::Running { process, .. } = manager.state().unwrap() else {
+                        panic!("running candidate required")
+                    };
+                    CoreProcess::attach(&process).unwrap().stop().unwrap();
+                    *rollback_blocker.lock().unwrap() = Some(
+                        std::net::TcpListener::bind((endpoints[0].host, endpoints[0].port))
+                            .unwrap(),
+                    );
+                    Err(Error::Invalid("TEST_CANDIDATE_FAILED"))
+                } else {
+                    via(e).await.map(|_| ())
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        CoreOutcome::Restored { core_down: false }
+    ));
+    let saved = configuration.snapshot().unwrap();
+    let recovered = saved
+        .profiles
+        .iter()
+        .find(|p| p.id == profiles[0])
+        .unwrap()
+        .endpoint
+        .clone();
+    assert!(recovered != endpoints[0]);
+    assert_eq!(via(recovered).await.unwrap(), "first");
+    assert!(
+        std::net::TcpStream::connect(
+            rollback_blocker
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .local_addr()
+                .unwrap()
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        configuration
+            .lock()
+            .unwrap()
+            .require_core_update(impact.plan_id)
+            .unwrap()
+            .result,
+        Some(CoreOutcome::Restored { core_down: false })
+    ));
     manager.stop().await.unwrap();
 }

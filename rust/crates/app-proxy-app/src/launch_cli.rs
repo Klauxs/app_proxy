@@ -243,6 +243,7 @@ async fn run_with_foreground(
     }
     let mut installed = false;
     let mut expanded = false;
+    let mut expected_revision = catalog.revision;
     loop {
         foreground.check()?;
         let request = LaunchRequest {
@@ -251,7 +252,7 @@ async fn run_with_foreground(
             origin,
         };
         let expected =
-            menu_revision.or_else(|| (installed || expanded).then_some(catalog.revision));
+            (menu_revision.is_some() || installed || expanded).then_some(expected_revision);
         let (mut report, fresh, interrupted) =
             submit(root.clone(), request, expected, foreground).await;
         let repairable = fresh
@@ -268,6 +269,9 @@ async fn run_with_foreground(
         let expand =
             repairable && !expanded && code == Some("CORE_RECONFIGURE_REQUIRES_CONFIRMATION");
         if !install && !expand {
+            if !json && !foreground.quiet() {
+                core_cli::report_port_changes(&root, &catalog).await;
+            }
             report.output(json, foreground)?;
             return if interrupted {
                 Err(fail(
@@ -354,10 +358,17 @@ async fn run_with_foreground(
                     "已停止后续启动；共享代理操作请按原编号查询。",
                 ));
             }
+            if let Some(CoreRequestStatus::Complete {
+                outcome: CoreOutcome::Reconfigured { revision, .. },
+                ..
+            }) = &applied
+            {
+                expected_revision = *revision;
+            }
             core_cli::outcome(applied)?;
             expanded = true;
         }
-        ensure_revision(&root, catalog.revision).await?;
+        ensure_revision(&root, expected_revision).await?;
         // Installation/confirmation only resumes this active foreground flow,
         // after the previous attempt was durably proved not to have dispatched.
         id = Uuid::new_v4();

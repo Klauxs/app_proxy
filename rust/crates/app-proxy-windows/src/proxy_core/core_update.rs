@@ -14,7 +14,7 @@ use app_proxy_core::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const LIMIT: usize = 2 * MANIFEST_LIMIT + 16384;
+const LIMIT: usize = 3 * MANIFEST_LIMIT + 16384;
 const PATH: &str = "state/core/update.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +55,9 @@ pub struct CoreUpdate {
     pub change: UpdateChange,
     pub before: Manifest,
     pub after: Manifest,
+    /// Preserve the authorized edit separately from automatic listener repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_after: Option<Manifest>,
     pub previous: CoreState,
     pub candidate: Uuid,
     pub phase: UpdatePhase,
@@ -163,6 +166,7 @@ impl Store {
             change,
             before,
             after,
+            original_after: None,
             previous,
             candidate: candidate_id,
             phase: UpdatePhase::Prepared {},
@@ -229,6 +233,7 @@ impl Store {
             change: UpdateChange::Expand { profiles },
             before,
             after,
+            original_after: None,
             previous,
             candidate: candidate.id(),
             phase: UpdatePhase::Prepared {},
@@ -337,6 +342,59 @@ impl Store {
             _ => {}
         }
         self.transition_core_state_inner(expected, next, Some(manifest))
+    }
+
+    /// Called only after the old owned core has stopped. Publish a fresh
+    /// immutable candidate and its endpoint-only manifest change in one journal.
+    pub fn rebind_core_update_ports(
+        &mut self,
+        id: Uuid,
+        expected_candidate: Uuid,
+        mut after: Manifest,
+    ) -> Result<crate::core_state::CoreGeneration> {
+        let mut plan = self.require_core_update(id)?;
+        if plan.phase != (UpdatePhase::Switching {})
+            || plan.candidate != expected_candidate
+            || !matches!(self.core_state()?, CoreState::Down { .. })
+            || !same(&self.load()?, &plan.before)?
+        {
+            return Err(Error::Invalid("CORE_UPDATE_PLAN_STALE"));
+        }
+        after.revision = plan
+            .before
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Invalid("REVISION_EXHAUSTED"))?;
+        let ids: Vec<_> = self
+            .open_core_generation(plan.candidate)?
+            .profiles()
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        let candidate = self.prepare_core_generation_for(&after, &ids)?;
+        let previous_after = std::mem::replace(&mut plan.after, after);
+        if plan.original_after.is_none() {
+            plan.original_after = Some(previous_after);
+        }
+        plan.candidate = candidate.id();
+        self.validate_core_update(&plan)?;
+        self.write_core_update(&plan)?;
+        Ok(candidate)
+    }
+
+    /// A completed rollback left Down because an old listener was unavailable.
+    /// Its subsequent normal recovery has now passed health on fresh ports.
+    pub fn finish_core_port_recovery(&mut self, id: Uuid) -> Result<()> {
+        let mut plan = self.require_core_update(id)?;
+        if plan.phase != (UpdatePhase::Restored { core_down: true })
+            || !matches!(self.core_state()?, CoreState::Running { .. })
+        {
+            return Err(Error::Invalid("CORE_RESTORE_NOT_CONFIRMED"));
+        }
+        plan.phase = UpdatePhase::Restored { core_down: false };
+        plan.result =
+            Some(app_proxy_core::core_control::CoreOutcome::Restored { core_down: false });
+        self.write_core_update(&plan)
     }
 
     /// Health succeeded. Write the commit intent before changing the manifest.
@@ -613,6 +671,38 @@ impl Store {
         }
         self.validate(&plan.before)?;
         self.validate(&plan.after)?;
+        if let Some(original) = &plan.original_after {
+            self.validate(original)?;
+            if plan.phase == (UpdatePhase::Prepared {})
+                || plan.before.revision.checked_add(1) != Some(plan.after.revision)
+            {
+                return Err(Error::Invalid("INVALID_CORE_PORT_RECOVERY"));
+            }
+            let mut normalized: Manifest =
+                store::decode(&store::encode(&plan.after, MANIFEST_LIMIT)?)?;
+            let mut changed = false;
+            for profile in &mut normalized.profiles {
+                let old = original
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == profile.id)
+                    .ok_or(Error::Invalid("INVALID_CORE_PORT_RECOVERY"))?;
+                if profile.endpoint != old.endpoint {
+                    if profile.endpoint.host != old.endpoint.host
+                        || old.revision.checked_add(1) != Some(profile.revision)
+                    {
+                        return Err(Error::Invalid("INVALID_CORE_PORT_RECOVERY"));
+                    }
+                    profile.endpoint = old.endpoint.clone();
+                    profile.revision = old.revision;
+                    changed = true;
+                }
+            }
+            normalized.revision = original.revision;
+            if !changed || !same(&normalized, original)? {
+                return Err(Error::Invalid("INVALID_CORE_PORT_RECOVERY"));
+            }
+        }
         let old = self.open_core_generation(plan.old_generation()?)?;
         let candidate = self.open_core_generation(plan.candidate)?;
         if !self.core_generation_matches(&old, &plan.before)?
@@ -622,6 +712,7 @@ impl Store {
         }
         let old_ids: Vec<_> = old.profiles().iter().map(|p| p.id).collect();
         let candidate_ids: Vec<_> = candidate.profiles().iter().map(|p| p.id).collect();
+        let after = plan.original_after.as_ref().unwrap_or(&plan.after);
         if matches!(plan.change, UpdateChange::RemoveProfile {}) {
             let retained: Vec<_> = old_ids
                 .iter()
@@ -650,7 +741,7 @@ impl Store {
             )
             .map_err(|_| Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
             expected.revision = receipt.revision;
-            if !same(&expected, &plan.after)? {
+            if !same(&expected, after)? {
                 return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
             }
             return Ok(());
@@ -679,15 +770,13 @@ impl Store {
                 || combined != candidate_ids
                 || combined.len() <= old_ids.len()
                 || combined.len() > 1024
-                || !same(&plan.before, &plan.after)?
+                || !same(&plan.before, after)?
             {
                 return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
             }
             return Ok(());
         }
-        if old_ids != candidate_ids
-            || plan.before.revision.checked_add(1) != Some(plan.after.revision)
-        {
+        if old_ids != candidate_ids || plan.before.revision.checked_add(1) != Some(after.revision) {
             return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
         }
         if !old.profiles().iter().any(|p| p.id == plan.profile_id) {
@@ -708,14 +797,13 @@ impl Store {
             )
             .map_err(|_| Error::Invalid("INVALID_CORE_UPDATE_RECORD"))?;
             expected.revision = receipt.revision;
-            if !same(&expected, &plan.after)? {
+            if !same(&expected, after)? {
                 return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
             }
             return Ok(());
         }
         let mut expected: Manifest = store::decode(&store::encode(&plan.before, MANIFEST_LIMIT)?)?;
-        let profile = plan
-            .after
+        let profile = after
             .profiles
             .iter()
             .find(|p| p.id == plan.profile_id)
@@ -746,8 +834,8 @@ impl Store {
             return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
         }
         *target = profile.clone();
-        expected.revision = plan.after.revision;
-        if !same(&expected, &plan.after)? {
+        expected.revision = after.revision;
+        if !same(&expected, after)? {
             return Err(Error::Invalid("INVALID_CORE_UPDATE_RECORD"));
         }
         Ok(())
@@ -868,6 +956,71 @@ mod tests {
                 password: "private-update-password".into(),
             }),
         }
+    }
+
+    #[test]
+    fn rebound_candidate_survives_reopen_and_commits_only_authorized_edit_plus_ports() {
+        let (temp, mut store, profile) = setup();
+        let impact = prepare(&mut store, profile);
+        let plan = begin(&mut store, impact.plan_id);
+        let down = CoreState::Down {
+            generation: plan.old_generation().unwrap(),
+        };
+        store
+            .transition_core_update(plan.plan_id, &plan.previous, down.clone())
+            .unwrap();
+        let changed = || {
+            let mut target: Manifest =
+                store::decode(&store::encode(&plan.after, MANIFEST_LIMIT).unwrap()).unwrap();
+            target.profiles[0].endpoint.port += 1;
+            target.profiles[0].revision += 1;
+            target
+        };
+        let mut invalid = changed();
+        invalid.settings.test_url = "https://unexpected.invalid/".into();
+        assert!(
+            store
+                .rebind_core_update_ports(plan.plan_id, plan.candidate, invalid)
+                .is_err()
+        );
+        assert_eq!(
+            store.require_core_update(plan.plan_id).unwrap().candidate,
+            plan.candidate
+        );
+        let candidate = store
+            .rebind_core_update_ports(plan.plan_id, plan.candidate, changed())
+            .unwrap();
+        let generation = candidate.id();
+        assert_eq!(store.load().unwrap().profiles[0].endpoint.port, 29001);
+        drop(candidate);
+        drop(store);
+        let mut store = Store::open(&temp.path().join("store")).unwrap();
+        let recovered = store.require_core_update(plan.plan_id).unwrap();
+        assert_eq!(recovered.candidate, generation);
+        assert_eq!(recovered.after.profiles[0].endpoint.port, 29002);
+        let starting = CoreState::Starting { generation };
+        store
+            .transition_core_update(plan.plan_id, &down, starting.clone())
+            .unwrap();
+        store
+            .transition_core_update(
+                plan.plan_id,
+                &starting,
+                CoreState::Running {
+                    generation,
+                    process: crate::identity::current().unwrap(),
+                },
+            )
+            .unwrap();
+        store.commit_core_update(plan.plan_id).unwrap();
+        assert_eq!(store.load().unwrap().profiles[0].endpoint.port, 29002);
+        assert_eq!(store.load().unwrap().revision, plan.after.revision);
+        assert!(
+            store
+                .core_generation_is_current(&store.open_core_generation(generation).unwrap())
+                .unwrap()
+        );
+        store.require_core_update(plan.plan_id).unwrap();
     }
     fn prepare(store: &mut Store, profile: Uuid) -> UpdateImpact {
         let revision = store.load().unwrap().revision;

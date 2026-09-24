@@ -7,6 +7,7 @@ pub mod core_cli;
 pub mod core_control;
 mod core_installer;
 pub mod core_manager;
+mod core_ports;
 mod core_reconfigure;
 pub mod exit;
 mod foreground;

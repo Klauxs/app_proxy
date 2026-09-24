@@ -460,7 +460,7 @@ impl LaunchEngine {
         if !from_event {
             self.advance(id, LaunchPhase::Accepted {}, LaunchPhase::Resolving {})?;
         }
-        let (snapshot, instance_id) = {
+        let (mut snapshot, instance_id) = {
             let mut store = self.configuration.lock()?;
             store.recover_config_requests()?;
             (
@@ -469,7 +469,7 @@ impl LaunchEngine {
             )
         };
         let (app, instance) = entries(&snapshot, instance_id)?;
-        let digest = dependency_digest(&snapshot, instance_id)?;
+        let template_ref = app.template_ref;
         let (application, data, pinned, stopped) = if let Some(observed) = pinned {
             if observed.instance_id != instance_id || observed.revision != snapshot.revision {
                 return Err(Error::Invalid("LAUNCH_CONFIG_CHANGED"));
@@ -563,7 +563,7 @@ impl LaunchEngine {
                     id,
                     application,
                     data,
-                    app.template_ref,
+                    template_ref,
                     (&correction.target, pinned),
                     reservation,
                 )
@@ -574,7 +574,7 @@ impl LaunchEngine {
         if guard_launch && !from_event {
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
-                    match check_occupancy(&application, data.as_ref(), app.template_ref).await {
+                    match check_occupancy(&application, data.as_ref(), template_ref).await {
                         Ok(()) => return Ok(()),
                         Err(Error::Invalid(
                             app_proxy_core::error_code::INSTANCE_EXTERNALLY_RUNNING,
@@ -618,15 +618,29 @@ impl LaunchEngine {
                 })
                 .await
                 .map_err(|_| Error::Invalid("LAUNCH_CORE_PREPARATION_INTERRUPTED"))??;
-                let profile = snapshot
-                    .profiles
+                let active = self
+                    .configuration
+                    .lock()?
+                    .open_core_generation(ready.generation)?;
+                let endpoint = active
+                    .profiles()
                     .iter()
                     .find(|p| p.id == profile_id)
+                    .ok_or(Error::Invalid("PROFILE_NOT_FOUND"))?
+                    .endpoint
+                    .clone();
+                let profile = snapshot
+                    .profiles
+                    .iter_mut()
+                    .find(|p| p.id == profile_id)
                     .ok_or(Error::Invalid("PROFILE_NOT_FOUND"))?;
+                // Accept only the endpoint selected by the prepared core. The
+                // dependency check below still rejects unrelated concurrent edits.
+                profile.endpoint = endpoint.clone();
                 LaunchNetwork::Profile {
                     profile_id,
                     generation: ready.generation,
-                    endpoint: profile.endpoint.clone(),
+                    endpoint,
                 }
             }
         };
@@ -635,6 +649,7 @@ impl LaunchEngine {
             LaunchPhase::PreparingProxy {},
             LaunchPhase::PreparingData {},
         )?;
+        let digest = dependency_digest(&snapshot, instance_id)?;
         let output = {
             let store = self.configuration.lock()?;
             if dependency_digest(&store.load()?, instance_id)? != digest {
@@ -673,7 +688,7 @@ impl LaunchEngine {
         if guard_launch {
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
-                    match check_occupancy(&application, data.as_ref(), app.template_ref).await {
+                    match check_occupancy(&application, data.as_ref(), template_ref).await {
                         Ok(()) => return Ok(()),
                         Err(Error::Invalid(
                             app_proxy_core::error_code::INSTANCE_EXTERNALLY_RUNNING,

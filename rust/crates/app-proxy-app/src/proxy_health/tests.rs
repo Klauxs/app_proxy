@@ -338,7 +338,6 @@ async fn managed_core_persists_reuses_recovers_and_preserves_runtime_failures() 
     let mut second = manifest.profiles[0].clone();
     second.id = Uuid::new_v4();
     second.endpoint.port = second_reserved.local_addr().unwrap().port();
-    let second_endpoint = second.endpoint.clone();
     let second_id = second.id;
     manifest.profiles.push(second);
     store.commit(manifest.revision, manifest).unwrap();
@@ -358,24 +357,38 @@ async fn managed_core_persists_reuses_recovers_and_preserves_runtime_failures() 
                 .map_err(|_| PlatformError::Invalid("FIXTURE_HEALTH_FAILED"))
         }
     };
-    // A foreign listener is not adopted or terminated, and no start is journaled.
-    assert!(matches!(
-        manager.ensure_with(&[id], id, &probe).await,
-        Err(PlatformError::Invalid("CORE_PORT_OCCUPIED"))
-    ));
-    assert_eq!(manager.state().unwrap(), CoreState::Stopped {});
-    assert!(
-        tokio::net::TcpStream::connect(reserved.local_addr().unwrap())
-            .await
-            .is_ok()
-    );
-    drop(reserved);
-    drop(second_reserved);
+    // Foreign listeners stay alive while both conflicting entries move to
+    // OS-selected ports and the same request completes its real TLS probe.
     let ready = manager
         .ensure_with(&[id, second_id], id, &probe)
         .await
         .unwrap();
     cleanup.0.push(CoreProcess::attach(&ready.process).unwrap());
+    let saved = configuration.snapshot().unwrap();
+    let endpoint = saved
+        .profiles
+        .iter()
+        .find(|p| p.id == id)
+        .unwrap()
+        .endpoint
+        .clone();
+    let second_endpoint = saved
+        .profiles
+        .iter()
+        .find(|p| p.id == second_id)
+        .unwrap()
+        .endpoint
+        .clone();
+    assert_ne!(endpoint.port, reserved.local_addr().unwrap().port());
+    assert_ne!(
+        second_endpoint.port,
+        second_reserved.local_addr().unwrap().port()
+    );
+    assert!(
+        tokio::net::TcpStream::connect(reserved.local_addr().unwrap())
+            .await
+            .is_ok()
+    );
     // Dropping the owner-side manager must not kill the shared core. Recover via
     // the persisted full identity and exact native listener owner evidence.
     drop(manager);
@@ -482,30 +495,41 @@ async fn managed_core_persists_reuses_recovers_and_preserves_runtime_failures() 
     ));
     let blocker =
         std::net::TcpListener::bind((second_endpoint.host, second_endpoint.port)).unwrap();
-    assert!(matches!(
-        manager.ensure_with(&[id], id, |_| async { Ok(()) }).await,
-        Err(PlatformError::Invalid("CORE_PORT_OCCUPIED"))
-    ));
-    assert!(matches!(manager.state().unwrap(), CoreState::Down { .. }));
-    drop(manager);
-    drop(configuration);
-    drop(blocker);
-    let configuration = Arc::new(Configuration::new(Store::open(&root).unwrap()));
-    let manager = CoreManager::new(root, configuration);
     let after_crash = manager.ensure_with(&[id], id, &probe).await.unwrap();
     cleanup
         .0
         .push(CoreProcess::attach(&after_crash.process).unwrap());
+    let saved = configuration.snapshot().unwrap();
+    let new_second_endpoint = saved
+        .profiles
+        .iter()
+        .find(|p| p.id == second_id)
+        .unwrap()
+        .endpoint
+        .clone();
+    assert!(new_second_endpoint != second_endpoint);
+    assert!(saved.profiles.iter().find(|p| p.id == id).unwrap().endpoint == endpoint);
+    assert!(std::net::TcpStream::connect((second_endpoint.host, second_endpoint.port)).is_ok());
+    drop(manager);
+    drop(configuration);
+    let configuration = Arc::new(Configuration::new(Store::open(&root).unwrap()));
+    let manager = CoreManager::new(root, configuration);
+    let reused = manager
+        .ensure_with(&[id], id, |_| async { Ok(()) })
+        .await
+        .unwrap();
+    assert_eq!(reused.process, after_crash.process);
     assert_ne!(before_crash.process, after_crash.process);
     assert!(
         cleanup
             .0
             .last()
             .unwrap()
-            .listeners_verified(&[endpoint, second_endpoint])
+            .listeners_verified(&[endpoint, new_second_endpoint])
             .unwrap()
     );
     manager.stop().await.unwrap();
+    drop((reserved, second_reserved, blocker));
 }
 
 async fn trusted(f: &Fixture, statuses: &[u16]) -> Result<Evidence, Error> {

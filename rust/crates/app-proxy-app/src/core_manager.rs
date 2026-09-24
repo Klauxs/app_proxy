@@ -181,10 +181,26 @@ impl CoreManager {
         F: FnOnce(Endpoint) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        let _gate = self.gate.lock().await;
+        self.ensure_locked(request_id, profiles, required, probe)
+            .await
+    }
+
+    /// The caller already owns the lifecycle gate, including rollback recovery.
+    pub(crate) async fn ensure_locked<F, Fut>(
+        &self,
+        request_id: Option<Uuid>,
+        profiles: &[Uuid],
+        required: Uuid,
+        probe: F,
+    ) -> Result<ReadyCore>
+    where
+        F: FnOnce(Endpoint) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
         if !profiles.contains(&required) || required.is_nil() {
             return Err(Error::Invalid("REQUIRED_PROFILE_MISSING"));
         }
-        let _gate = self.gate.lock().await;
         let mut requested_profiles = profiles.to_vec();
         let mut state = {
             let mut store = self.configuration.lock()?;
@@ -272,26 +288,33 @@ impl CoreManager {
                     requested_profiles.sort();
                     requested_profiles.dedup();
                 }
-                let candidate = self
-                    .configuration
-                    .lock()?
-                    .prepare_core_generation(&requested_profiles)?;
                 let binary = singbox_binary::discover(&self.root)
                     .await?
                     .ok_or(Error::Invalid("CORE_BINARY_MISSING"))?;
+                let (candidate, reservations) = {
+                    let mut store = self.configuration.lock()?;
+                    store.recover_config_requests()?;
+                    let mut manifest = store.load()?;
+                    let (reservations, changed) =
+                        crate::core_ports::reserve(&mut manifest, &requested_profiles)?;
+                    if changed {
+                        // Applications keep running. Their next launch reads
+                        // the saved endpoint; old command lines cannot be edited.
+                        store.commit(manifest.revision, manifest)?;
+                    }
+                    (
+                        store.prepare_core_generation(&requested_profiles)?,
+                        reservations,
+                    )
+                };
                 binary.check_config(candidate.config_path()).await?;
                 let endpoints: Vec<_> = candidate
                     .profiles()
                     .iter()
                     .map(|p| p.endpoint.clone())
                     .collect();
-                // Availability only. Ownership is checked after our spawn; a bind
-                // race never authorizes adoption or termination of its winner.
-                let reservations: Vec<_> = endpoints
-                    .iter()
-                    .map(|e| std::net::TcpListener::bind((e.host, e.port)))
-                    .collect::<std::io::Result<_>>()
-                    .map_err(|_| Error::Invalid("CORE_PORT_OCCUPIED"))?;
+                // Reservations remain held through config checking. Ownership
+                // is still verified after spawn, including any bind race.
                 let starting = CoreState::Starting {
                     generation: candidate.id(),
                 };
