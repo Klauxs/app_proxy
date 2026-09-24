@@ -765,3 +765,10 @@ run 只供已核对普通 coordinator 使用，显式当前 session>0，空替�
 - 两项新增原生回归在修复前均因 `IdentityMismatch` 失败，修复后通过，覆盖不同 Session 的缺失 PID、PID 复用、账户不符、存活进程的 Session/文件身份不符，以及正确存活进程的复用。
 - `proxy_core::core_process::` 专项 7 项通过、2 项子进程夹具 ignored。显式运行 `proxy_health::tests::managed_core_persists_reuses_recovers_and_preserves_runtime_failures` 通过：在隔离临时数据目录用真实 sing-box 构造已退出进程和旧 Session 记录，验证状态查询为 Down、原入口集合与端口冲突保护保留、重新启动后通过真实本地 TLS/HTTP 204 健康检查。
 - workspace/all-targets clippy（`-D warnings`）、fmt 和 `git diff --check` 通过。Session 差异使用测试记录模拟，未注销或创建实际 Windows 桌面会话；未修改用户数据、替换已安装程序或重启现有 Guard，不代表已安装应用端到端验收。
+
+# 2026-09-24：代理健康检查最多五次重试
+
+- 连接预算调整为 8 秒、单次请求 15 秒；首次检测后最多 5 次重试，等待间隔为 1/2/2/2/2 秒，整轮检查共用 30 秒绝对期限。重试只发送同一显式代理入口的健康 GET，不重启内核、不重新提交配置或应用创建请求，也不启用直连回退。
+- 超时及错误链中明确的临时网络 I/O 故障允许重试；未知传输/TLS 错误、配置错误、不符合要求的 HTTP 状态和过大响应不自动重试。细分失败码保留到启动/内核控制回执，代理 CLI 输出对应中文原因；原始 URL、凭据和底层错误文本不进入回执。
+- 新增回归覆盖第六次检测成功、六次失败停止、30 秒期限在请求中或等待中到达、取消后不再发请求、永久错误只尝试一次、细分回执和 CLI 原因，以及真实本地代理先拒绝连接后在原端口恢复并完成 TLS/204 检测。首次真实连接测试发现 Windows TCP 自带重试会掩盖固定启动延迟，夹具改为观察到第一次失败后才启动监听，验证实际发生了应用层重试。
+- `rust/scripts/verify.ps1` 通过：workspace 518 项 passed、65 项 ignored，fmt 和 workspace/all-targets clippy（`-D warnings`）通过；日志位于 `.tools/proxy-health-retry-verify.log`。`package.ps1` 已生成新版安装包，未替换当前已安装程序或重启用户代理；本轮为代码、原生本地网络夹具及构建验证，不代表新版安装后真实上游故障恢复的端到端验收。

@@ -612,7 +612,7 @@ impl LaunchEngine {
                             crate::proxy_health::check(&endpoint, &url, &statuses)
                                 .await
                                 .map(|_| ())
-                                .map_err(|_| Error::Invalid("CORE_PROXY_HEALTH_FAILED"))
+                                .map_err(|error| Error::Invalid(error.code()))
                         })
                         .await
                 })

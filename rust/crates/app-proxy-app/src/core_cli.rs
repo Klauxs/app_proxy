@@ -151,7 +151,11 @@ pub(crate) fn outcome(status: Option<CoreRequestStatus>) -> Result<(), Failure> 
         Some(CoreRequestStatus::Complete {
             outcome: CoreOutcome::Failed { code },
             ..
-        }) => Err(fail(exit::UNAVAILABLE, code)),
+        }) => Err(fail(
+            exit::UNAVAILABLE,
+            crate::proxy_health::failure_message(&code)
+                .map_or(code.clone(), |message| format!("{message}（{code}）")),
+        )),
         _ => Err(fail(
             exit::UNCONFIRMED,
             "请求结果未确认；请查询原编号，不要自动重新提交。",

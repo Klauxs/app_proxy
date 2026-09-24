@@ -178,7 +178,7 @@ impl CoreControl {
                         crate::proxy_health::check(&endpoint, &target, &statuses)
                             .await
                             .map(|_| ())
-                            .map_err(|_| Error::Invalid("CORE_PROXY_HEALTH_FAILED"))
+                            .map_err(|error| Error::Invalid(error.code()))
                     }
                 };
                 if matches!(job.action, CoreAction::ApplyUpdate { .. }) {
@@ -198,7 +198,7 @@ impl CoreControl {
                         )
                         .await
                         .map(|_| ())
-                        .map_err(|_| Error::Invalid("CORE_PROXY_HEALTH_FAILED"))
+                        .map_err(|error| Error::Invalid(error.code()))
                     })
                     .await
                     .map(|ready| CoreOutcome::Ready {

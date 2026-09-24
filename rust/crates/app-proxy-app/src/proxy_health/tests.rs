@@ -13,6 +13,164 @@ use tokio_rustls::{
 const HOST: &str = "health.app-proxy.invalid";
 const TARGET: &str = "https://health.app-proxy.invalid/check?secret=never-log-this";
 
+#[test]
+fn health_failure_receipt_keeps_specific_code_and_readable_cli_reason() {
+    use app_proxy_core::core_control::{CoreOutcome, CoreRequestStatus};
+    let error = failure(Stage::ConnectAndTls, Failure::TotalTimeout);
+    let receipt = CoreRequestStatus::Complete {
+        outcome: CoreOutcome::Failed {
+            code: error.code().into(),
+        },
+        completed_at: 0,
+    };
+    let failure = crate::core_cli::outcome(Some(receipt)).unwrap_err();
+    assert_eq!(failure.exit_code, crate::exit::UNAVAILABLE);
+    let message = failure.to_string();
+    assert!(message.contains("30 秒"));
+    assert!(message.contains(error.code()));
+    assert!(!message.contains(TARGET));
+}
+
+#[tokio::test(start_paused = true)]
+async fn fifth_retry_can_succeed_and_exhaustion_stops_after_six_attempts() {
+    for succeeds in [true, false] {
+        let mut attempts = 0;
+        let result = check_with_retries(|| {
+            attempts += 1;
+            let attempt = attempts;
+            async move {
+                if succeeds && attempt == 6 {
+                    Ok(Evidence {
+                        status: 204,
+                        elapsed_ms: 0,
+                    })
+                } else {
+                    Err(failure(Stage::ConnectAndTls, Failure::Timeout))
+                }
+            }
+        })
+        .await;
+        assert_eq!(attempts, 6);
+        if succeeds {
+            assert_eq!(result.unwrap().elapsed_ms, 9000);
+        } else {
+            assert_eq!(result.unwrap_err().code(), "CORE_PROXY_CONNECT_TIMEOUT");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn overall_deadline_bounds_inflight_request_and_retry_delay() {
+    for per_attempt in [Duration::from_secs(15), Duration::from_millis(29500)] {
+        let started = tokio::time::Instant::now();
+        let mut attempts = 0;
+        let result = check_with_retries(|| {
+            attempts += 1;
+            async move {
+                tokio::time::sleep(per_attempt).await;
+                Err(failure(Stage::Response, Failure::Timeout))
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap_err().kind, Failure::TotalTimeout);
+        assert_eq!(started.elapsed(), CHECK_TIMEOUT);
+        assert_eq!(attempts, if per_attempt.as_secs() == 15 { 2 } else { 1 });
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn permanent_failures_do_not_retry_or_wait() {
+    for kind in [
+        Failure::InvalidInput,
+        Failure::ClientSetup,
+        Failure::Transport,
+        Failure::UnexpectedStatus,
+        Failure::BodyTooLarge,
+    ] {
+        let started = tokio::time::Instant::now();
+        let mut attempts = 0;
+        let error = check_with_retries(|| {
+            attempts += 1;
+            async move { Err(failure(Stage::Response, kind)) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(error.kind, kind);
+        assert!(failure_message(error.code()).is_some());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_check_during_backoff_stops_further_attempts() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    let task = tokio::spawn(async move {
+        check_with_retries(|| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Err(failure(Stage::ConnectAndTls, Failure::Timeout)) }
+        })
+        .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::advance(CHECK_TIMEOUT).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn refused_proxy_connection_recovers_on_same_endpoint_without_direct_fallback() {
+    let upstream = fixture(
+        Reply::Https(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()),
+        HOST,
+    )
+    .await;
+    let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = reservation.local_addr().unwrap();
+    let endpoint = Endpoint {
+        host: address.ip(),
+        port: address.port(),
+    };
+    drop(reservation);
+    let upstream_address = SocketAddr::new(upstream.endpoint.host, upstream.endpoint.port);
+    let mut proxy = None;
+    let mut attempts = 0;
+    let client = client_builder(&endpoint)
+        .unwrap()
+        .tls_certs_only([upstream.certificate.clone()])
+        .build()
+        .unwrap();
+    let result = check_with_retries(|| {
+        attempts += 1;
+        // Start only after a real refused connection; Windows TCP retries can
+        // hide a fixed listener-start delay inside the first health attempt.
+        if attempts == 2 {
+            let listener = std::net::TcpListener::bind(address).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let listener = TcpListener::from_std(listener).unwrap();
+            proxy = Some(tokio::spawn(async move {
+                let (mut incoming, _) = listener.accept().await.unwrap();
+                let mut outgoing = tokio::net::TcpStream::connect(upstream_address)
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+            }));
+        }
+        request(client.clone(), validate(TARGET, &[204]).unwrap(), &[204])
+    })
+    .await;
+    if let Some(proxy) = proxy {
+        proxy.abort();
+    }
+    let evidence = result.unwrap();
+    assert_eq!(evidence.status, 204);
+    assert_eq!(attempts, 2);
+}
+
 #[derive(Clone)]
 enum Reply {
     Https(Vec<u8>),
@@ -379,13 +537,11 @@ async fn plain_http_unknown_certificate_and_wrong_hostname_are_rejected() {
         Failure::Transport
     );
     let untrusted = fixture(Reply::Https(Vec::new()), HOST).await;
-    assert_eq!(
-        check(&untrusted.endpoint, TARGET, &[200, 204])
-            .await
-            .unwrap_err()
-            .kind,
-        Failure::Transport
-    );
+    let error = check(&untrusted.endpoint, TARGET, &[200, 204])
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, Failure::Transport);
+    assert!(!error.retryable);
     let wrong_host = fixture(Reply::Https(Vec::new()), "different.app-proxy.invalid").await;
     assert_eq!(
         trusted(&wrong_host, &[200, 204]).await.unwrap_err().kind,
